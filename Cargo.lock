@@ -156,6 +156,7 @@ dependencies = [
  "gio",
  "glib",
  "gtk4",
+ "libc",
  "nucleo-matcher",
  "pango",
  "serde",

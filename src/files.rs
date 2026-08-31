@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -35,21 +36,31 @@ impl Cancel {
         self.flag.store(true, Ordering::SeqCst);
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            signal_kill(pid);
         }
     }
 
     fn attach(&self, pid: u32) {
         self.pid.store(pid, Ordering::SeqCst);
+        if self.flag.load(Ordering::SeqCst) {
+            signal_kill(pid);
+        }
     }
 
     fn detach(&self) {
         self.pid.store(0, Ordering::SeqCst);
+    }
+}
+
+/// SIGKILL the child and its process group. A syscall — no `kill(1)` fork.
+fn signal_kill(pid: u32) {
+    let pid = pid as i32;
+    // SAFETY: `pid` is a child we spawned. Negative pid is that child's
+    // process group (`process_group(0)` in `read_paths`). ESRCH is ignored.
+    unsafe {
+        if libc::kill(-pid, libc::SIGKILL) != 0 {
+            let _ = libc::kill(pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -907,6 +918,7 @@ fn read_paths(mut cmd: Command, root: &Path) -> Vec<PathBuf> {
     cmd.stdin(Stdio::null());
     cmd.stderr(Stdio::null());
     cmd.stdout(Stdio::piped());
+    cmd.process_group(0);
     let Ok(child) = cmd.spawn() else {
         return Vec::new();
     };
@@ -1068,6 +1080,10 @@ fn command_exists(bin: &str) -> bool {
 mod tests {
     use super::{FileQuery, parse_query, type_alias, type_alias_lenient};
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     #[test]
     fn markdown_is_a_type_query() {
@@ -1212,5 +1228,52 @@ mod tests {
             "expected markdown files from extra root, got {titles:?}"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancel_stops_an_in_flight_child() {
+        let cancel = super::Cancel::new();
+        let started = std::time::Instant::now();
+        let worker = std::thread::spawn({
+            let cancel = cancel.clone();
+            move || {
+                super::with_cancel(cancel, || {
+                    let mut cmd = Command::new("sleep");
+                    cmd.arg("30");
+                    super::read_paths(cmd, Path::new("/tmp"))
+                })
+            }
+        });
+        let deadline = started + Duration::from_secs(2);
+        while cancel.pid.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_ne!(
+            cancel.pid.load(Ordering::SeqCst),
+            0,
+            "sleep should have attached before we cancel"
+        );
+        cancel.cancel();
+        assert!(worker.join().unwrap().is_empty());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel must SIGKILL the child instead of waiting out sleep 30"
+        );
+    }
+
+    #[test]
+    fn attach_after_cancel_still_kills() {
+        let cancel = super::Cancel::new();
+        cancel.cancel();
+        let started = std::time::Instant::now();
+        super::with_cancel(cancel, || {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("30");
+            super::read_paths(cmd, Path::new("/tmp"))
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a child spawned after cancel() must be killed on attach"
+        );
     }
 }
