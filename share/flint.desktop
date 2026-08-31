@@ -1,0 +1,46 @@
+[Desktop Entry]
+Type=Application
+Name=Flint
+GenericName=Launcher
+Comment=Native command launcher for Linux (Wayland / Hyprland)
+Exec=flint --daemon
+Icon=flint
+Actions=Toggle;Windows;Clipboard;Snippets;Ask;Voice;Settings;Store;
+Terminal=false
+Categories=Utility;
+Keywords=launcher;search;apps;ai;flint;
+StartupNotify=false
+DBusActivatable=false
+StartupWMClass=dev.flint.Launcher
+
+[Desktop Action Toggle]
+Name=Toggle launcher
+Exec=flint
+
+[Desktop Action Windows]
+Name=Window switcher
+Exec=flint --windows
+
+[Desktop Action Clipboard]
+Name=Clipboard history
+Exec=flint --clipboard
+
+[Desktop Action Snippets]
+Name=Snippets
+Exec=flint --snippets
+
+[Desktop Action Ask]
+Name=Ask AI
+Exec=flint --ask
+
+[Desktop Action Voice]
+Name=Dictation
+Exec=flint --voice
+
+[Desktop Action Settings]
+Name=Settings
+Exec=flint --settings
+
+[Desktop Action Store]
+Name=Store
+Exec=flint --store

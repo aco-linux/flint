@@ -1,0 +1,30 @@
+[package]
+name = "flint"
+version = "0.1.0"
+edition = "2024"
+description = "A native command launcher for Linux (Wayland / Hyprland)"
+license = "MIT"
+repository = "https://github.com/aco-linux/flint"
+homepage = "https://github.com/aco-linux/flint"
+readme = "README.md"
+keywords = ["launcher", "wayland", "hyprland", "gtk"]
+categories = ["gui"]
+
+[dependencies]
+dirs = "6.0.0"
+evalexpr = "13.1.0"
+gdk4 = "0.11.4"
+gio = "0.22.9"
+glib = "0.22.9"
+gtk4 = { version = "0.11.4", features = ["v4_16"] }
+gtk4-layer-shell = "0.8.1"
+nucleo-matcher = "0.3.1"
+pango = "0.22.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

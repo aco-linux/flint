@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+.idea
+.vscode
+*.swp
+.DS_Store
+*.log
+.env
+auth.json
+config.json
+

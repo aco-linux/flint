@@ -1,0 +1,38 @@
+[
+  {
+    "id": "mcp-filesystem",
+    "title": "Filesystem MCP",
+    "subtitle": "Let Ask AI read files you point it at",
+    "kind": "mcp",
+    "keywords": "files disk mcp",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+  },
+  {
+    "id": "mcp-git",
+    "title": "Git MCP",
+    "subtitle": "Repo status, log, and diff for Ask AI",
+    "kind": "mcp",
+    "keywords": "git mcp",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-git"]
+  },
+  {
+    "id": "mcp-fetch",
+    "title": "Fetch MCP",
+    "subtitle": "Ask AI can pull a public URL",
+    "kind": "mcp",
+    "keywords": "http fetch web mcp",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-fetch"]
+  },
+  {
+    "id": "mcp-memory",
+    "title": "Memory MCP",
+    "subtitle": "Persistent knowledge graph for Ask AI",
+    "kind": "mcp",
+    "keywords": "memory mcp",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-memory"]
+  }
+]

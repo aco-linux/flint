@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Flint">
+  <defs>
+    <linearGradient id="night" x1="40" y1="8" x2="220" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1b1b1f"/>
+      <stop offset="1" stop-color="#0c0c0e"/>
+    </linearGradient>
+    <linearGradient id="stone" x1="86" y1="44" x2="186" y2="210" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f3e6d6"/>
+      <stop offset="0.45" stop-color="#cfc3b4"/>
+      <stop offset="1" stop-color="#8d8175"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="168" y1="38" x2="226" y2="96" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffd7b0"/>
+      <stop offset="0.4" stop-color="#ff5a1f"/>
+      <stop offset="1" stop-color="#c4320a"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#night)"/>
+  <rect x="10" y="10" width="236" height="236" rx="50" fill="none" stroke="rgba(255,210,178,0.14)" stroke-width="2"/>
+  <!-- knapped flake -->
+  <path fill="url(#stone)" d="M132 38 L186 92 L170 186 L108 214 L70 150 L84 78 Z"/>
+  <path fill="#2a2622" opacity="0.22" d="M132 38 L148 96 L108 214 L70 150 L84 78 Z"/>
+  <path fill="none" stroke="#fff6ea" stroke-opacity="0.35" stroke-width="3" stroke-linejoin="round" d="M132 38 L186 92 L170 186 L108 214 L70 150 L84 78 Z"/>
+  <path fill="none" stroke="#ff5a1f" stroke-opacity="0.55" stroke-width="2" d="M132 38 L186 92"/>
+  <!-- strike spark -->
+  <g filter="url(#glow)" transform="translate(168 40)">
+    <path fill="url(#ember)" d="M32 0 L40 24 L66 32 L40 40 L32 64 L24 40 L0 32 L24 24 Z"/>
+  </g>
+</svg>
