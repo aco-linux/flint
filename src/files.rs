@@ -550,9 +550,19 @@ fn recover_typo_paths(
         path_like: false,
         explicit: true,
     };
-    let mut candidates = fd_search(&relaxed, limit.saturating_mul(3), include_hidden, extra_roots);
+    let mut candidates = fd_search(
+        &relaxed,
+        limit.saturating_mul(3),
+        include_hidden,
+        extra_roots,
+    );
     if candidates.is_empty() {
-        candidates = find_search(&relaxed, limit.saturating_mul(3), include_hidden, extra_roots);
+        candidates = find_search(
+            &relaxed,
+            limit.saturating_mul(3),
+            include_hidden,
+            extra_roots,
+        );
     }
     candidates
         .into_iter()
@@ -585,9 +595,9 @@ fn name_is_close(term: &str, path: &Path) -> bool {
         return name.contains(&q);
     }
     crate::intent::damerau(&q, &name) <= allowed
-        || name.split(['-', '_', '.', ' ']).any(|part| {
-            !part.is_empty() && crate::intent::damerau(&q, part) <= allowed
-        })
+        || name
+            .split(['-', '_', '.', ' '])
+            .any(|part| !part.is_empty() && crate::intent::damerau(&q, part) <= allowed)
 }
 
 fn discover_recent(
@@ -1010,9 +1020,18 @@ mod tests {
         assert!(type_alias("javascript").is_some());
         assert!(type_alias("rs").is_some());
         assert!(type_alias("firefox").is_none());
-        assert_eq!(type_alias_lenient("markdwon").map(|(label, _)| label), Some("markdown"));
-        assert_eq!(type_alias_lenient("documnet").map(|(label, _)| label), Some("document"));
-        assert_eq!(type_alias_lenient("pyton").map(|(label, _)| label), Some("python"));
+        assert_eq!(
+            type_alias_lenient("markdwon").map(|(label, _)| label),
+            Some("markdown")
+        );
+        assert_eq!(
+            type_alias_lenient("documnet").map(|(label, _)| label),
+            Some("document")
+        );
+        assert_eq!(
+            type_alias_lenient("pyton").map(|(label, _)| label),
+            Some("python")
+        );
         assert!(type_alias_lenient("firefox").is_none());
         assert!(parse_query("markdwon").is_type_search());
     }
@@ -1030,9 +1049,12 @@ mod tests {
             path_like: false,
             explicit: true,
         };
-        let found = super::recover_typo_paths(&query, 20, false, &[root.to_string_lossy().into_owned()]);
+        let found =
+            super::recover_typo_paths(&query, 20, false, &[root.to_string_lossy().into_owned()]);
         assert!(
-            found.iter().any(|path| path.file_name().and_then(|n| n.to_str()) == Some("readme.md")),
+            found
+                .iter()
+                .any(|path| path.file_name().and_then(|n| n.to_str()) == Some("readme.md")),
             "expected readme.md from readne, got {found:?}"
         );
         let _ = fs::remove_dir_all(&root);
