@@ -57,7 +57,7 @@ Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to cre
 Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
 - Type `we` and Flint already means weather: it geolocates you and fills in the current conditions.
-- Apps, calc, and commands paint on the same keystroke. File hits, windows, and weather fill in a moment later — the list does not wait on `fd` or `hyprctl`.
+- Apps, calc, commands, and windows paint on the same keystroke. Windows come from the Hyprland event socket, not a poll. Nothing else is scheduled unless you actually asked for a file or live weather.
 - Ranking cares when you last used something, not just how many times. An app from yesterday beats one you hammered two years ago. Typing the start of a name is no longer 200× heavier than a habit.
 - Swapped letters count (`weahter` → weather). Missing letters still do (`wthr` → weather).
 - A result can *show* something: live weather, a photo thumb, a document snippet. That is not the same as an icon, a title, and Enter.

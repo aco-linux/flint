@@ -1,5 +1,7 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Take};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use crate::item::{Action, Item, Kind};
 
@@ -134,17 +136,76 @@ pub fn snippet(path: &Path, chars: usize) -> String {
     read_head(path, 8 * 1024).chars().take(chars).collect()
 }
 
-fn read_head(path: &Path, bytes: usize) -> String {
-    let Ok(data) = fs::read(path) else {
+pub fn mtime_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Pixel buffer that can cross threads. GdkPixbuf itself is not `Send`.
+#[derive(Clone)]
+pub struct DecodedImage {
+    pub path: PathBuf,
+    width: i32,
+    height: i32,
+    stride: i32,
+    has_alpha: bool,
+    pixels: Vec<u8>,
+}
+
+impl DecodedImage {
+    pub fn to_pixbuf(&self) -> gdk_pixbuf::Pixbuf {
+        gdk_pixbuf::Pixbuf::from_bytes(
+            &gtk4::glib::Bytes::from(&self.pixels),
+            gdk_pixbuf::Colorspace::Rgb,
+            self.has_alpha,
+            8,
+            self.width,
+            self.height,
+            self.stride,
+        )
+    }
+}
+
+pub fn decode_image(path: &Path) -> Option<DecodedImage> {
+    if file_too_heavy(path) {
+        return None;
+    }
+    let pixbuf = gdk_pixbuf::Pixbuf::from_file(path).ok()?;
+    let height = pixbuf.height();
+    let stride = pixbuf.rowstride();
+    let n = (stride as usize).saturating_mul(height.max(0) as usize);
+    let bytes = pixbuf.read_pixel_bytes();
+    let pixels = bytes.as_ref().get(..n)?.to_vec();
+    Some(DecodedImage {
+        path: path.to_path_buf(),
+        width: pixbuf.width(),
+        height,
+        stride,
+        has_alpha: pixbuf.has_alpha(),
+        pixels,
+    })
+}
+
+/// Read at most `bytes` from the start of the file. Never load the rest.
+pub fn read_head(path: &Path, bytes: usize) -> String {
+    let Ok(file) = File::open(path) else {
         return path.display().to_string();
     };
-    let slice = if data.len() > bytes {
-        &data[..bytes]
-    } else {
-        &data
+    let mut limited: Take<File> = file.take(bytes as u64);
+    let mut buf = vec![0u8; bytes];
+    let Ok(n) = limited.read(&mut buf) else {
+        return path.display().to_string();
     };
-    let mut text = String::from_utf8_lossy(slice).into_owned();
-    if data.len() > bytes {
+    buf.truncate(n);
+    if buf.contains(&0) {
+        return format!("{} · binary", path.display());
+    }
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if n == bytes {
         text.push_str("\n…");
     }
     if text.trim().is_empty() {
@@ -172,5 +233,31 @@ mod tests {
         assert_eq!(classify(Path::new("shot.PNG")), MediaKind::Image);
         assert_eq!(classify(Path::new("notes.md")), MediaKind::Text);
         assert_eq!(classify(Path::new("brief.pdf")), MediaKind::Document);
+    }
+
+    #[test]
+    fn read_head_does_not_load_the_rest_of_the_file() {
+        use super::read_head;
+        use std::io::Write;
+
+        let path = std::env::temp_dir().join(format!("flint-head-{}", std::process::id()));
+        let mut data = vec![b'a'; 64];
+        data.extend_from_slice(b"HEADMARK");
+        data.extend(std::iter::repeat_n(b'z', 256 * 1024));
+        data.extend_from_slice(b"TAILMARK");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&data).unwrap();
+        drop(file);
+        let head = read_head(&path, 72);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            head.contains("HEADMARK"),
+            "expected the start, got {head:?}"
+        );
+        assert!(
+            !head.contains("TAILMARK"),
+            "must not read the tail of a large file"
+        );
+        assert!(head.contains('…'));
     }
 }
