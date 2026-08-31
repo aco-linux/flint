@@ -31,6 +31,7 @@ const INTENTS: &[(&str, IntentKind, usize)] = &[
     ("now", IntentKind::Time, 3),
 ];
 
+/// Built-in concept words only. App and file names come from the live catalog.
 const LEXICON: &[&str] = &[
     "weather",
     "forecast",
@@ -39,14 +40,6 @@ const LEXICON: &[&str] = &[
     "settings",
     "snippets",
     "windows",
-    "firefox",
-    "chrome",
-    "terminal",
-    "markdown",
-    "document",
-    "documents",
-    "downloads",
-    "pictures",
     "screenshot",
     "calendar",
     "calculator",
@@ -121,19 +114,40 @@ fn match_word(query: &str, word: &str, min_len: usize) -> Option<u32> {
     None
 }
 
+pub fn allowed_distance(query_len: usize) -> u32 {
+    if query_len >= 6 {
+        2
+    } else if query_len >= 4 {
+        1
+    } else {
+        0
+    }
+}
+
 pub fn suggest(query: &str, extra_lexicon: &[&str]) -> Option<String> {
+    closest(
+        query,
+        LEXICON.iter().copied().chain(extra_lexicon.iter().copied()),
+    )
+    .map(|(word, _)| word)
+}
+
+pub fn closest<'a, I>(query: &str, words: I) -> Option<(String, u32)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let q = query.trim().to_ascii_lowercase();
-    if q.chars().count() < 4 {
+    let allowed = allowed_distance(q.chars().count());
+    if allowed == 0 {
         return None;
     }
     let mut best: Option<(u32, String)> = None;
-    for word in LEXICON.iter().copied().chain(extra_lexicon.iter().copied()) {
+    for word in words {
         let word = word.trim().to_ascii_lowercase();
         if word.len() < 4 {
             continue;
         }
         let d = damerau(&q, &word);
-        let allowed = if q.len() >= 6 { 2 } else { 1 };
         if d == 0 || d > allowed {
             continue;
         }
@@ -142,7 +156,7 @@ pub fn suggest(query: &str, extra_lexicon: &[&str]) -> Option<String> {
             best = Some((rank, word));
         }
     }
-    best.map(|(_, word)| word)
+    best.map(|(rank, word)| (word, rank))
 }
 
 pub fn title_typo_score(query: &str, title: &str) -> Option<u32> {
@@ -153,12 +167,14 @@ pub fn title_typo_score(query: &str, title: &str) -> Option<u32> {
     }
     let first = title.split_whitespace().next().unwrap_or(&title);
     let distance = damerau(&q, first).min(damerau(&q, &title));
+    let allowed = allowed_distance(q.len());
+    if distance == 0 || distance > allowed {
+        return None;
+    }
     if distance == 1 {
         Some(1_800)
-    } else if distance == 2 && q.len() >= 6 {
-        Some(700)
     } else {
-        None
+        Some(700)
     }
 }
 
@@ -201,7 +217,7 @@ pub fn damerau(a: &str, b: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{IntentKind, damerau, resolve, suggest, title_typo_score};
+    use super::{IntentKind, LEXICON, damerau, resolve, suggest, title_typo_score};
 
     #[test]
     fn we_means_weather() {
@@ -226,6 +242,14 @@ mod tests {
         );
         assert_eq!(suggest("wether", &[]).as_deref(), Some("weather"));
         assert_eq!(suggest("firefx", &["firefox"]).as_deref(), Some("firefox"));
+        assert!(
+            suggest("firefx", &[]).is_none(),
+            "firefox is not a special case — correction needs the live catalog"
+        );
+        assert!(
+            !LEXICON.contains(&"firefox"),
+            "app names must come from the live catalog, not a hardcoded list"
+        );
     }
 
     #[test]

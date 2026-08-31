@@ -7,7 +7,8 @@
 - Root search mixes apps with many more file hits; `plocate`/`locate` covers folders outside `$HOME`
 - Instant answers: unit conversion, hex colors, PATH commands, and well-known folders
 - Page Up/Down jumps the list; the status line shows how many files matched
-- Intent engine: `we` is weather, misspellings still resolve, live conditions come from wttr.in
+- Intent engine: `we` is weather; live conditions come from wttr.in
+- Typo tolerance is general: Damerau–Levenshtein against app titles, file type words, filenames, notes, and settings — not a hardcoded example list
 - Results update as you type; file search and weather fill in without freezing the UI
 - In-launcher previews for images, text, folders, and playable media; Enter plays or opens to edit
 

@@ -97,7 +97,8 @@ impl Catalog {
             });
         }
 
-        let lexicon: Vec<&str> = self.apps.iter().map(|app| app.title.as_str()).collect();
+        let lexicon_owned = self.lexicon();
+        let lexicon: Vec<&str> = lexicon_owned.iter().map(String::as_str).collect();
         let meaning = intent::resolve_with(query, &lexicon);
         for hit in &meaning.intents {
             match hit.kind {
@@ -712,6 +713,28 @@ impl Catalog {
         out.truncate(16);
         out
     }
+
+    fn lexicon(&self) -> Vec<String> {
+        let mut words = files::type_words();
+        for item in self
+            .apps
+            .iter()
+            .chain(self.commands.iter())
+            .chain(self.extensions.iter())
+        {
+            words.push(item.title.clone());
+            for part in item
+                .title
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .chain(item.keywords.split_whitespace())
+            {
+                if part.len() >= 4 {
+                    words.push(part.to_string());
+                }
+            }
+        }
+        words
+    }
 }
 
 pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
@@ -949,6 +972,8 @@ fn score_pool(
             .take(limit)
             .collect();
     }
+    let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
+    let meaning = intent::resolve_with(query, &titles);
     let mut matcher = Matcher::new(Config::DEFAULT);
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut results = Vec::new();
@@ -958,6 +983,19 @@ fn score_pool(
                 item: item.clone(),
                 score,
             });
+        } else {
+            for expansion in &meaning.expansions {
+                let expanded = Pattern::parse(expansion, CaseMatching::Smart, Normalization::Smart);
+                if let Some(score) =
+                    rank(&mut matcher, &expanded, expansion, item, usage_map, false)
+                {
+                    results.push(Scored {
+                        item: item.clone(),
+                        score: score.saturating_sub(600),
+                    });
+                    break;
+                }
+            }
         }
     }
     finish_limited(results, limit)

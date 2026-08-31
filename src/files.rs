@@ -59,11 +59,7 @@ impl FileQuery {
 /// Map everyday words and extensions to the files people actually mean.
 /// Raycast/Spotlight do this via UTIs; we do it with an explicit alias table.
 pub fn type_alias(word: &str) -> Option<(&'static str, &'static [&'static str])> {
-    let key = word
-        .trim()
-        .trim_start_matches('*')
-        .trim_start_matches('.')
-        .to_ascii_lowercase();
+    let key = normalize_type_word(word);
     if key.is_empty() {
         return None;
     }
@@ -73,6 +69,35 @@ pub fn type_alias(word: &str) -> Option<(&'static str, &'static [&'static str])>
         }
     }
     None
+}
+
+/// Same as `type_alias`, but a close misspelling of any type word still counts.
+pub fn type_alias_lenient(word: &str) -> Option<(&'static str, &'static [&'static str])> {
+    if let Some(hit) = type_alias(word) {
+        return Some(hit);
+    }
+    let key = normalize_type_word(word);
+    let candidates = type_words();
+    let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    let (guess, _) = crate::intent::closest(&key, refs)?;
+    type_alias(&guess)
+}
+
+pub fn type_words() -> Vec<String> {
+    let mut words = Vec::new();
+    for (label, aliases, exts) in TYPE_ALIASES {
+        words.push((*label).to_string());
+        words.extend(aliases.iter().map(|word| (*word).to_string()));
+        words.extend(exts.iter().map(|word| (*word).to_string()));
+    }
+    words
+}
+
+fn normalize_type_word(word: &str) -> String {
+    word.trim()
+        .trim_start_matches('*')
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
 }
 
 const TYPE_ALIASES: &[(&str, &[&str], &[&str])] = &[
@@ -202,7 +227,7 @@ pub fn parse_query(raw: &str) -> FileQuery {
     }
 
     if tokens.len() == 1 {
-        if let Some((label, exts)) = type_alias(tokens[0]) {
+        if let Some((label, exts)) = type_alias_lenient(tokens[0]) {
             return FileQuery {
                 term: String::new(),
                 extensions: owned_exts(exts),
@@ -223,7 +248,7 @@ pub fn parse_query(raw: &str) -> FileQuery {
         }
     }
 
-    if let Some((label, exts)) = type_alias(tokens[0]) {
+    if let Some((label, exts)) = type_alias_lenient(tokens[0]) {
         return FileQuery {
             term: tokens[1..].join(" "),
             extensions: owned_exts(exts),
@@ -233,7 +258,7 @@ pub fn parse_query(raw: &str) -> FileQuery {
         };
     }
     if tokens.len() > 1
-        && let Some((label, exts)) = type_alias(tokens[tokens.len() - 1])
+        && let Some((label, exts)) = type_alias_lenient(tokens[tokens.len() - 1])
     {
         return FileQuery {
             term: tokens[..tokens.len() - 1].join(" "),
@@ -265,7 +290,7 @@ fn parse_filter(body: &str) -> Option<FileQuery> {
                 .split_once(char::is_whitespace)
                 .map(|(a, b)| (a, b.trim().to_string()))
                 .unwrap_or((rest, String::new()));
-            if let Some((label, exts)) = type_alias(filter) {
+            if let Some((label, exts)) = type_alias_lenient(filter) {
                 return Some(FileQuery {
                     term,
                     extensions: owned_exts(exts),
@@ -498,8 +523,71 @@ fn discover(
             find_search(query, limit, include_hidden, extra_roots),
         );
     }
+    if paths.is_empty() {
+        push_unique(
+            &mut paths,
+            &mut seen,
+            recover_typo_paths(query, limit, include_hidden, extra_roots),
+        );
+    }
     paths.truncate(limit);
     paths
+}
+
+fn recover_typo_paths(
+    query: &FileQuery,
+    limit: usize,
+    include_hidden: bool,
+    extra_roots: &[String],
+) -> Vec<PathBuf> {
+    let Some(stem) = relaxed_stem(&query.term) else {
+        return Vec::new();
+    };
+    let relaxed = FileQuery {
+        term: stem,
+        extensions: query.extensions.clone(),
+        type_label: query.type_label.clone(),
+        path_like: false,
+        explicit: true,
+    };
+    let mut candidates = fd_search(&relaxed, limit.saturating_mul(3), include_hidden, extra_roots);
+    if candidates.is_empty() {
+        candidates = find_search(&relaxed, limit.saturating_mul(3), include_hidden, extra_roots);
+    }
+    candidates
+        .into_iter()
+        .filter(|path| name_is_close(&query.term, path))
+        .take(limit)
+        .collect()
+}
+
+fn relaxed_stem(term: &str) -> Option<String> {
+    let chars: Vec<char> = term.chars().collect();
+    if chars.len() < 4 {
+        return None;
+    }
+    let keep = if chars.len() >= 6 { 4 } else { 3 };
+    Some(chars[..keep].iter().collect())
+}
+
+fn name_is_close(term: &str, path: &Path) -> bool {
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    let q = term.to_ascii_lowercase();
+    let allowed = crate::intent::allowed_distance(q.chars().count());
+    if allowed == 0 {
+        return name.contains(&q);
+    }
+    crate::intent::damerau(&q, &name) <= allowed
+        || name.split(['-', '_', '.', ' ']).any(|part| {
+            !part.is_empty() && crate::intent::damerau(&q, part) <= allowed
+        })
 }
 
 fn discover_recent(
@@ -868,7 +956,7 @@ fn command_exists(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileQuery, parse_query, type_alias};
+    use super::{FileQuery, parse_query, type_alias, type_alias_lenient};
     use std::fs;
 
     #[test]
@@ -922,6 +1010,32 @@ mod tests {
         assert!(type_alias("javascript").is_some());
         assert!(type_alias("rs").is_some());
         assert!(type_alias("firefox").is_none());
+        assert_eq!(type_alias_lenient("markdwon").map(|(label, _)| label), Some("markdown"));
+        assert_eq!(type_alias_lenient("documnet").map(|(label, _)| label), Some("document"));
+        assert_eq!(type_alias_lenient("pyton").map(|(label, _)| label), Some("python"));
+        assert!(type_alias_lenient("firefox").is_none());
+        assert!(parse_query("markdwon").is_type_search());
+    }
+
+    #[test]
+    fn typo_in_filename_still_finds_the_file() {
+        let root = std::env::temp_dir().join(format!("flint-typo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("readme.md"), "hi").unwrap();
+        let query = FileQuery {
+            term: "readne".into(),
+            extensions: Vec::new(),
+            type_label: None,
+            path_like: false,
+            explicit: true,
+        };
+        let found = super::recover_typo_paths(&query, 20, false, &[root.to_string_lossy().into_owned()]);
+        assert!(
+            found.iter().any(|path| path.file_name().and_then(|n| n.to_str()) == Some("readme.md")),
+            "expected readme.md from readne, got {found:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
