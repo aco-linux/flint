@@ -57,9 +57,12 @@ Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to cre
 Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
 - Type `we` and Flint already means weather: it geolocates you and fills in the current conditions.
+- Apps, calc, and commands paint on the same keystroke. File hits, windows, and weather fill in a moment later — the list does not wait on `fd` or `hyprctl`.
+- Ranking cares when you last used something, not just how many times. An app from yesterday beats one you hammered two years ago. Typing the start of a name is no longer 200× heavier than a habit.
+- Swapped letters count (`weahter` → weather). Missing letters still do (`wthr` → weather).
+- A result can *show* something: live weather, a photo thumb, a document snippet. That is not the same as an icon, a title, and Enter.
 - Misspellings are handled across apps, files, types, notes, and settings — not a fixed example list. `markdwon` still finds markdown, `readne` still finds `readme.md`, `firfox` still ranks Firefox if that app is installed.
-- Each keystroke updates instantly; file hits and live weather stream in without blocking the list.
-- Selecting a result shows a preview in Flint: images, the start of a document, a folder listing, or a play prompt for audio/video. Enter plays media or opens the file in your editor.
+- Selecting a result also fills the side preview: images, the start of a document, a folder listing, or a play prompt for audio/video. Enter plays media or opens the file in your editor.
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
 - Calculator, unit conversion (`10 km to mi`, `32f`), hex colors (`#ff5a1f`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.

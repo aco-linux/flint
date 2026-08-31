@@ -130,6 +130,10 @@ fn list_dir_preview(path: &Path) -> String {
     body
 }
 
+pub fn snippet(path: &Path, chars: usize) -> String {
+    read_head(path, 8 * 1024).chars().take(chars).collect()
+}
+
 fn read_head(path: &Path, bytes: usize) -> String {
     let Ok(data) = fs::read(path) else {
         return path.display().to_string();

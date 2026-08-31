@@ -128,6 +128,29 @@ entry.search placeholder {
   background: rgba(255, 90, 31, 0.12);
 }
 
+.row.live-row {
+  min-height: 64px;
+  padding: 10px 10px;
+}
+
+.live-thumb {
+  min-width: 48px;
+  min-height: 48px;
+  border-radius: 6px;
+}
+
+.live-snippet {
+  color: #9a928a;
+  font-family: "IBM Plex Mono", Inter, monospace;
+  font-size: 11.5px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.row.selected .live-snippet {
+  color: #c4b7aa;
+}
+
 .accent {
   min-width: 3px;
   min-height: 28px;

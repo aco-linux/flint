@@ -75,7 +75,8 @@ pub fn resolve_with(query: &str, extra_lexicon: &[&str]) -> Meaning {
     meaning.intents.dedup_by(|a, b| a.kind == b.kind);
 
     if meaning.corrected.is_none() && q.chars().count() >= 4 {
-        meaning.corrected = suggest(&q, extra_lexicon);
+        meaning.corrected =
+            swap_in_lexicon(&q, extra_lexicon).or_else(|| suggest(&q, extra_lexicon));
     }
     if let Some(corrected) = meaning.corrected.clone()
         && corrected != q
@@ -112,6 +113,39 @@ fn match_word(query: &str, word: &str, min_len: usize) -> Option<u32> {
         return Some(4_500);
     }
     None
+}
+
+/// One adjacent transposition of `query` that is already a known word.
+/// `weahter` → `weather` without walking Damerau against the whole catalog.
+pub fn swap_in_lexicon(query: &str, extra_lexicon: &[&str]) -> Option<String> {
+    let q = query.trim().to_ascii_lowercase();
+    adjacent_swaps(&q).into_iter().find(|swapped| {
+        LEXICON.iter().any(|word| *word == swapped)
+            || extra_lexicon
+                .iter()
+                .any(|word| word.eq_ignore_ascii_case(swapped))
+    })
+}
+
+pub fn adjacent_swaps(query: &str) -> Vec<String> {
+    let mut chars: Vec<char> = query.chars().collect();
+    if chars.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(chars.len() - 1);
+    for i in 0..chars.len() - 1 {
+        chars.swap(i, i + 1);
+        out.push(chars.iter().collect());
+        chars.swap(i, i + 1);
+    }
+    out
+}
+
+pub fn is_adjacent_swap(a: &str, b: &str) -> bool {
+    if a.len() != b.len() || a == b {
+        return false;
+    }
+    adjacent_swaps(a).iter().any(|swapped| swapped == b)
 }
 
 pub fn allowed_distance(query_len: usize) -> u32 {
@@ -240,6 +274,18 @@ mod tests {
                 .iter()
                 .any(|hit| hit.kind == IntentKind::Weather)
         );
+        let swapped = resolve("weahter");
+        assert!(
+            swapped
+                .intents
+                .iter()
+                .any(|hit| hit.kind == IntentKind::Weather),
+            "swapped letters must still mean weather, got {swapped:?}"
+        );
+        assert_eq!(
+            super::swap_in_lexicon("weahter", &[]).as_deref(),
+            Some("weather")
+        );
         assert_eq!(suggest("wether", &[]).as_deref(), Some("weather"));
         assert_eq!(suggest("firefx", &["firefox"]).as_deref(), Some("firefox"));
         assert!(
@@ -263,8 +309,11 @@ mod tests {
     fn damerau_counts_transpositions() {
         assert_eq!(damerau("we", "we"), 0);
         assert_eq!(damerau("waether", "weather"), 1);
+        assert_eq!(damerau("weahter", "weather"), 1);
         assert_eq!(damerau("abc", "abc"), 0);
         assert!(damerau("firefox", "chrome") > 2);
+        assert!(super::is_adjacent_swap("weahter", "weather"));
+        assert!(!super::is_adjacent_swap("wthr", "weather"));
     }
 
     #[test]

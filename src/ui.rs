@@ -16,7 +16,7 @@ use crate::ai;
 use crate::auth;
 use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
-use crate::item::{Action, Icon, Item, Kind};
+use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
@@ -346,7 +346,7 @@ impl Shell {
 
     fn refresh(&self) {
         let query = self.entry.text().to_string();
-        let (generation, include_in_root) = {
+        let (generation, include_in_root, windows_stale) = {
             let mut st = self.state.borrow_mut();
             if st.editing_note.is_some() {
                 return;
@@ -357,17 +357,24 @@ impl Shell {
             st.results = results;
             st.selected = 0;
             let include_in_root = st.catalog.settings.borrow().files.include_in_root;
-            (st.search_gen, include_in_root)
+            let windows_stale = st.catalog.windows_stale();
+            (st.search_gen, include_in_root, windows_stale)
         };
         self.sync_chrome();
         rebuild_rows(self);
         self.update_preview();
-        self.schedule_live(generation, query, include_in_root);
+        self.schedule_live(generation, query, include_in_root, windows_stale);
     }
 
-    fn schedule_live(&self, generation: u64, query: String, include_in_root: bool) {
+    fn schedule_live(
+        &self,
+        generation: u64,
+        query: String,
+        include_in_root: bool,
+        windows_stale: bool,
+    ) {
         let mode = self.state.borrow().mode;
-        if !catalog::live_needed(&query, mode, include_in_root) {
+        if !catalog::live_needed(&query, mode, include_in_root, windows_stale) {
             return;
         }
         let settings = self.state.borrow().catalog.settings.borrow().clone();
@@ -411,6 +418,13 @@ impl Shell {
                 .get(st.selected)
                 .map(|row| row.item.id.clone())
                 .unwrap_or_default();
+            if let Some(windows) = live.windows {
+                st.catalog.adopt_windows(windows);
+                let query = self.entry.text().to_string();
+                let scored = st.catalog.score_windows(&query);
+                st.results.retain(|row| !row.item.id.starts_with("win:"));
+                st.results.extend(scored);
+            }
             if let Some(weather) = live.weather {
                 st.results.retain(|row| row.item.id != "live:weather");
                 st.results.insert(0, weather);
@@ -789,10 +803,7 @@ impl Shell {
         };
         {
             let mut st = self.state.borrow_mut();
-            st.results = vec![Scored {
-                item,
-                score: 100_000,
-            }];
+            st.results = vec![Scored::new(item, 100_000)];
             st.selected = 0;
             st.mode = Mode::Ask;
         }
@@ -1034,9 +1045,13 @@ fn rebuild_rows(shell: &Shell) {
             return;
         }
         let selected = st.selected;
-        let items: Vec<Item> = st.results.iter().map(|s| s.item.clone()).collect();
-        for (idx, item) in items.into_iter().enumerate() {
-            let row = result_row(&item, idx == selected);
+        let rows: Vec<(Item, Live)> = st
+            .results
+            .iter()
+            .map(|s| (s.item.clone(), s.live.clone()))
+            .collect();
+        for (idx, (item, live)) in rows.into_iter().enumerate() {
+            let row = result_row(&item, &live, idx == selected);
             host.append(&row);
             st.rows.push(row);
         }
@@ -1114,11 +1129,14 @@ fn paint_selection(state: &State) {
     }
 }
 
-fn result_row(item: &Item, selected: bool) -> Box {
+fn result_row(item: &Item, live: &Live, selected: bool) -> Box {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("row");
     if selected {
         row.add_css_class("selected");
+    }
+    if !live.is_none() {
+        row.add_css_class("live-row");
     }
     row.set_hexpand(true);
 
@@ -1127,12 +1145,23 @@ fn result_row(item: &Item, selected: bool) -> Box {
     accent.set_valign(Align::Center);
     row.append(&accent);
 
-    let icon = match &item.icon {
-        Icon::Name(name) => Image::from_icon_name(name),
-        Icon::Path(path) => Image::from_file(path),
-        Icon::None => Image::from_icon_name(kind_icon(item.kind)),
+    let icon = match live {
+        Live::Image { path } => {
+            let image = Image::from_file(path);
+            image.add_css_class("live-thumb");
+            image
+        }
+        _ => match &item.icon {
+            Icon::Name(name) => Image::from_icon_name(name),
+            Icon::Path(path) => Image::from_file(path),
+            Icon::None => Image::from_icon_name(kind_icon(item.kind)),
+        },
     };
-    icon.set_pixel_size(28);
+    icon.set_pixel_size(if matches!(live, Live::Image { .. }) {
+        48
+    } else {
+        28
+    });
     icon.set_valign(Align::Center);
     icon.add_css_class("icon-wrap");
     row.append(&icon);
@@ -1141,22 +1170,62 @@ fn result_row(item: &Item, selected: bool) -> Box {
     text.set_hexpand(true);
     text.set_valign(Align::Center);
 
-    let title = Label::new(Some(&item.title));
+    let title_text = match live {
+        Live::Weather { summary, .. } if !summary.is_empty() => summary.as_str(),
+        _ => item.title.as_str(),
+    };
+    let title = Label::new(Some(title_text));
     title.set_xalign(0.0);
     title.set_ellipsize(pango::EllipsizeMode::End);
-    title.add_css_class(if item.kind == Kind::Calc {
-        "calc-title"
-    } else {
-        "title"
-    });
+    title.add_css_class(
+        if item.kind == Kind::Calc || matches!(live, Live::Weather { .. }) {
+            "calc-title"
+        } else {
+            "title"
+        },
+    );
     text.append(&title);
 
-    if !item.subtitle.is_empty() {
-        let sub = Label::new(Some(&item.subtitle));
+    let subtitle_text = match live {
+        Live::Weather {
+            location, extra, ..
+        } => {
+            if extra.is_empty() {
+                location.clone()
+            } else if location.is_empty() {
+                extra.clone()
+            } else {
+                format!("{location} · {extra}")
+            }
+        }
+        _ => item.subtitle.clone(),
+    };
+    if !subtitle_text.is_empty() {
+        let sub = Label::new(Some(&subtitle_text));
         sub.set_xalign(0.0);
         sub.set_ellipsize(pango::EllipsizeMode::End);
         sub.add_css_class("subtitle");
         text.append(&sub);
+    }
+
+    match live {
+        Live::Snippet { text: body } if !body.is_empty() => {
+            let snippet = Label::new(Some(body));
+            snippet.set_xalign(0.0);
+            snippet.set_wrap(true);
+            snippet.set_lines(3);
+            snippet.set_ellipsize(pango::EllipsizeMode::End);
+            snippet.add_css_class("live-snippet");
+            text.append(&snippet);
+        }
+        Live::Media { hint } => {
+            let hint_l = Label::new(Some(hint));
+            hint_l.set_xalign(0.0);
+            hint_l.set_ellipsize(pango::EllipsizeMode::End);
+            hint_l.add_css_class("live-snippet");
+            text.append(&hint_l);
+        }
+        Live::None | Live::Weather { .. } | Live::Image { .. } | Live::Snippet { .. } => {}
     }
     row.append(&text);
 

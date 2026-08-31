@@ -9,8 +9,11 @@
 - Page Up/Down jumps the list; the status line shows how many files matched
 - Intent engine: `we` is weather; live conditions come from wttr.in
 - Typo tolerance is general: Damerau–Levenshtein against app titles, file type words, filenames, notes, and settings — not a hardcoded example list
-- Results update as you type; file search and weather fill in without freezing the UI
-- In-launcher previews for images, text, folders, and playable media; Enter plays or opens to edit
+- Swapped letters match (`weahter` → weather); the old matcher only rewarded missing letters
+- Fast path no longer shells out to `fd` or `hyprctl` per keystroke; windows and files arrive after the first paint
+- Usage ranking includes recency; a prefix bonus is no longer ~200× one use
+- Results have a live slot: weather, image thumbs, and document snippets render in the row
+- In-launcher side preview for images, text, folders, and playable media; Enter plays or opens to edit
 
 ## 0.2.0 — release hardening
 
