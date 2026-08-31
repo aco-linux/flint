@@ -2,7 +2,7 @@
 
 A native GTK4 command launcher for Linux (Wayland / Hyprland). Alt+Space.
 
-Flint 0.2 is a public, local-first release. It includes the launcher and productivity features listed below; it does not claim compatibility with Raycast's proprietary store or extension runtime.
+Flint 0.3 is a public, local-first release. It includes the launcher and productivity features listed below; it does not claim compatibility with Raycast's proprietary store or extension runtime.
 
 ![Flint](share/flint.png)
 

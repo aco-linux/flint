@@ -962,14 +962,19 @@ impl Shell {
                 );
             }
             voice::State::Transcribing => self.set_status("Still transcribing…"),
-            voice::State::Idle => match self.state.borrow().voice.start(&settings) {
-                Ok(()) => {
-                    self.set_status("Listening… Enter fills the search box");
-                    self.window.present();
-                    self.entry.grab_focus();
+            voice::State::Idle => {
+                // Bind first: a `match self.state.borrow()...` keeps that Ref
+                // alive through the arms, and set_status() borrow_mut() panics.
+                let started = self.state.borrow().voice.start(&settings);
+                match started {
+                    Ok(()) => {
+                        self.set_status("Listening… Enter fills the search box");
+                        self.window.present();
+                        self.entry.grab_focus();
+                    }
+                    Err(err) => self.set_status(err),
                 }
-                Err(err) => self.set_status(err),
-            },
+            }
         }
     }
 
