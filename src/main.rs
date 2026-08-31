@@ -5,6 +5,7 @@ mod catalog;
 mod clipboard;
 mod config;
 mod desktop;
+mod files;
 mod hypr;
 mod item;
 mod mcp;
@@ -13,6 +14,7 @@ mod models;
 mod notes;
 mod paths;
 mod scripts;
+mod smart;
 mod snippets;
 mod store;
 mod ui;
@@ -92,6 +94,8 @@ fn register_cli(app: &Application) {
     const FLAGS: &[(&str, &str)] = &[
         ("windows", "Open the window switcher"),
         ("win", "Open the window switcher"),
+        ("files", "Open Search Files"),
+        ("file", "Open Search Files"),
         ("clipboard", "Open clipboard history"),
         ("clip", "Open clipboard history"),
         ("snippets", "Open snippets"),
@@ -130,6 +134,9 @@ fn parse_command_line(cmdline: &gio::ApplicationCommandLine) -> Cmd {
     }
     if dict.contains("windows") || dict.contains("win") {
         return Cmd::Mode(Mode::Windows);
+    }
+    if dict.contains("files") || dict.contains("file") {
+        return Cmd::Mode(Mode::Files);
     }
     if dict.contains("clipboard") || dict.contains("clip") {
         return Cmd::Mode(Mode::Clipboard);
@@ -171,6 +178,9 @@ fn parse_args(args: &[OsString]) -> Cmd {
     }
     if flags.iter().any(|a| a == "--windows" || a == "--win") {
         return Cmd::Mode(Mode::Windows);
+    }
+    if flags.iter().any(|a| a == "--files" || a == "--file") {
+        return Cmd::Mode(Mode::Files);
     }
     if flags.iter().any(|a| a == "--clipboard" || a == "--clip") {
         return Cmd::Mode(Mode::Clipboard);
@@ -219,6 +229,7 @@ mod tests {
         assert_eq!(mode(&["--windows"]), Mode::Windows);
         assert_eq!(mode(&["flint", "--windows"]), Mode::Windows);
         assert_eq!(mode(&["--win"]), Mode::Windows);
+        assert_eq!(mode(&["--files"]), Mode::Files);
     }
 
     #[test]

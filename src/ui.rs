@@ -34,6 +34,7 @@ pub struct Shell {
     empty_title: Label,
     empty_sub: Label,
     results_host: Box,
+    results_scroll: ScrolledWindow,
     empty: Box,
     status: Label,
     detail: ScrolledWindow,
@@ -58,7 +59,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         .application(app)
         .title("Flint")
         .default_width(820)
-        .default_height(640)
+        .default_height(720)
         .decorated(true)
         .resizable(true)
         .icon_name("flint")
@@ -143,10 +144,12 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     let scroll = ScrolledWindow::builder()
         .min_content_height(72)
-        .max_content_height(420)
-        .propagate_natural_height(true)
+        .vexpand(true)
+        .hexpand(true)
         .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
         .child(&results_host)
+        .css_classes(["results-scroll"])
         .build();
     panel.append(&scroll);
 
@@ -180,6 +183,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         empty_title: empty_title.clone(),
         empty_sub: empty_sub.clone(),
         results_host: results_host.clone(),
+        results_scroll: scroll.clone(),
         empty: empty.clone(),
         status: status.clone(),
         detail: detail.clone(),
@@ -254,6 +258,7 @@ impl Clone for Shell {
             empty_title: self.empty_title.clone(),
             empty_sub: self.empty_sub.clone(),
             results_host: self.results_host.clone(),
+            results_scroll: self.results_scroll.clone(),
             empty: self.empty.clone(),
             status: self.status.clone(),
             detail: self.detail.clone(),
@@ -318,7 +323,12 @@ impl Shell {
             self.badge.set_visible(false);
         }
         if st.status.is_empty() {
-            self.status.set_visible(false);
+            if let Some(hint) = result_hint(&st) {
+                self.status.set_text(&hint);
+                self.status.set_visible(true);
+            } else {
+                self.status.set_visible(false);
+            }
         } else {
             self.status.set_text(&st.status);
             self.status.set_visible(true);
@@ -345,6 +355,9 @@ impl Shell {
             Propagation::Stop
         } else if ctrl && matches!(key, Key::n) {
             self.enter_mode(Mode::Notes);
+            Propagation::Stop
+        } else if ctrl && matches!(key, Key::f) {
+            self.enter_mode(Mode::Files);
             Propagation::Stop
         } else if ctrl && matches!(key, Key::k | Key::question) {
             self.enter_mode(Mode::Ask);
@@ -373,8 +386,16 @@ impl Shell {
                     self.move_selection(1);
                     Propagation::Stop
                 }
+                Key::Page_Down if self.state.borrow().editing_note.is_none() => {
+                    self.move_selection(8);
+                    Propagation::Stop
+                }
                 Key::Up | Key::ISO_Left_Tab if self.state.borrow().editing_note.is_none() => {
                     self.move_selection(-1);
+                    Propagation::Stop
+                }
+                Key::Page_Up if self.state.borrow().editing_note.is_none() => {
+                    self.move_selection(-8);
                     Propagation::Stop
                 }
                 Key::Return | Key::KP_Enter => {
@@ -409,6 +430,12 @@ impl Shell {
         let len = st.results.len() as i32;
         st.selected = ((st.selected as i32 + delta).rem_euclid(len)) as usize;
         paint_selection(&st);
+        let selected = st.selected;
+        let row = st.rows.get(selected).cloned();
+        drop(st);
+        if let Some(row) = row {
+            scroll_row_into_view(&self.results_scroll, &self.results_host, &row);
+        }
     }
 
     fn activate(&self) {
@@ -863,6 +890,51 @@ fn rebuild_rows(shell: &Shell) {
         });
         row.add_controller(click);
     }
+
+    let selected = shell.state.borrow().selected;
+    let row = shell.state.borrow().rows.get(selected).cloned();
+    if let Some(row) = row {
+        scroll_row_into_view(&shell.results_scroll, &shell.results_host, &row);
+    }
+}
+
+fn result_hint(state: &State) -> Option<String> {
+    let n = state.results.len();
+    if n == 0 {
+        return None;
+    }
+    let files = state
+        .results
+        .iter()
+        .filter(|row| row.item.kind == Kind::File)
+        .count();
+    if state.mode == Mode::Files || files >= 8 {
+        if files == n {
+            Some(format!("{n} files · ↑↓ to browse"))
+        } else {
+            Some(format!("{n} results · {files} files · ↑↓ to browse"))
+        }
+    } else if n >= 16 {
+        Some(format!("{n} results · ↑↓ to browse"))
+    } else {
+        None
+    }
+}
+
+fn scroll_row_into_view(scroll: &ScrolledWindow, host: &Box, row: &Box) {
+    let adj = scroll.vadjustment();
+    let Some(bounds) = row.compute_bounds(host) else {
+        return;
+    };
+    let y = f64::from(bounds.y());
+    let bottom = y + f64::from(bounds.height());
+    let value = adj.value();
+    let page = adj.page_size();
+    if y < value {
+        adj.set_value(y);
+    } else if bottom > value + page {
+        adj.set_value((bottom - page).max(0.0));
+    }
 }
 
 fn paint_selection(state: &State) {
@@ -946,7 +1018,7 @@ fn empty_state() -> (Box, Label, Label) {
 
     let chips = Box::new(Orientation::Horizontal, 8);
     chips.set_margin_top(8);
-    for hint in ["?ask", "note", "win", "clip", "store", "set"] {
+    for hint in ["file", "?ask", "note", "win", "clip", "store", "set"] {
         let chip = Label::new(Some(hint));
         chip.add_css_class("chip");
         chips.append(&chip);
@@ -974,6 +1046,7 @@ fn footer() -> Box {
     bar.append(&spacer);
 
     bar.append(&hint_pair("↑↓", "move"));
+    bar.append(&hint_pair("pg", "jump"));
     bar.append(&hint_pair("↵", "open"));
     bar.append(&hint_pair("⌘,", "settings"));
     bar.append(&hint_pair("esc", "back"));

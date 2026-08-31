@@ -1,6 +1,4 @@
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::rc::Rc;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -10,11 +8,13 @@ use crate::auth;
 use crate::clipboard::{self, Store as ClipStore};
 use crate::config::Settings;
 use crate::desktop;
+use crate::files;
 use crate::hypr;
 use crate::item::{Action, Icon, Item, Kind};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
+use crate::smart;
 use crate::snippets;
 use crate::store;
 use crate::usage;
@@ -50,6 +50,7 @@ impl Catalog {
         let (mode, rest) = Mode::parse(query);
         let results = match mode {
             Mode::Root => self.search_root(&rest),
+            Mode::Files => self.search_files(&rest),
             Mode::Windows => self.search_windows(&rest),
             Mode::Clipboard => self.search_clipboard(&rest),
             Mode::Snippets => self.search_snippets(&rest),
@@ -65,6 +66,14 @@ impl Catalog {
     fn search_root(&self, query: &str) -> Vec<Scored> {
         let query = query.trim();
         let mut results = Vec::new();
+        let settings = self.settings.borrow();
+        let include_files = settings.files.include_in_root;
+        let file_limit = settings.files.max_results.min(files::ROOT_FILE_LIMIT);
+        let mix_limit = settings.general.max_results.max(24);
+        let hidden = settings.files.include_hidden;
+        let system_wide = settings.files.system_wide;
+        let extra_roots = settings.files.search_roots.clone();
+        drop(settings);
 
         if query.is_empty() {
             return self.empty_state();
@@ -74,6 +83,12 @@ impl Catalog {
             results.push(Scored {
                 item,
                 score: 100_000,
+            });
+        }
+        for item in smart::instant_items(query) {
+            results.push(Scored {
+                item,
+                score: 95_000,
             });
         }
 
@@ -115,6 +130,16 @@ impl Catalog {
             });
         }
 
+        if let Some(item) = smart::path_command(query) {
+            results.push(Scored {
+                item,
+                score: 12_000,
+            });
+        }
+
+        let file_query = files::parse_query(query);
+        let file_heavy = file_query.is_type_search() || file_query.path_like || file_query.explicit;
+
         let mut matcher = Matcher::new(Config::DEFAULT);
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
@@ -126,7 +151,8 @@ impl Catalog {
         pool.extend(windows.iter());
 
         for item in pool {
-            if let Some(score) = rank(&mut matcher, &pattern, query, item, &self.usage) {
+            if let Some(score) = rank(&mut matcher, &pattern, query, item, &self.usage, file_heavy)
+            {
                 results.push(Scored {
                     item: item.clone(),
                     score,
@@ -134,10 +160,28 @@ impl Catalog {
             }
         }
 
-        if query.len() >= 2 {
-            for item in file_items(query) {
-                let score =
-                    rank(&mut matcher, &pattern, query, &item, &self.usage).unwrap_or(1_000);
+        if include_files && file_query.wants_files() {
+            for item in files::well_known_folders(query) {
+                let score = rank(
+                    &mut matcher,
+                    &pattern,
+                    query,
+                    &item,
+                    &self.usage,
+                    file_heavy,
+                )
+                .unwrap_or(8_000);
+                results.push(Scored { item, score });
+            }
+            for item in files::search(query, file_limit, hidden, &extra_roots, system_wide) {
+                let score = rank_file(
+                    &mut matcher,
+                    &pattern,
+                    query,
+                    &item,
+                    &self.usage,
+                    file_heavy,
+                );
                 results.push(Scored { item, score });
             }
         }
@@ -158,7 +202,77 @@ impl Catalog {
             });
         }
 
-        finish(results)
+        let limit = if file_heavy {
+            file_limit.max(mix_limit)
+        } else {
+            mix_limit
+        };
+        finish_limited(results, limit)
+    }
+
+    fn search_files(&self, query: &str) -> Vec<Scored> {
+        let settings = self.settings.borrow();
+        let limit = settings.files.max_results.max(files::FILES_MODE_LIMIT);
+        let hidden = settings.files.include_hidden;
+        let system_wide = settings.files.system_wide;
+        let extra_roots = settings.files.search_roots.clone();
+        drop(settings);
+
+        let q = query.trim();
+        let mut results = Vec::new();
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(
+            if q.is_empty() { "file" } else { q },
+            CaseMatching::Smart,
+            Normalization::Smart,
+        );
+
+        if q.is_empty() {
+            let mut recent_ids = Vec::new();
+            let mut used: Vec<(String, u32)> = self
+                .usage
+                .iter()
+                .filter(|(id, _)| id.starts_with("file:"))
+                .map(|(id, count)| (id.clone(), *count))
+                .collect();
+            used.sort_by_key(|a| std::cmp::Reverse(a.1));
+            for (id, count) in used.into_iter().take(24) {
+                let path = std::path::PathBuf::from(id.trim_start_matches("file:"));
+                if path.exists() {
+                    recent_ids.push(id);
+                    let item = files::file_item(path, None);
+                    results.push(Scored {
+                        score: 20_000 + count.saturating_mul(40),
+                        item,
+                    });
+                }
+            }
+            for item in files::recent(40, hidden, &extra_roots) {
+                if recent_ids.iter().any(|id| id == &item.id) {
+                    continue;
+                }
+                results.push(Scored {
+                    score: 8_000
+                        + files::recency_bonus(std::path::Path::new(
+                            item.id.trim_start_matches("file:"),
+                        )),
+                    item,
+                });
+            }
+            return finish_limited(results, limit);
+        }
+
+        for item in files::well_known_folders(q) {
+            results.push(Scored {
+                item,
+                score: 30_000,
+            });
+        }
+        for item in files::search(q, limit, hidden, &extra_roots, system_wide) {
+            let score = rank_file(&mut matcher, &pattern, q, &item, &self.usage, true);
+            results.push(Scored { item, score });
+        }
+        finish_limited(results, limit)
     }
 
     fn search_windows(&self, query: &str) -> Vec<Scored> {
@@ -350,6 +464,34 @@ impl Catalog {
                 s.general.allow_mcp,
                 "mcp npx spawn tools",
             ),
+            setting_toggle(
+                "files-root",
+                "Include files in root search",
+                s.files.include_in_root,
+                "raycast files launcher",
+            ),
+            setting_toggle(
+                "files-system",
+                "System-wide file search",
+                s.files.system_wide,
+                "locate plocate entire disk markdown",
+            ),
+            setting_toggle(
+                "files-hidden",
+                "Search hidden files",
+                s.files.include_hidden,
+                "dotfiles hidden",
+            ),
+            setting_value(
+                "max-results",
+                "Max search results",
+                &format!(
+                    "root {} · files {}",
+                    s.general.max_results, s.files.max_results
+                ),
+                q,
+                "limit scroll",
+            ),
             setting_cycle(
                 "provider",
                 "AI provider",
@@ -525,13 +667,13 @@ impl Catalog {
                 },
             );
         }
-        score_pool(&items, q, &self.usage, 18)
+        score_pool(&items, q, &self.usage, 36)
     }
 
     fn search_store(&self, query: &str) -> Vec<Scored> {
         let settings = self.settings.borrow();
         let items = store::items(&settings);
-        score_pool(&items, query, &self.usage, 24)
+        score_pool(&items, query, &self.usage, 36)
     }
 
     fn empty_state(&self) -> Vec<Scored> {
@@ -566,7 +708,7 @@ impl Catalog {
         }
 
         out.sort_by_key(|item| std::cmp::Reverse(item.score));
-        out.truncate(12);
+        out.truncate(16);
         out
     }
 }
@@ -599,6 +741,15 @@ fn extension_items() -> Vec<Item> {
             kind: Kind::Extension,
             icon: Icon::Name("audio-input-microphone".into()),
             action: Action::EnterMode(Mode::Voice),
+        },
+        Item {
+            id: "ext:files".into(),
+            title: "Search Files".into(),
+            subtitle: "Every markdown, PDF, or named file — scroll the full list".into(),
+            keywords: "file files find fd locate markdown pdf documents".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("system-file-manager".into()),
+            action: Action::EnterMode(Mode::Files),
         },
         Item {
             id: "ext:windows".into(),
@@ -716,7 +867,7 @@ fn score_pool(
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut results = Vec::new();
     for item in items {
-        if let Some(score) = rank(&mut matcher, &pattern, query, item, usage_map) {
+        if let Some(score) = rank(&mut matcher, &pattern, query, item, usage_map, false) {
             results.push(Scored {
                 item: item.clone(),
                 score,
@@ -727,7 +878,7 @@ fn score_pool(
 }
 
 fn finish(results: Vec<Scored>) -> Vec<Scored> {
-    finish_limited(results, 12)
+    finish_limited(results, 48)
 }
 
 fn finish_limited(mut results: Vec<Scored>, limit: usize) -> Vec<Scored> {
@@ -747,6 +898,7 @@ fn rank(
     query: &str,
     item: &Item,
     usage_map: &std::collections::HashMap<String, u32>,
+    file_heavy: bool,
 ) -> Option<u32> {
     let mut buf = Vec::new();
     let title = item.title.to_lowercase();
@@ -771,10 +923,41 @@ fn rank(
         Kind::Snippet => 70,
         Kind::Command | Kind::Settings | Kind::Store => 60,
         Kind::Clipboard | Kind::Voice | Kind::Script => 50,
+        Kind::File if file_heavy => 2_400,
         Kind::File => 30,
         _ => 10,
     });
     Some(score)
+}
+
+fn rank_file(
+    matcher: &mut Matcher,
+    pattern: &Pattern,
+    query: &str,
+    item: &Item,
+    usage_map: &std::collections::HashMap<String, u32>,
+    file_heavy: bool,
+) -> u32 {
+    let path = std::path::Path::new(item.id.trim_start_matches("file:"));
+    let nucleo = rank(matcher, pattern, query, item, usage_map, file_heavy).unwrap_or(800);
+    let mut score = nucleo;
+    if file_heavy {
+        score = score.saturating_add(4_000);
+    }
+    let title = item.title.to_ascii_lowercase();
+    let q = query.to_ascii_lowercase();
+    if title == q || title.starts_with(&q) {
+        score = score.saturating_add(6_000);
+    }
+    if let Some(ext) = path.extension().and_then(|s| s.to_str())
+        && q.contains(ext)
+    {
+        score = score.saturating_add(1_500);
+    }
+    score = score.saturating_add(files::recency_bonus(path));
+    let depth = path.components().count() as u32;
+    score = score.saturating_add(800u32.saturating_sub(depth.saturating_mul(20)));
+    score
 }
 
 fn usage_of(map: &std::collections::HashMap<String, u32>, id: &str) -> u32 {
@@ -843,128 +1026,6 @@ fn run_item(command: String, terminal: bool) -> Item {
         icon: Icon::Name("utilities-terminal".into()),
         action: Action::Shell { command, terminal },
     }
-}
-
-fn file_items(query: &str) -> Vec<Item> {
-    let q = query.trim();
-    let path_like = q.starts_with('/') || q.starts_with("~/") || q.starts_with("./");
-    let explicit = q.starts_with("f ") || q.starts_with("file ");
-    if !path_like && !explicit && q.len() < 3 {
-        return Vec::new();
-    }
-
-    if path_like {
-        let expanded = expand_tilde(q);
-        let path = PathBuf::from(&expanded);
-        if path.is_file() {
-            return vec![file_item(path)];
-        }
-        if path.is_dir() {
-            return list_dir(&path);
-        }
-    }
-
-    let expanded = expand_tilde(q);
-    let term = if let Some(rest) = q.strip_prefix("file ").or_else(|| q.strip_prefix("f ")) {
-        rest.trim()
-    } else if path_like {
-        Path::new(&expanded)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(q)
-    } else {
-        q
-    };
-    fd_search(term)
-}
-
-fn list_dir(path: &Path) -> Vec<Item> {
-    let mut items = Vec::new();
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return items;
-    };
-    for entry in entries.flatten().take(20) {
-        items.push(file_item(entry.path()));
-    }
-    items.sort_by(|a, b| a.title.cmp(&b.title));
-    items
-}
-
-fn fd_search(term: &str) -> Vec<Item> {
-    if term.is_empty() {
-        return Vec::new();
-    }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let output = Command::new("fd")
-        .args([
-            "--color=never",
-            "--max-results",
-            "20",
-            "--exclude",
-            ".git",
-            "--exclude",
-            "node_modules",
-            "--exclude",
-            "target",
-            term,
-        ])
-        .current_dir(&home)
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            let path = if Path::new(line).is_absolute() {
-                PathBuf::from(line)
-            } else {
-                home.join(line)
-            };
-            file_item(path)
-        })
-        .collect()
-}
-
-fn file_item(path: PathBuf) -> Item {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let subtitle = path.to_string_lossy().to_string();
-    let icon = if path.is_dir() {
-        Icon::Name("folder".into())
-    } else {
-        Icon::Name("text-x-generic".into())
-    };
-    Item {
-        id: format!("file:{}", path.display()),
-        title: name,
-        subtitle,
-        keywords: String::new(),
-        kind: Kind::File,
-        icon,
-        action: Action::OpenPath(path),
-    }
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().into_owned();
-    }
-    if path == "~"
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.to_string_lossy().into_owned();
-    }
-    path.to_string()
 }
 
 fn urlencoding_lite(input: &str) -> String {
@@ -1108,5 +1169,6 @@ mod tests {
     #[test]
     fn mode_prefix_still_works() {
         assert_eq!(Mode::parse("clip rust").0, Mode::Clipboard);
+        assert_eq!(Mode::parse("file markdown").0, Mode::Files);
     }
 }

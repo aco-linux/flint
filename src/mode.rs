@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Root,
+    Files,
     Windows,
     Clipboard,
     Snippets,
@@ -14,6 +15,23 @@ pub enum Mode {
 impl Mode {
     pub fn parse(query: &str) -> (Self, String) {
         let q = query.trim_start();
+        if let Some(rest) = strip_kw(q, &["file ", "files ", "find ", "fs "]) {
+            return (Mode::Files, rest);
+        }
+        if let Some(rest) = q
+            .get(..2)
+            .filter(|head| head.eq_ignore_ascii_case("f "))
+            .map(|_| q[2..].trim_start().to_string())
+        {
+            return (Mode::Files, rest);
+        }
+        if q.eq_ignore_ascii_case("file")
+            || q.eq_ignore_ascii_case("files")
+            || q.eq_ignore_ascii_case("find")
+            || q.eq_ignore_ascii_case("fs")
+        {
+            return (Mode::Files, String::new());
+        }
         if let Some(rest) = strip_kw(q, &["win ", "windows"]) {
             return (Mode::Windows, rest);
         }
@@ -50,6 +68,7 @@ impl Mode {
     pub fn badge(self) -> Option<&'static str> {
         match self {
             Mode::Root => None,
+            Mode::Files => Some("FILES"),
             Mode::Windows => Some("WINDOWS"),
             Mode::Clipboard => Some("CLIP"),
             Mode::Snippets => Some("SNIP"),
@@ -63,7 +82,8 @@ impl Mode {
 
     pub fn placeholder(self) -> &'static str {
         match self {
-            Mode::Root => "Search apps, notes, ask AI, windows…",
+            Mode::Root => "Search apps, files, notes, ask AI…",
+            Mode::Files => "Search files — markdown, pdf, or any name",
             Mode::Windows => "Filter open windows…",
             Mode::Clipboard => "Search clipboard history…",
             Mode::Snippets => "Snippets — type +name to save clipboard",
@@ -78,6 +98,7 @@ impl Mode {
     pub fn empty_title(self) -> &'static str {
         match self {
             Mode::Root => "Nothing matches.",
+            Mode::Files => "No files matched.",
             Mode::Windows => "No open windows.",
             Mode::Clipboard => "Clipboard is empty.",
             Mode::Snippets => "No snippets yet.",
@@ -91,7 +112,8 @@ impl Mode {
 
     pub fn empty_sub(self) -> &'static str {
         match self {
-            Mode::Root => "Try an app, ?ask, note, win, clip, store, or settings.",
+            Mode::Root => "Try an app, a file type like markdown, ?ask, note, win, or file.",
+            Mode::Files => "Type markdown, *.pdf, or a name. Arrow keys scroll every match.",
             Mode::Windows => "Open something, then jump back here.",
             Mode::Clipboard => "Copy text anywhere and it lands here.",
             Mode::Snippets => "Type +email to save the current clipboard as “email”.",
@@ -106,6 +128,7 @@ impl Mode {
     pub fn prefix(self) -> &'static str {
         match self {
             Mode::Root => "",
+            Mode::Files => "file ",
             Mode::Windows => "win ",
             Mode::Clipboard => "clip ",
             Mode::Snippets => "; ",
@@ -149,5 +172,13 @@ mod tests {
         assert_eq!(Mode::parse("note inbox").0, Mode::Notes);
         assert_eq!(Mode::parse("settings").0, Mode::Settings);
         assert_eq!(Mode::parse("store mcp").0, Mode::Store);
+        assert_eq!(
+            Mode::parse("file markdown"),
+            (Mode::Files, "markdown".into())
+        );
+        assert_eq!(Mode::parse("files"), (Mode::Files, "".into()));
+        assert_eq!(Mode::parse("f invoices").0, Mode::Files);
+        assert_eq!(Mode::parse("firefox").0, Mode::Root);
+        assert_eq!(Mode::parse("find notes.md").0, Mode::Files);
     }
 }

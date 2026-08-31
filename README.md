@@ -30,6 +30,7 @@ That puts `flint` in `~/.local/bin` and a desktop entry under `~/.local/share/ap
 exec-once = flint --daemon
 bind = ALT, SPACE, exec, flint
 bind = SUPER SHIFT, R, exec, flint --windows
+bind = SUPER SHIFT, F, exec, flint --files
 ```
 
 On Omarchy, Super+Space stays the system menu. Bind Flint to Alt+Space in `~/.config/hypr/bindings.lua`. A full snippet is in [`share/hyprland.conf`](share/hyprland.conf).
@@ -41,6 +42,7 @@ with the release ID `dev.flint.launcher` so the centered floating rule still app
 | Prefix | Mode | Also |
 | --- | --- | --- |
 | _(empty)_ | Apps, files, calc, extensions | Alt+Space |
+| `file` / `f` / `find` | Search Files (type, name, or path) | `--files` |
 | `win` | Window switcher | `--windows` |
 | `clip` | Clipboard history | `--clipboard` |
 | `;` / `snip` | Snippets | `--snippets` |
@@ -51,6 +53,13 @@ with the release ID `dev.flint.launcher` so the centered floating rule still app
 | `store` | Store | `--store` |
 
 Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to create one. Prefix `>` to run a command, `$` to run it in a terminal.
+
+Root search is intent-aware, closer to Raycast than a fixed 12-row list:
+
+- Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
+- Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
+- Calculator, unit conversion (`10 km to mi`, `32f`), hex colors (`#ff5a1f`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
+- Result caps live in Settings (`max-results`) and `~/.config/flint/config.json` under `general.max_results` and `files.max_results`. Extra folders go in `files.search_roots`.
 
 ## Honest status
 

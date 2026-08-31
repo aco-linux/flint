@@ -9,6 +9,7 @@ use crate::paths;
 #[serde(default)]
 pub struct Settings {
     pub general: General,
+    pub files: Files,
     pub ai: Ai,
     pub voice: Voice,
     pub mcp: Vec<McpServer>,
@@ -20,6 +21,7 @@ pub struct Settings {
 pub struct General {
     pub autostart: bool,
     pub attach_clipboard_to_ai: bool,
+    /// Mixed root-search cap (apps, commands, fallbacks). File lists use `files.max_results`.
     pub max_results: usize,
     /// Third-party script-commands run as sh/python3/node with no signature.
     /// Off until the user opts in.
@@ -29,6 +31,31 @@ pub struct General {
     /// Off until the user opts in.
     #[serde(default)]
     pub allow_mcp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Files {
+    /// Show file hits in the empty-prefix launcher, like Raycast Root Search.
+    pub include_in_root: bool,
+    /// Use `plocate`/`locate` so type queries can see files outside $HOME.
+    pub system_wide: bool,
+    pub include_hidden: bool,
+    pub max_results: usize,
+    /// Extra folders to scan (external drives, project roots). Home is always included.
+    pub search_roots: Vec<String>,
+}
+
+impl Default for Files {
+    fn default() -> Self {
+        Self {
+            include_in_root: true,
+            system_wide: true,
+            include_hidden: false,
+            max_results: 250,
+            search_roots: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +105,7 @@ impl Default for General {
         Self {
             autostart: true,
             attach_clipboard_to_ai: false,
-            max_results: 12,
+            max_results: 48,
             allow_script_commands: false,
             allow_mcp: false,
         }
@@ -239,6 +266,44 @@ impl Settings {
                 }
                 .into()
             }
+            "set:files-root" => {
+                self.files.include_in_root = !self.files.include_in_root;
+                if self.files.include_in_root {
+                    "Files appear in root search"
+                } else {
+                    "Files only appear in Search Files"
+                }
+                .into()
+            }
+            "set:files-system" => {
+                self.files.system_wide = !self.files.system_wide;
+                if self.files.system_wide {
+                    "System-wide file search ON — uses locate/plocate when available"
+                } else {
+                    "File search stays in home and extra folders"
+                }
+                .into()
+            }
+            "set:files-hidden" => {
+                self.files.include_hidden = !self.files.include_hidden;
+                if self.files.include_hidden {
+                    "Hidden files included in Search Files"
+                } else {
+                    "Hidden files excluded"
+                }
+                .into()
+            }
+            "set:max-results" if !typed.is_empty() => match typed.parse::<usize>() {
+                Ok(n) if (8..=500).contains(&n) => {
+                    self.general.max_results = n.min(80);
+                    self.files.max_results = n.max(48);
+                    format!(
+                        "Result limits → root {} · files {}",
+                        self.general.max_results, self.files.max_results
+                    )
+                }
+                _ => "Type a number between 8 and 500".into(),
+            },
             "set:provider" => {
                 self.ai.provider = match self.ai.provider.as_str() {
                     "ollama" => "openai".into(),
@@ -438,6 +503,10 @@ mod tests {
         assert!(!s.general.allow_script_commands);
         assert!(!s.general.allow_mcp);
         assert_eq!(s.voice.engine, "in-app");
+        assert!(s.files.include_in_root);
+        assert!(s.files.system_wide);
+        assert!(s.files.max_results >= 80);
+        assert!(s.general.max_results > 12);
     }
 
     #[test]

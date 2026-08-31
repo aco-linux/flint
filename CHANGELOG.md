@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- File search understands type words (`markdown`, `pdf`, `images`), extensions (`*.md`), and filters (`type:md readme`)
+- Search Files mode (`file`, Ctrl+F, `--files`) returns a long scrollable list instead of 12 rows
+- Root search mixes apps with many more file hits; `plocate`/`locate` covers folders outside `$HOME`
+- Instant answers: unit conversion, hex colors, PATH commands, and well-known folders
+- Page Up/Down jumps the list; the status line shows how many files matched
+
 ## 0.2.0 — release hardening
 
 - Replaced the fullscreen layer-shell surface with a normal movable, resizable,
