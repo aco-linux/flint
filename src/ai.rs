@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::auth;
 use crate::config::Settings;
@@ -19,15 +19,15 @@ pub fn ask(prompt: &str, settings: &Settings) -> Result<Reply, String> {
         return Err("Ask something first".into());
     }
     let mut system = settings.ai.system_prompt.clone();
-    if settings.general.allow_mcp {
-        if let Some(tools) = mcp::tool_primer(&settings.mcp) {
-            system.push_str("\n\n");
-            system.push_str(&tools);
-        }
+    if settings.general.allow_mcp
+        && let Some(tools) = mcp::tool_primer(&settings.mcp)
+    {
+        system.push_str("\n\n");
+        system.push_str(&tools);
     }
     match settings.ai.provider.as_str() {
         "openai" | "google" | "custom" | "lmstudio" | "llamacpp" => {
-            let key = credential(settings);
+            let credential = credential(settings)?;
             let label = match settings.ai.provider.as_str() {
                 "google" => "Google",
                 "lmstudio" => "LM Studio",
@@ -38,7 +38,7 @@ pub fn ask(prompt: &str, settings: &Settings) -> Result<Reply, String> {
             chat_completions(
                 settings,
                 &chat_url(&settings.ai.endpoint, "/v1/chat/completions"),
-                &key,
+                &credential,
                 &settings.ai.model,
                 &system,
                 prompt,
@@ -50,11 +50,22 @@ pub fn ask(prompt: &str, settings: &Settings) -> Result<Reply, String> {
     }
 }
 
-fn credential(settings: &Settings) -> String {
-    if !settings.ai.api_key.is_empty() {
-        return settings.ai.api_key.clone();
+struct Credential {
+    value: String,
+    oauth: bool,
+}
+
+fn credential(settings: &Settings) -> Result<Credential, String> {
+    if let Some(key) = auth::api_key(&settings.ai.provider) {
+        return Ok(Credential {
+            value: key,
+            oauth: false,
+        });
     }
-    auth::bearer().unwrap_or_default()
+    Ok(Credential {
+        value: auth::bearer(settings)?.unwrap_or_default(),
+        oauth: true,
+    })
 }
 
 fn ollama(settings: &Settings, system: &str, prompt: &str) -> Result<Reply, String> {
@@ -87,17 +98,24 @@ fn ollama(settings: &Settings, system: &str, prompt: &str) -> Result<Reply, Stri
 fn chat_completions(
     settings: &Settings,
     url: &str,
-    api_key: &str,
+    credential: &Credential,
     model: &str,
     system: &str,
     prompt: &str,
     label: &str,
 ) -> Result<Reply, String> {
     let local = url.contains("127.0.0.1") || url.contains("localhost");
-    if api_key.is_empty() && !local {
+    if credential.value.is_empty() && !local {
         return Err(format!(
-            "Sign in with OAuth in Settings, or add a {label} API key"
+            "Connect a supported API OAuth account in Settings, or add a {label} API key"
         ));
+    }
+    if settings.ai.provider == "google"
+        && credential.oauth
+        && !credential.value.is_empty()
+        && settings.ai.oauth_project_id.is_empty()
+    {
+        return Err("Google OAuth requires the Google Cloud quota project ID in Settings".into());
     }
     let body = json!({
         "model": model,
@@ -106,14 +124,17 @@ fn chat_completions(
             {"role": "user", "content": prompt}
         ]
     });
-    let auth = if api_key.is_empty() {
+    let auth = if credential.value.is_empty() {
         None
     } else {
-        Some(format!("Bearer {api_key}"))
+        Some(format!("Bearer {}", credential.value))
     };
     let mut headers = Vec::new();
     if let Some(value) = auth.as_deref() {
         headers.push(("Authorization", value));
+    }
+    if settings.ai.provider == "google" && credential.oauth {
+        headers.push(("x-goog-user-project", &settings.ai.oauth_project_id));
     }
     let raw = http_json("POST", url, &body, &headers)?;
     let text = raw
@@ -132,10 +153,8 @@ fn chat_completions(
 }
 
 fn anthropic(settings: &Settings, system: &str, prompt: &str) -> Result<Reply, String> {
-    let key = credential(settings);
-    if key.is_empty() {
-        return Err("Sign in or add an Anthropic API key in Settings".into());
-    }
+    let key = auth::api_key("anthropic")
+        .ok_or("Anthropic consumer subscriptions do not include API access. Add an Anthropic API key in Settings.")?;
     let url = chat_url(&settings.ai.endpoint, "/v1/messages");
     let endpoint = if settings.ai.endpoint.contains("anthropic") {
         url
@@ -152,10 +171,7 @@ fn anthropic(settings: &Settings, system: &str, prompt: &str) -> Result<Reply, S
         "POST",
         &endpoint,
         &body,
-        &[
-            ("x-api-key", &key),
-            ("anthropic-version", "2023-06-01"),
-        ],
+        &[("x-api-key", &key), ("anthropic-version", "2023-06-01")],
     )?;
     let text = raw
         .pointer("/content/0/text")
@@ -227,7 +243,9 @@ fn parse_url(url: &str) -> Result<Url, String> {
         (hostport.to_string(), if tls { 443 } else { 80 })
     };
     if host.is_empty()
-        || host.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-')))
+        || host
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-')))
     {
         return Err("AI endpoint host is invalid".into());
     }
@@ -278,7 +296,9 @@ fn https_request(
     let cfg_path = crate::paths::runtime_dir().join(format!("curl-{}.cfg", std::process::id()));
     let mut cfg = String::from("header = \"Content-Type: application/json\"\n");
     for (name, value) in extra {
-        if name.chars().any(|c| c.is_control() || c == '"' || c == '\\' || c == ':')
+        if name
+            .chars()
+            .any(|c| c.is_control() || c == '"' || c == '\\' || c == ':')
             || value.chars().any(|c| c.is_control())
         {
             return Err("Invalid HTTP header".into());
@@ -356,7 +376,9 @@ fn write_request<W: Write>(
         req.push_str("\r\n");
     }
     req.push_str("\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(body).map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())
 }

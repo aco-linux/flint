@@ -11,26 +11,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Install GTK
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
-            meson \
-            ninja-build \
             libgtk-4-dev \
             libglib2.0-dev \
             libpango1.0-dev \
             libcairo2-dev \
             libgraphene-1.0-dev \
-            libwayland-dev \
-            wayland-protocols \
-            libgirepository1.0-dev
-          if ! sudo apt-get install -y --no-install-recommends libgtk4-layer-shell-dev; then
-            git clone --depth 1 https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
-            meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell --prefix=/usr
-            meson compile -C /tmp/gtk4-layer-shell/build
-            sudo meson install -C /tmp/gtk4-layer-shell/build
-          fi
+            libgirepository1.0-dev \
+            desktop-file-utils \
+            appstream
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --all-targets
+      - name: Release build
+        run: cargo build --locked --release
+      - name: Validate desktop metadata
+        run: |
+          desktop-file-validate share/flint.desktop
+          appstreamcli validate --no-net share/dev.flint.launcher.metainfo.xml
+
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

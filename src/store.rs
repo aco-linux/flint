@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
@@ -166,14 +166,14 @@ pub fn install(id: &str, settings: &mut Settings) -> Result<String, String> {
                 return Err("MCP command is not in the allow-list (npx)".into());
             }
             let mut args = listing.args.clone().unwrap_or_default();
-            if listing.id == "mcp-filesystem" {
-                if let Some(home) = dirs::home_dir() {
-                    args = vec![
-                        "-y".into(),
-                        "@modelcontextprotocol/server-filesystem".into(),
-                        home.to_string_lossy().into_owned(),
-                    ];
-                }
+            if listing.id == "mcp-filesystem"
+                && let Some(home) = dirs::home_dir()
+            {
+                args = vec![
+                    "-y".into(),
+                    "@modelcontextprotocol/server-filesystem".into(),
+                    home.to_string_lossy().into_owned(),
+                ];
             }
             settings.mcp.push(McpServer {
                 name: listing.id.clone(),
@@ -199,10 +199,7 @@ pub fn sync_script_commands(settings: &Settings) -> Result<String, String> {
     if let Some(parent) = dest.parent() {
         crate::paths::ensure_dir(parent);
     }
-    git_clone_or_pull(
-        &dest,
-        "https://github.com/raycast/script-commands.git",
-    )?;
+    git_clone_or_pull(&dest, "https://github.com/raycast/script-commands.git")?;
     Ok("Raycast Script Commands synced".into())
 }
 
@@ -212,14 +209,17 @@ pub fn sync_vicinae() -> Result<String, String> {
     let path = vicinae_cache();
     let raw = serde_json::to_string_pretty(&listings).map_err(|e| e.to_string())?;
     crate::paths::write_private(&path, raw).map_err(|e| e.to_string())?;
-    Ok(format!("{} Vicinae extensions in the catalog", listings.len()))
+    Ok(format!(
+        "{} Vicinae extensions in the catalog",
+        listings.len()
+    ))
 }
 
 fn vicinae_listings() -> Vec<Listing> {
-    if let Ok(raw) = fs::read_to_string(vicinae_cache()) {
-        if let Ok(list) = serde_json::from_str::<Vec<Listing>>(&raw) {
-            return list;
-        }
+    if let Ok(raw) = fs::read_to_string(vicinae_cache())
+        && let Ok(list) = serde_json::from_str::<Vec<Listing>>(&raw)
+    {
+        return list;
     }
     bundled_vicinae()
 }
@@ -229,15 +229,27 @@ fn bundled_vicinae() -> Vec<Listing> {
         ("bluetooth", "Bluetooth", "Manage adapters and devices"),
         ("github", "GitHub", "Issues, PRs, and repositories"),
         ("wifi-commander", "Wi-Fi", "Scan and connect"),
-        ("process-manager", "Process Manager", "Inspect and kill processes"),
+        (
+            "process-manager",
+            "Process Manager",
+            "Inspect and kill processes",
+        ),
         ("systemd", "systemd", "Units and services"),
         ("flathub-search", "Flathub", "Search and install Flatpaks"),
         ("fuzzy-files", "Fuzzy Files", "Fast file search"),
-        ("vscode-recents", "VS Code Recents", "Jump back into recent workspaces"),
+        (
+            "vscode-recents",
+            "VS Code Recents",
+            "Jump back into recent workspaces",
+        ),
         ("zed-recents", "Zed Recents", "Recent Zed projects"),
         ("hypr", "Hyprland", "Workspaces, clients, and binds"),
         ("clipboard", "Clipboard extras", "Vicinae clipboard helpers"),
-        ("ollama-wordsmith", "Ollama Wordsmith", "Talk to local Ollama from an extension"),
+        (
+            "ollama-wordsmith",
+            "Ollama Wordsmith",
+            "Talk to local Ollama from an extension",
+        ),
     ]
     .into_iter()
     .map(|(id, title, subtitle)| Listing {
@@ -275,8 +287,8 @@ fn fetch_vicinae() -> Result<Vec<Listing>, String> {
     if !output.status.success() {
         return Err("GitHub catalog request failed".into());
     }
-    let entries: Vec<GithubEntry> =
-        serde_json::from_slice(&output.stdout).map_err(|_| "Unexpected GitHub catalog".to_string())?;
+    let entries: Vec<GithubEntry> = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Unexpected GitHub catalog".to_string())?;
     let mut listings: Vec<Listing> = entries
         .into_iter()
         .filter(|e| e.kind == "dir")
@@ -363,7 +375,7 @@ fn install_vicinae(name: &str) -> Result<String, String> {
     ))
 }
 
-fn git_clone_or_pull(dest: &PathBuf, url: &str) -> Result<(), String> {
+fn git_clone_or_pull(dest: &Path, url: &str) -> Result<(), String> {
     let status = if dest.join(".git").exists() {
         Command::new("git")
             .args([
@@ -452,8 +464,11 @@ fn is_safe_mcp_command(command: &str) -> bool {
     matches!(command, "npx")
 }
 
-fn is_safe_git_dest(dest: &PathBuf) -> bool {
-    if dest.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+fn is_safe_git_dest(dest: &Path) -> bool {
+    if dest
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return false;
     }
     dest.starts_with(crate::paths::data_dir().join("store"))
@@ -491,7 +506,9 @@ mod tests {
     fn git_dest_stays_under_store() {
         let dest = crate::paths::data_dir().join("store/script-commands");
         assert!(super::is_safe_git_dest(&dest));
-        assert!(!super::is_safe_git_dest(&std::path::PathBuf::from("/tmp/evil")));
+        assert!(!super::is_safe_git_dest(&std::path::PathBuf::from(
+            "/tmp/evil"
+        )));
         assert!(!super::is_safe_git_dest(
             &crate::paths::data_dir().join("store/../evil")
         ));

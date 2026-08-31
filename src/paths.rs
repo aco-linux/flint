@@ -41,6 +41,7 @@ pub fn ensure() {
     migrate_legacy();
     tighten_private_file(&config_dir().join("config.json"));
     tighten_private_file(&config_dir().join("auth.json"));
+    tighten_private_file(&config_dir().join("api-keys.json"));
     tighten_private_file(&config_dir().join("snippets.json"));
     tighten_private_file(&data_dir().join("notes.json"));
     tighten_private_file(&data_dir().join("clipboard.json"));
@@ -50,7 +51,10 @@ pub fn ensure() {
 }
 
 pub fn ensure_dir(dir: &Path) {
-    let _ = fs::DirBuilder::new().mode(0o700).recursive(true).create(dir);
+    let _ = fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(dir);
     let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
 }
 

@@ -3,7 +3,7 @@ Type=Application
 Name=Flint
 GenericName=Launcher
 Comment=Native command launcher for Linux (Wayland / Hyprland)
-Exec=flint --daemon
+Exec=flint
 Icon=flint
 Actions=Toggle;Windows;Clipboard;Snippets;Ask;Voice;Settings;Store;
 Terminal=false
@@ -11,7 +11,8 @@ Categories=Utility;
 Keywords=launcher;search;apps;ai;flint;
 StartupNotify=false
 DBusActivatable=false
-StartupWMClass=dev.flint.Launcher
+StartupWMClass=dev.flint.launcher
+X-GNOME-UsesNotifications=false
 
 [Desktop Action Toggle]
 Name=Toggle launcher

@@ -23,10 +23,8 @@ pub fn run(action: &Action) {
             if !is_safe_uri(uri) {
                 return;
             }
-            let _ = gtk4::gio::AppInfo::launch_default_for_uri(
-                uri,
-                gtk4::gio::AppLaunchContext::NONE,
-            );
+            let _ =
+                gtk4::gio::AppInfo::launch_default_for_uri(uri, gtk4::gio::AppLaunchContext::NONE);
         }
         Action::OpenPath(path) => open_path(path),
         Action::Spawn { program, args } => {
@@ -92,10 +90,10 @@ fn run_script(path: &Path) {
 }
 
 fn launch_desktop(path: &Path) {
-    if let Some(path) = path.to_str() {
-        if detach("gio", &["launch", path]).is_ok() {
-            return;
-        }
+    if let Some(path) = path.to_str()
+        && detach("gio", &["launch", path]).is_ok()
+    {
+        return;
     }
     let id = path
         .file_stem()
@@ -109,10 +107,8 @@ fn launch_desktop(path: &Path) {
 fn open_path(path: &Path) {
     match glib::filename_to_uri(path, None) {
         Ok(uri) => {
-            let _ = gtk4::gio::AppInfo::launch_default_for_uri(
-                &uri,
-                gtk4::gio::AppLaunchContext::NONE,
-            );
+            let _ =
+                gtk4::gio::AppInfo::launch_default_for_uri(&uri, gtk4::gio::AppLaunchContext::NONE);
         }
         Err(_) => {
             let _ = detach("xdg-open", &[path.to_string_lossy().as_ref()]);
@@ -201,10 +197,12 @@ fn is_under_store(path: &Path) -> bool {
     };
     match path.canonicalize() {
         Ok(real) => real.starts_with(&store),
-        Err(_) => path.starts_with(crate::paths::data_dir().join("store"))
-            && !path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir)),
+        Err(_) => {
+            path.starts_with(crate::paths::data_dir().join("store"))
+                && !path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+        }
     }
 }
 

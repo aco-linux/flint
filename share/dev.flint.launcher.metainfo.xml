@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.flint.launcher</id>
+  <name>Flint</name>
+  <summary>A fast command launcher and AI assistant for Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="com.github.aco-linux">
+    <name>aco-linux</name>
+  </developer>
+  <launchable type="desktop-id">flint.desktop</launchable>
+  <description>
+    <p>
+      Flint is a native GTK command launcher for Linux. Search applications and
+      files, switch windows, keep clipboard history and snippets, take notes,
+      dictate text, and use local or user-configured AI providers.
+    </p>
+    <p>
+      AI credentials stay on the device. OAuth connections use the system
+      browser, PKCE, and a loopback callback; local model providers require no
+      cloud account.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/aco-linux/flint</url>
+  <url type="bugtracker">https://github.com/aco-linux/flint/issues</url>
+  <url type="vcs-browser">https://github.com/aco-linux/flint</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/aco-linux/flint/main/share/flint.png</image>
+      <caption>Flint command launcher</caption>
+    </screenshot>
+  </screenshots>
+  <provides>
+    <binary>flint</binary>
+  </provides>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.0" date="2026-08-31">
+      <description>
+        <ul>
+          <li>Use a normal movable, resizable desktop window</li>
+          <li>Harden OAuth with PKCE, token refresh, and API-origin binding</li>
+          <li>Store AI credentials in the desktop keyring when available</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

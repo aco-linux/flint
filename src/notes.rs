@@ -78,11 +78,7 @@ pub fn create(title: &str) -> Note {
     let now = now();
     let title = {
         let t = title.trim();
-        if t.is_empty() {
-            "Untitled"
-        } else {
-            t
-        }
+        if t.is_empty() { "Untitled" } else { t }
     };
     let note = Note {
         id: format!("{now:x}"),

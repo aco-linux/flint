@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Settings {
     pub general: General,
@@ -38,12 +38,15 @@ pub struct Ai {
     pub provider: String,
     pub model: String,
     pub endpoint: String,
+    /// Kept only to migrate pre-0.2 config files into the credential store.
+    #[serde(default, skip_serializing)]
     pub api_key: String,
     pub system_prompt: String,
     pub client_id: String,
     pub oauth_authorize_url: String,
     pub oauth_token_url: String,
     pub oauth_scopes: String,
+    pub oauth_project_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,18 +73,6 @@ pub struct Store {
     pub script_commands_dir: String,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            general: General::default(),
-            ai: Ai::default(),
-            voice: Voice::default(),
-            mcp: Vec::new(),
-            store: Store::default(),
-        }
-    }
-}
-
 impl Default for General {
     fn default() -> Self {
         Self {
@@ -106,6 +97,7 @@ impl Default for Ai {
             oauth_authorize_url: String::new(),
             oauth_token_url: String::new(),
             oauth_scopes: String::new(),
+            oauth_project_id: String::new(),
         }
     }
 }
@@ -145,6 +137,14 @@ impl Settings {
             settings.ai.model = defaults.ai.model.clone();
             dirty = true;
         }
+        if !settings.ai.api_key.is_empty() {
+            let legacy_key = std::mem::take(&mut settings.ai.api_key);
+            if crate::auth::save_api_key(&settings.ai.provider, &legacy_key).is_ok() {
+                dirty = true;
+            } else {
+                settings.ai.api_key = legacy_key;
+            }
+        }
         if settings.ai.endpoint.is_empty() {
             settings.ai.endpoint = defaults.ai.endpoint.clone();
             dirty = true;
@@ -164,11 +164,7 @@ impl Settings {
             settings.voice.engine = "in-app".into();
             dirty = true;
         }
-        if settings
-            .store
-            .script_commands_dir
-            .contains("/rayblast/")
-        {
+        if settings.store.script_commands_dir.contains("/rayblast/") {
             settings.store.script_commands_dir = defaults.store.script_commands_dir.clone();
             dirty = true;
         }
@@ -270,46 +266,75 @@ impl Settings {
                 format!("AI provider → {}", self.ai.provider)
             }
             "set:model" if !typed.is_empty() => {
-                self.ai.model = typed.to_string();
-                format!("Model → {}", self.ai.model)
-            }
-            "set:endpoint" if !typed.is_empty() => {
-                if !(typed.starts_with("http://") || typed.starts_with("https://")) {
-                    "AI endpoint must start with http:// or https://".into()
-                } else if typed.contains('@') {
-                    "AI endpoint must not include credentials".into()
+                if typed.len() > 256 || typed.chars().any(char::is_control) {
+                    "Model name is invalid".into()
                 } else {
-                    self.ai.endpoint = typed.to_string();
-                    format!("Endpoint → {}", self.ai.endpoint)
+                    self.ai.model = typed.to_string();
+                    format!("Model → {}", self.ai.model)
                 }
             }
+            "set:endpoint" if !typed.is_empty() => match validate_endpoint(typed) {
+                Ok(()) => {
+                    self.ai.endpoint = typed.trim_end_matches('/').to_string();
+                    format!("Endpoint → {}", self.ai.endpoint)
+                }
+                Err(error) => error,
+            },
             "set:apikey" if !typed.is_empty() => {
-                self.ai.api_key = typed.to_string();
-                "API key saved".into()
+                match crate::auth::save_api_key(&self.ai.provider, typed) {
+                    Ok(storage) => format!("API key saved in {storage}"),
+                    Err(error) => error,
+                }
             }
+            "set:clear-apikey" => match crate::auth::clear_api_key(&self.ai.provider) {
+                Ok(()) => format!("{} API key removed", self.ai.provider),
+                Err(error) => error,
+            },
             "set:client-id" if !typed.is_empty() => {
-                self.ai.client_id = typed.to_string();
-                "OAuth client ID saved".into()
+                if typed.len() > 2048 || typed.chars().any(char::is_control) {
+                    "OAuth client ID is invalid".into()
+                } else {
+                    self.ai.client_id = typed.to_string();
+                    "OAuth client ID saved".into()
+                }
             }
             "set:oauth-authorize" if !typed.is_empty() => {
-                if !typed.starts_with("https://") {
-                    "OAuth authorize URL must start with https://".into()
-                } else {
-                    self.ai.oauth_authorize_url = typed.to_string();
-                    "OAuth authorize URL saved".into()
+                match validate_https_url(typed, "OAuth authorize URL") {
+                    Ok(()) => {
+                        self.ai.oauth_authorize_url = typed.to_string();
+                        "OAuth authorize URL saved".into()
+                    }
+                    Err(error) => error,
                 }
             }
             "set:oauth-token" if !typed.is_empty() => {
-                if !typed.starts_with("https://") {
-                    "OAuth token URL must start with https://".into()
-                } else {
-                    self.ai.oauth_token_url = typed.to_string();
-                    "OAuth token URL saved".into()
+                match validate_https_url(typed, "OAuth token URL") {
+                    Ok(()) => {
+                        self.ai.oauth_token_url = typed.to_string();
+                        "OAuth token URL saved".into()
+                    }
+                    Err(error) => error,
                 }
             }
             "set:oauth-scopes" if !typed.is_empty() => {
-                self.ai.oauth_scopes = typed.to_string();
-                "OAuth scopes saved".into()
+                if typed.len() > 4096 || typed.chars().any(char::is_control) {
+                    "OAuth scopes are invalid".into()
+                } else {
+                    self.ai.oauth_scopes = typed.to_string();
+                    "OAuth scopes saved".into()
+                }
+            }
+            "set:oauth-project" if !typed.is_empty() => {
+                if typed.len() > 256
+                    || typed.bytes().any(|byte| {
+                        !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'.'))
+                    })
+                {
+                    "OAuth quota project ID is invalid".into()
+                } else {
+                    self.ai.oauth_project_id = typed.to_string();
+                    "OAuth quota project ID saved".into()
+                }
             }
             "set:voice-lang" if !typed.is_empty() => {
                 self.voice.language = typed.to_string();
@@ -324,6 +349,49 @@ impl Settings {
         self.save();
         msg
     }
+}
+
+fn validate_endpoint(input: &str) -> Result<(), String> {
+    let url = url::Url::parse(input).map_err(|_| "AI endpoint is not a valid URL".to_string())?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("AI endpoint must not contain credentials or a fragment".into());
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(url.host_str().unwrap_or_default()) => Ok(()),
+        "http" => Err("Remote AI endpoints must use HTTPS".into()),
+        _ => Err("AI endpoint must use HTTPS, or HTTP on loopback".into()),
+    }
+}
+
+fn validate_https_url(input: &str, label: &str) -> Result<(), String> {
+    let url = url::Url::parse(input).map_err(|_| format!("{label} is not a valid URL"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "{label} must be HTTPS without credentials or a fragment"
+        ));
+    }
+    Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
 }
 
 pub fn path() -> PathBuf {
@@ -360,7 +428,7 @@ X-GNOME-Autostart-enabled=true
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{Settings, validate_endpoint, validate_https_url};
 
     #[test]
     fn default_provider_is_ollama() {
@@ -370,5 +438,21 @@ mod tests {
         assert!(!s.general.allow_script_commands);
         assert!(!s.general.allow_mcp);
         assert_eq!(s.voice.engine, "in-app");
+    }
+
+    #[test]
+    fn endpoint_policy_allows_local_http_and_requires_remote_https() {
+        assert!(validate_endpoint("http://127.0.0.1:11434").is_ok());
+        assert!(validate_endpoint("http://[::1]:8080").is_ok());
+        assert!(validate_endpoint("https://api.example.com/v1").is_ok());
+        assert!(validate_endpoint("http://api.example.com/v1").is_err());
+        assert!(validate_endpoint("https://user@example.com/v1").is_err());
+    }
+
+    #[test]
+    fn oauth_urls_require_uncredentialed_https() {
+        assert!(validate_https_url("https://id.example.com/auth", "authorize").is_ok());
+        assert!(validate_https_url("http://id.example.com/auth", "authorize").is_err());
+        assert!(validate_https_url("https://id.example.com/auth#x", "authorize").is_err());
     }
 }

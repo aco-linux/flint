@@ -1,16 +1,22 @@
 # Flint
 
-A native GTK4 command launcher for Linux (Wayland / Hyprland). Super+Space.
+A native GTK4 command launcher for Linux (Wayland / Hyprland). Alt+Space.
 
-This is **public 0.1**, not “Raycast for Linux.” Core loops work. There is no JS extension host. The store clones Vicinae folders and Raycast script-commands; it does not run Raycast extensions inside Flint.
+Flint 0.2 is a public, local-first release. It includes the launcher and productivity features listed below; it does not claim compatibility with Raycast's proprietary store or extension runtime.
 
 ![Flint](share/flint.png)
 
 Flint stays resident: the first launch keeps a daemon so clipboard history, notes, dictation, and Ask AI stay warm.
 
+Flint opens as a normal desktop window. The compositor can move, resize,
+minimize, and maximize it like any other GTK application; closing the window
+hides it while the resident process remains warm.
+
 ## Install
 
-Needs a Rust toolchain, GTK4, and [gtk4-layer-shell](https://github.com/wmww/gtk4-layer-shell).
+Build dependencies are a Rust toolchain, GTK4, GLib, Pango, Cairo, Graphene,
+and `pkg-config`. Runtime integrations use `curl`, `xdg-open`, and optionally
+`secret-tool` (recommended for keyring-backed AI credentials).
 
 ```sh
 git clone https://github.com/aco-linux/flint.git
@@ -22,17 +28,19 @@ That puts `flint` in `~/.local/bin` and a desktop entry under `~/.local/share/ap
 
 ```
 exec-once = flint --daemon
-bind = SUPER, SPACE, exec, flint
+bind = ALT, SPACE, exec, flint
 bind = SUPER SHIFT, R, exec, flint --windows
 ```
 
-On Omarchy, Super+Space is the system menu until you unbind it. Bindings live in `~/.config/hypr/bindings.lua`. A full snippet is in [`share/hyprland.conf`](share/hyprland.conf).
+On Omarchy, Super+Space stays the system menu. Bind Flint to Alt+Space in `~/.config/hypr/bindings.lua`. A full snippet is in [`share/hyprland.conf`](share/hyprland.conf).
+When upgrading from 0.1, replace the old `dev.flint.Launcher` window-rule class
+with the release ID `dev.flint.launcher` so the centered floating rule still applies.
 
 ## Modes
 
 | Prefix | Mode | Also |
 | --- | --- | --- |
-| _(empty)_ | Apps, files, calc, extensions | Super+Space |
+| _(empty)_ | Apps, files, calc, extensions | Alt+Space |
 | `win` | Window switcher | `--windows` |
 | `clip` | Clipboard history | `--clipboard` |
 | `;` / `snip` | Snippets | `--snippets` |
@@ -49,15 +57,29 @@ Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to cre
 | Works | Not 1.0 |
 | --- | --- |
 | Daemon hide/toggle, apps, calc, clipboard, notes, snippets, settings, store browse | No JS extension host |
-| Ask AI against local Ollama / LM Studio / llama.cpp | Cloud OAuth needs *your* client ID — ChatGPT Plus / Gemini Advanced do not sign in magically |
+| Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
-| PKCE OAuth + loopback `127.0.0.1` | MCP is a prompt primer; the model cannot run tools. MCP spawn is **off by default** |
+| PKCE OAuth + loopback `127.0.0.1` + refresh tokens | MCP is a prompt primer; the model cannot run tools. MCP spawn is **off by default** |
 
 ## Ask AI
 
 Local models first. Flint scans Ollama (`http://127.0.0.1:11434`), LM Studio (`:1234`), and llama.cpp (`:8080`) and lists whatever is already running.
 
-Cloud providers use **OAuth in the browser**, not a pasted API key, whenever you can. Add your own OAuth client ID in Settings, then **Sign in with OpenAI**, **Google**, or a custom authorize URL. Tokens live in `~/.config/flint/auth.json` (mode 600). An API key is only a fallback. Custom OAuth URLs must be `https://`.
+Flint supports Google Gemini API OAuth and standards-compatible custom OAuth
+providers. Configure a desktop client ID, authorize URL, token URL, scopes, API
+endpoint, and model in Settings. The system browser handles sign-in; Flint uses
+PKCE S256 and an exact `127.0.0.1` callback, refreshes expiring access tokens,
+and refuses to send an OAuth token to a different API origin.
+
+OAuth authorizes API access only when the provider supports it. A consumer
+subscription is not automatically an API entitlement: ChatGPT plans and Claude
+plans are billed separately from their developer APIs. OpenAI and Anthropic are
+therefore configured with provider API keys, not unsupported consumer OAuth.
+Google OAuth also requires the Google Cloud quota project ID in Settings.
+
+Credentials are stored in the Linux desktop Secret Service when available. On
+desktops without a usable keyring, Flint falls back to a mode-`600` credential
+file and reports that choice after saving. Local models need no credential.
 
 ## Dictation
 
@@ -73,19 +95,22 @@ Raycast’s App Store is proprietary and is not connected. Flint’s store:
 
 ## Privacy and safety
 
-- Config, auth, snippets, notes, and clipboard files are mode `600` under directories mode `700`
+- Config, credential fallbacks, snippets, notes, and clipboard files are mode `600` under directories mode `700`
 - Clipboard history skips common secret patterns (API keys, tokens, PEM blocks)
 - Attaching clipboard to Ask AI redacts the same patterns
 - HTTPS AI / OAuth calls keep bearer tokens out of `ps` (curl `-K` config file, then deleted)
 - Unsigned script-commands and MCP process spawn are off until you turn them on
-- OAuth callback only accepts `GET /callback` on `127.0.0.1`
+- OAuth callback accepts only the expected HTTP/1.1 `GET /callback`, exact loopback Host/port, and constant-time state match
+- OAuth tokens are bound to the selected provider and API origin and are refreshed without putting secrets on process arguments
 
-See [SECURITY.md](SECURITY.md) for how to report issues.
+See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
+[PRIVACY.md](PRIVACY.md) for local/external data flow.
 
 ## Paths
 
 - Config: `~/.config/flint/config.json`
-- Auth: `~/.config/flint/auth.json`
+- Auth metadata or credential fallback: `~/.config/flint/auth.json`
+- API-key fallback (when no Secret Service is available): `~/.config/flint/api-keys.json`
 - Snippets: `~/.config/flint/snippets.json`
 - Notes: `~/.local/share/flint/notes.json`
 - Clipboard: `~/.local/share/flint/clipboard.json`

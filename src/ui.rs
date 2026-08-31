@@ -3,15 +3,13 @@ use std::rc::Rc;
 use std::thread;
 
 use gtk4::gdk::{Key, ModifierType};
-use gtk4::gdk::prelude::{DisplayExt, MonitorExt};
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box, CssProvider, Entry, EventControllerKey, GestureClick,
-    Image, Label, Orientation, Overflow, Overlay, PolicyType, ScrolledWindow, TextView, WrapMode,
-    STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, Application, ApplicationWindow, Box, CssProvider, Entry, EventControllerKey,
+    GestureClick, HeaderBar, Image, Label, Orientation, Overflow, Overlay, PolicyType,
+    STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, WrapMode,
 };
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::action;
 use crate::ai;
@@ -59,28 +57,24 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Flint")
-        .decorated(false)
+        .default_width(820)
+        .default_height(640)
+        .decorated(true)
+        .resizable(true)
         .icon_name("flint")
         .css_classes(["flint-root"])
         .build();
-
-    let (screen_w, screen_h) = output_size();
-    window.set_default_size(screen_w, screen_h);
-
-    window.init_layer_shell();
-    window.set_layer(Layer::Overlay);
-    window.set_namespace(Some("flint"));
-    window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Bottom, true);
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_margin(Edge::Top, 0);
-    window.set_margin(Edge::Bottom, 0);
-    window.set_margin(Edge::Left, 0);
-    window.set_margin(Edge::Right, 0);
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
-    window.set_exclusive_zone(0);
     window.set_hide_on_close(true);
+
+    // A client-side header bar gives every Wayland compositor a real drag target
+    // and standard window controls, even when server-side decorations are disabled.
+    let titlebar = HeaderBar::new();
+    titlebar.add_css_class("flint-titlebar");
+    titlebar.set_show_title_buttons(true);
+    let title = Label::new(Some("Flint"));
+    title.add_css_class("flint-title");
+    titlebar.set_title_widget(Some(&title));
+    window.set_titlebar(Some(&titlebar));
 
     load_css();
 
@@ -96,9 +90,14 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     let panel = Box::new(Orientation::Vertical, 0);
     panel.add_css_class("panel");
-    panel.set_halign(Align::Center);
-    panel.set_valign(Align::Start);
-    panel.set_margin_top((screen_h / 6).clamp(96, 280));
+    panel.set_halign(Align::Fill);
+    panel.set_valign(Align::Fill);
+    panel.set_hexpand(true);
+    panel.set_vexpand(true);
+    panel.set_margin_top(18);
+    panel.set_margin_bottom(18);
+    panel.set_margin_start(18);
+    panel.set_margin_end(18);
     panel.set_overflow(Overflow::Hidden);
 
     let search_row = Box::new(Orientation::Horizontal, 0);
@@ -466,8 +465,13 @@ impl Shell {
                 self.sign_in(&provider);
             }
             Action::SignOut => {
-                auth::clear();
-                self.set_status("Signed out");
+                let status = match auth::clear() {
+                    Ok(()) => "Signed out and removed the stored OAuth credential".into(),
+                    Err(error) => format!(
+                        "Signed out locally, but the desktop keyring could not be cleared: {error}"
+                    ),
+                };
+                self.set_status(status);
                 self.refresh();
             }
             Action::RefreshModels => self.refresh_models(),
@@ -538,13 +542,13 @@ impl Shell {
     fn run_ask(&self, prompt: &str) {
         let settings = self.state.borrow().catalog.settings.borrow().clone();
         let mut prompt = prompt.to_string();
-        if settings.general.attach_clipboard_to_ai {
-            if let Some(clip) = clipboard::current_text() {
-                if clipboard::looks_secret(&clip) {
-                    prompt = format!("{prompt}\n\nClipboard: [redacted — looked like a secret]");
-                } else {
-                    prompt = format!("{prompt}\n\nClipboard:\n{clip}");
-                }
+        if settings.general.attach_clipboard_to_ai
+            && let Some(clip) = clipboard::current_text()
+        {
+            if clipboard::looks_secret(&clip) {
+                prompt = format!("{prompt}\n\nClipboard: [redacted — looked like a secret]");
+            } else {
+                prompt = format!("{prompt}\n\nClipboard:\n{clip}");
             }
         }
         self.set_status(format!("Thinking with {}…", settings.ai.model));
@@ -576,7 +580,13 @@ impl Shell {
     fn show_ai_reply(&self, text: String, source: String) {
         let item = Item {
             id: "ask:reply".into(),
-            title: text.lines().next().unwrap_or("Answer").chars().take(72).collect(),
+            title: text
+                .lines()
+                .next()
+                .unwrap_or("Answer")
+                .chars()
+                .take(72)
+                .collect(),
             subtitle: format!("{source} · Enter copies"),
             keywords: text.clone(),
             kind: Kind::Ai,
@@ -610,8 +620,9 @@ impl Shell {
                     let _ = tx.send(voice.stop(&settings));
                 });
                 let shell = self.clone();
-                gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
-                    match rx.try_recv() {
+                gtk4::glib::timeout_add_local(
+                    std::time::Duration::from_millis(40),
+                    move || match rx.try_recv() {
                         Ok(Ok(text)) => {
                             shell.apply_transcript(text);
                             gtk4::glib::ControlFlow::Break
@@ -627,8 +638,8 @@ impl Shell {
                             shell.set_status("Dictation stopped unexpectedly");
                             gtk4::glib::ControlFlow::Break
                         }
-                    }
-                });
+                    },
+                );
             }
             voice::State::Transcribing => self.set_status("Still transcribing…"),
             voice::State::Idle => match self.state.borrow().voice.start(&settings) {
@@ -1002,33 +1013,9 @@ fn kind_icon(kind: Kind) -> &'static str {
     }
 }
 
-fn output_size() -> (i32, i32) {
-    let Some(display) = gtk4::gdk::Display::default() else {
-        return (1920, 1080);
-    };
-    let monitors = display.monitors();
-    let mut best = (1920, 1080);
-    let mut best_area = 0i32;
-    for i in 0..monitors.n_items() {
-        let Some(obj) = monitors.item(i) else {
-            continue;
-        };
-        let Ok(monitor) = obj.downcast::<gtk4::gdk::Monitor>() else {
-            continue;
-        };
-        let g = monitor.geometry();
-        let area = g.width() * g.height();
-        if area > best_area {
-            best_area = area;
-            best = (g.width(), g.height());
-        }
-    }
-    best
-}
-
 fn load_css() {
     let provider = CssProvider::new();
-    provider.load_from_string(CSS);
+    provider.load_from_data(CSS);
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,

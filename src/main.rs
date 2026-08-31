@@ -25,13 +25,13 @@ use std::rc::Rc;
 
 use gtk4::gio::prelude::*;
 use gtk4::glib::{OptionArg, OptionFlags};
-use gtk4::{gio, Application};
+use gtk4::{Application, gio};
 
 use catalog::Catalog;
 use config::Settings;
 use mode::Mode;
 
-const APP_ID: &str = "dev.flint.Launcher";
+const APP_ID: &str = "dev.flint.launcher";
 
 #[derive(Debug)]
 enum Cmd {
@@ -198,7 +198,7 @@ fn parse_args(args: &[OsString]) -> Cmd {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, Cmd};
+    use super::{Cmd, parse_args};
     use crate::mode::Mode;
     use std::ffi::OsString;
 
