@@ -151,6 +151,7 @@ version = "0.2.0"
 dependencies = [
  "dirs",
  "evalexpr",
+ "gdk-pixbuf",
  "gdk4",
  "gio",
  "glib",

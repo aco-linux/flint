@@ -1,8 +1,12 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use gtk4::gdk::{Key, ModifierType};
+use gtk4::gdk::{Key, ModifierType, Texture};
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
@@ -16,6 +20,8 @@ use crate::ai;
 use crate::auth;
 use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
+use crate::files;
+use crate::hypr;
 use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
@@ -43,6 +49,9 @@ pub struct Shell {
     detail: ScrolledWindow,
     detail_view: TextView,
     state: Rc<RefCell<State>>,
+    live_jobs: Sender<LiveJob>,
+    live_cancel: Arc<files::Cancel>,
+    thumb_jobs: Sender<PathBuf>,
 }
 
 struct State {
@@ -56,6 +65,20 @@ struct State {
     editing_note: Option<String>,
     voice: VoiceSession,
     search_gen: u64,
+    thumbs: HashMap<PathBuf, CachedThumb>,
+}
+
+struct CachedThumb {
+    mtime: u64,
+    texture: Texture,
+}
+
+struct LiveJob {
+    generation: u64,
+    query: String,
+    mode: Mode,
+    settings: crate::config::Settings,
+    usage: usage::Map,
 }
 
 pub fn build(app: &Application, catalog: Catalog) -> Shell {
@@ -219,6 +242,10 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     overlay.add_overlay(&panel);
     window.set_child(Some(&overlay));
 
+    let (live_tx, live_rx) = mpsc::channel();
+    let live_cancel = files::Cancel::new();
+    let (thumb_tx, thumb_rx) = mpsc::channel();
+
     let shell = Shell {
         window: window.clone(),
         entry: entry.clone(),
@@ -245,8 +272,17 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             editing_note: None,
             voice: VoiceSession::new(),
             search_gen: 0,
+            thumbs: HashMap::new(),
         })),
+        live_jobs: live_tx,
+        live_cancel: live_cancel.clone(),
+        thumb_jobs: thumb_tx,
     };
+
+    bind_shell(&shell);
+    start_live_worker(live_rx, live_cancel);
+    start_thumb_worker(thumb_rx);
+    start_hypr_watch();
 
     {
         let shell = shell.clone();
@@ -314,6 +350,9 @@ impl Clone for Shell {
             detail: self.detail.clone(),
             detail_view: self.detail_view.clone(),
             state: self.state.clone(),
+            live_jobs: self.live_jobs.clone(),
+            live_cancel: self.live_cancel.clone(),
+            thumb_jobs: self.thumb_jobs.clone(),
         }
     }
 }
@@ -346,7 +385,7 @@ impl Shell {
 
     fn refresh(&self) {
         let query = self.entry.text().to_string();
-        let (generation, include_in_root, windows_stale) = {
+        let (generation, include_in_root) = {
             let mut st = self.state.borrow_mut();
             if st.editing_note.is_some() {
                 return;
@@ -357,56 +396,28 @@ impl Shell {
             st.results = results;
             st.selected = 0;
             let include_in_root = st.catalog.settings.borrow().files.include_in_root;
-            let windows_stale = st.catalog.windows_stale();
-            (st.search_gen, include_in_root, windows_stale)
+            (st.search_gen, include_in_root)
         };
         self.sync_chrome();
         rebuild_rows(self);
         self.update_preview();
-        self.schedule_live(generation, query, include_in_root, windows_stale);
+        self.schedule_live(generation, query, include_in_root);
     }
 
-    fn schedule_live(
-        &self,
-        generation: u64,
-        query: String,
-        include_in_root: bool,
-        windows_stale: bool,
-    ) {
+    fn schedule_live(&self, generation: u64, query: String, include_in_root: bool) {
         let mode = self.state.borrow().mode;
-        if !catalog::live_needed(&query, mode, include_in_root, windows_stale) {
+        self.live_cancel.cancel();
+        if !catalog::live_needed(&query, mode, include_in_root) {
             return;
         }
         let settings = self.state.borrow().catalog.settings.borrow().clone();
         let usage = self.state.borrow().catalog.usage.clone();
-        let shell = self.clone();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
-            if shell.state.borrow().search_gen != generation {
-                return gtk4::glib::ControlFlow::Break;
-            }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let q = query.clone();
-            let s = settings.clone();
-            let u = usage.clone();
-            thread::spawn(move || {
-                let _ = tx.send(catalog::live_extras(&q, mode, &s, &u));
-            });
-            let shell = shell.clone();
-            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-                match rx.try_recv() {
-                    Ok(live) => {
-                        if shell.state.borrow().search_gen == generation {
-                            shell.apply_live(live);
-                        }
-                        gtk4::glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        gtk4::glib::ControlFlow::Break
-                    }
-                }
-            });
-            gtk4::glib::ControlFlow::Break
+        let _ = self.live_jobs.send(LiveJob {
+            generation,
+            query,
+            mode,
+            settings,
+            usage,
         });
     }
 
@@ -418,13 +429,6 @@ impl Shell {
                 .get(st.selected)
                 .map(|row| row.item.id.clone())
                 .unwrap_or_default();
-            if let Some(windows) = live.windows {
-                st.catalog.adopt_windows(windows);
-                let query = self.entry.text().to_string();
-                let scored = st.catalog.score_windows(&query);
-                st.results.retain(|row| !row.item.id.starts_with("win:"));
-                st.results.extend(scored);
-            }
             if let Some(weather) = live.weather {
                 st.results.retain(|row| row.item.id != "live:weather");
                 st.results.insert(0, weather);
@@ -448,6 +452,118 @@ impl Shell {
         self.sync_chrome();
         rebuild_rows(self);
         self.update_preview();
+        self.request_visible_thumbs();
+    }
+
+    fn apply_hypr_windows(&self, windows: Vec<crate::item::Item>) {
+        let query = self.entry.text().to_string();
+        let visible = {
+            let st = self.state.borrow();
+            st.visible && st.editing_note.is_none()
+        };
+        self.state.borrow().catalog.adopt_windows(windows);
+        if !visible {
+            return;
+        }
+        {
+            let mut st = self.state.borrow_mut();
+            let selected = st
+                .results
+                .get(st.selected)
+                .map(|row| row.item.id.clone())
+                .unwrap_or_default();
+            let scored = st.catalog.score_windows(&query);
+            st.results.retain(|row| !row.item.id.starts_with("win:"));
+            st.results.extend(scored);
+            st.results.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| a.item.title.cmp(&b.item.title))
+            });
+            st.results.dedup_by(|a, b| a.item.id == b.item.id);
+            if let Some(idx) = st.results.iter().position(|row| row.item.id == selected) {
+                st.selected = idx;
+            }
+        }
+        self.sync_chrome();
+        rebuild_rows(self);
+        self.update_preview();
+    }
+
+    fn show_preview_image(&self, path: &std::path::Path) {
+        if let Some(texture) = self.cached_texture(path) {
+            self.preview_image.set_paintable(Some(&texture));
+            self.preview_image.set_visible(true);
+            return;
+        }
+        self.preview_image.set_icon_name(Some("image-x-generic"));
+        self.preview_image.set_visible(true);
+        self.request_thumb(path.to_path_buf());
+    }
+
+    fn cached_texture(&self, path: &std::path::Path) -> Option<Texture> {
+        let mtime = crate::preview::mtime_secs(path);
+        let st = self.state.borrow();
+        st.thumbs.get(path).and_then(|cached| {
+            if cached.mtime == mtime {
+                Some(cached.texture.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn request_thumb(&self, path: PathBuf) {
+        let _ = self.thumb_jobs.send(path);
+    }
+
+    fn request_visible_thumbs(&self) {
+        let paths: Vec<PathBuf> = self
+            .state
+            .borrow()
+            .results
+            .iter()
+            .filter_map(|row| match &row.live {
+                Live::Image { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        for path in paths {
+            if self.cached_texture(&path).is_none() {
+                self.request_thumb(path);
+            }
+        }
+    }
+
+    fn apply_thumb(&self, path: PathBuf, texture: Texture) {
+        let mtime = crate::preview::mtime_secs(&path);
+        let (visible, selected_is, in_results) = {
+            let mut st = self.state.borrow_mut();
+            st.thumbs.insert(
+                path.clone(),
+                CachedThumb {
+                    mtime,
+                    texture: texture.clone(),
+                },
+            );
+            let selected_is = st.results.get(st.selected).is_some_and(
+                |row| matches!(&row.live, Live::Image { path: live } if live == &path),
+            );
+            let in_results = st
+                .results
+                .iter()
+                .any(|row| matches!(&row.live, Live::Image { path: live } if live == &path));
+            (st.visible, selected_is, in_results)
+        };
+        if !visible {
+            return;
+        }
+        if selected_is {
+            self.preview_image.set_paintable(Some(&texture));
+        }
+        if in_results {
+            rebuild_rows(self);
+        }
     }
 
     fn update_preview(&self) {
@@ -472,8 +588,7 @@ impl Shell {
                 self.preview.set_visible(true);
             }
             crate::preview::Preview::Image(path) => {
-                self.preview_image.set_from_file(Some(&path));
-                self.preview_image.set_visible(true);
+                self.show_preview_image(&path);
                 self.preview_text.set_text(&path.to_string_lossy());
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
@@ -1028,6 +1143,95 @@ impl Shell {
     }
 }
 
+thread_local! {
+    static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) };
+}
+
+enum UiMsg {
+    Live {
+        generation: u64,
+        extras: std::boxed::Box<LiveExtras>,
+    },
+    Thumb(crate::preview::DecodedImage),
+    Windows(Vec<Item>),
+}
+
+fn bind_shell(shell: &Shell) {
+    SHELL.with(|slot| *slot.borrow_mut() = Some(shell.clone()));
+}
+
+fn push_ui(inbox: &Arc<Mutex<Vec<UiMsg>>>, msg: UiMsg) {
+    inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+    let inbox = inbox.clone();
+    let _ = gtk4::glib::idle_add(move || {
+        let batch = {
+            let mut guard = inbox.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        SHELL.with(|slot| {
+            if let Some(shell) = slot.borrow().as_ref() {
+                for msg in batch {
+                    match msg {
+                        UiMsg::Live { generation, extras } => {
+                            if shell.state.borrow().search_gen == generation {
+                                shell.apply_live(*extras);
+                            }
+                        }
+                        UiMsg::Thumb(decoded) => {
+                            let path = decoded.path.clone();
+                            let texture = Texture::for_pixbuf(&decoded.to_pixbuf());
+                            shell.apply_thumb(path, texture);
+                        }
+                        UiMsg::Windows(windows) => shell.apply_hypr_windows(windows),
+                    }
+                }
+            }
+        });
+        gtk4::glib::ControlFlow::Break
+    });
+}
+
+fn start_live_worker(rx: mpsc::Receiver<LiveJob>, cancel: Arc<files::Cancel>) {
+    let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
+    thread::spawn(move || {
+        while let Ok(mut job) = rx.recv() {
+            while let Ok(next) = rx.try_recv() {
+                job = next;
+            }
+            cancel.reset();
+            let extras = files::with_cancel(cancel.clone(), || {
+                catalog::live_extras(&job.query, job.mode, &job.settings, &job.usage)
+            });
+            if cancel.is_cancelled() {
+                continue;
+            }
+            push_ui(
+                &inbox,
+                UiMsg::Live {
+                    generation: job.generation,
+                    extras: std::boxed::Box::new(extras),
+                },
+            );
+        }
+    });
+}
+
+fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>) {
+    let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
+    thread::spawn(move || {
+        while let Ok(path) = rx.recv() {
+            if let Some(decoded) = crate::preview::decode_image(&path) {
+                push_ui(&inbox, UiMsg::Thumb(decoded));
+            }
+        }
+    });
+}
+
+fn start_hypr_watch() {
+    let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
+    hypr::watch(move |windows| push_ui(&inbox, UiMsg::Windows(windows)));
+}
+
 fn rebuild_rows(shell: &Shell) {
     let host = &shell.results_host;
     while let Some(child) = host.last_child() {
@@ -1050,8 +1254,17 @@ fn rebuild_rows(shell: &Shell) {
             .iter()
             .map(|s| (s.item.clone(), s.live.clone()))
             .collect();
-        for (idx, (item, live)) in rows.into_iter().enumerate() {
-            let row = result_row(&item, &live, idx == selected);
+        drop(st);
+        let thumbs: Vec<Option<Texture>> = rows
+            .iter()
+            .map(|(_, live)| match live {
+                Live::Image { path } => shell.cached_texture(path),
+                _ => None,
+            })
+            .collect();
+        let mut st = shell.state.borrow_mut();
+        for (idx, ((item, live), thumb)) in rows.into_iter().zip(thumbs).enumerate() {
+            let row = result_row(&item, &live, idx == selected, thumb.as_ref());
             host.append(&row);
             st.rows.push(row);
         }
@@ -1129,7 +1342,7 @@ fn paint_selection(state: &State) {
     }
 }
 
-fn result_row(item: &Item, live: &Live, selected: bool) -> Box {
+fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>) -> Box {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("row");
     if selected {
@@ -1146,8 +1359,12 @@ fn result_row(item: &Item, live: &Live, selected: bool) -> Box {
     row.append(&accent);
 
     let icon = match live {
-        Live::Image { path } => {
-            let image = Image::from_file(path);
+        Live::Image { .. } => {
+            let image = if let Some(texture) = thumb {
+                Image::from_paintable(Some(texture))
+            } else {
+                Image::from_icon_name("image-x-generic")
+            };
             image.add_css_class("live-thumb");
             image
         }

@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -23,8 +22,6 @@ use crate::store;
 use crate::usage;
 use crate::weather;
 
-const WINDOWS_STALE: Duration = Duration::from_millis(750);
-
 pub struct Catalog {
     apps: Vec<Item>,
     commands: Vec<Item>,
@@ -32,7 +29,6 @@ pub struct Catalog {
     lexicon: Vec<String>,
     haystacks: RefCell<HashMap<String, String>>,
     windows: RefCell<Vec<Item>>,
-    windows_at: RefCell<Option<Instant>>,
     matcher: RefCell<Matcher>,
     pub(crate) usage: usage::Map,
     clips: Rc<RefCell<ClipStore>>,
@@ -61,7 +57,6 @@ impl Scored {
 pub struct LiveExtras {
     pub files: Vec<Scored>,
     pub weather: Option<Scored>,
-    pub windows: Option<Vec<Item>>,
 }
 
 impl Catalog {
@@ -84,14 +79,17 @@ impl Catalog {
                 }
             }
         }
+        let windows = hypr::load_windows();
+        for item in &windows {
+            haystacks.insert(item.id.clone(), item.haystack());
+        }
         Self {
             apps,
             commands,
             extensions,
             lexicon,
             haystacks: RefCell::new(haystacks),
-            windows: RefCell::new(Vec::new()),
-            windows_at: RefCell::new(None),
+            windows: RefCell::new(windows),
             matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
             usage: usage::load(),
             clips,
@@ -99,20 +97,13 @@ impl Catalog {
         }
     }
 
-    pub fn windows_stale(&self) -> bool {
-        match *self.windows_at.borrow() {
-            None => true,
-            Some(at) => at.elapsed() > WINDOWS_STALE,
-        }
-    }
-
     pub fn adopt_windows(&self, windows: Vec<Item>) {
         let mut cache = self.haystacks.borrow_mut();
+        cache.retain(|id, _| !id.starts_with("win:"));
         for item in &windows {
             cache.insert(item.id.clone(), item.haystack());
         }
         *self.windows.borrow_mut() = windows;
-        *self.windows_at.borrow_mut() = Some(Instant::now());
     }
 
     pub fn score_windows(&self, query: &str) -> Vec<Scored> {
@@ -783,24 +774,37 @@ impl Catalog {
     }
 }
 
-pub fn live_needed(query: &str, mode: Mode, include_in_root: bool, windows_stale: bool) -> bool {
-    if windows_stale || mode == Mode::Windows {
-        return true;
+fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
+    match mode {
+        Mode::Files => true,
+        Mode::Root if include_in_root => {
+            let query = files::parse_query(rest);
+            query.explicit || query.path_like || !query.extensions.is_empty()
+        }
+        Mode::Root
+        | Mode::Windows
+        | Mode::Clipboard
+        | Mode::Snippets
+        | Mode::Notes
+        | Mode::Ask
+        | Mode::Voice
+        | Mode::Settings
+        | Mode::Store => false,
     }
+}
+
+pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
     let (_, rest) = Mode::parse(query);
-    if intent::resolve(&rest)
-        .intents
-        .iter()
-        .any(|hit| hit.kind == IntentKind::Weather)
+    if mode == Mode::Root
+        && intent::resolve(&rest)
+            .intents
+            .iter()
+            .any(|hit| hit.kind == IntentKind::Weather)
         && weather::cached().is_none()
     {
         return true;
     }
-    match mode {
-        Mode::Files => true,
-        Mode::Root => include_in_root && files::parse_query(&rest).wants_files(),
-        _ => false,
-    }
+    asked_for_files(&rest, mode, include_in_root)
 }
 
 pub fn live_extras(
@@ -812,10 +816,7 @@ pub fn live_extras(
     let (parsed, rest) = Mode::parse(query);
     let mode = if mode == Mode::Root { parsed } else { mode };
     let q = rest;
-    let mut extras = LiveExtras {
-        windows: Some(hypr::load_windows()),
-        ..LiveExtras::default()
-    };
+    let mut extras = LiveExtras::default();
 
     if intent::resolve(&q)
         .intents
@@ -835,12 +836,7 @@ pub fn live_extras(
         ));
     }
 
-    let file_query = files::parse_query(&q);
-    let want_files = match mode {
-        Mode::Files => true,
-        Mode::Root => settings.files.include_in_root && file_query.wants_files(),
-        _ => false,
-    };
+    let want_files = asked_for_files(&q, mode, settings.files.include_in_root);
     if !want_files {
         return extras;
     }
@@ -1448,9 +1444,31 @@ mod tests {
             "swapped letters should still surface weather"
         );
         assert!(
-            catalog.windows.borrow().is_empty(),
-            "fast path must not wait on Hyprland"
+            !super::live_needed("firefox", crate::mode::Mode::Root, true),
+            "an app name must not schedule a worker"
         );
+        assert!(
+            !super::live_needed("we", crate::mode::Mode::Windows, true),
+            "window mode is in-memory now — no live pass"
+        );
+    }
+
+    #[test]
+    fn live_needed_is_files_or_uncached_weather() {
+        assert!(super::live_needed(
+            "markdown",
+            crate::mode::Mode::Root,
+            true
+        ));
+        assert!(super::live_needed("", crate::mode::Mode::Files, false));
+        assert!(!super::live_needed(
+            "clip rust",
+            crate::mode::Mode::Clipboard,
+            true
+        ));
+        if crate::weather::cached().is_none() {
+            assert!(super::live_needed("we", crate::mode::Mode::Root, false));
+        }
     }
 
     #[test]

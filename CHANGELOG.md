@@ -10,7 +10,10 @@
 - Intent engine: `we` is weather; live conditions come from wttr.in
 - Typo tolerance is general: Damerau–Levenshtein against app titles, file type words, filenames, notes, and settings — not a hardcoded example list
 - Swapped letters match (`weahter` → weather); the old matcher only rewarded missing letters
-- Fast path no longer shells out to `fd` or `hyprctl` per keystroke; windows and files arrive after the first paint
+- Fast path no longer shells out to `fd` or `hyprctl` per keystroke
+- Hyprland window list is pushed over `.socket2.sock`; keystrokes never poll `hyprctl`
+- One cancellable file worker; a new query kills in-flight `fd` instead of stacking threads
+- File previews read only the first bytes; images decode off the UI thread and cache
 - Usage ranking includes recency; a prefix bonus is no longer ~200× one use
 - Results have a live slot: weather, image thumbs, and document snippets render in the row
 - In-launcher side preview for images, text, folders, and playable media; Enter plays or opens to edit

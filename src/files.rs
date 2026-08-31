@@ -1,9 +1,80 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::item::{Action, Icon, Item, Kind};
+
+/// Cancels an in-flight `fd` / `find` / `locate` when the query is superseded.
+pub struct Cancel {
+    flag: AtomicBool,
+    pid: AtomicU32,
+}
+
+impl Cancel {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            flag: AtomicBool::new(false),
+            pid: AtomicU32::new(0),
+        })
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    pub fn reset(&self) {
+        self.flag.store(false, Ordering::SeqCst);
+        self.pid.store(0, Ordering::SeqCst);
+    }
+
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        let pid = self.pid.load(Ordering::SeqCst);
+        if pid != 0 {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    fn attach(&self, pid: u32) {
+        self.pid.store(pid, Ordering::SeqCst);
+    }
+
+    fn detach(&self) {
+        self.pid.store(0, Ordering::SeqCst);
+    }
+}
+
+thread_local! {
+    static CANCEL: RefCell<Option<Arc<Cancel>>> = const { RefCell::new(None) };
+}
+
+pub fn with_cancel<R>(cancel: Arc<Cancel>, f: impl FnOnce() -> R) -> R {
+    CANCEL.with(|slot| *slot.borrow_mut() = Some(cancel));
+    let result = f();
+    CANCEL.with(|slot| *slot.borrow_mut() = None);
+    result
+}
+
+fn cancelled() -> bool {
+    CANCEL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+    })
+}
+
+fn current_cancel() -> Option<Arc<Cancel>> {
+    CANCEL.with(|slot| slot.borrow().clone())
+}
 
 /// How many files root search can surface when the query looks like a type.
 pub const ROOT_FILE_LIMIT: usize = 80;
@@ -507,14 +578,23 @@ fn discover(
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
 
+    if cancelled() {
+        return Vec::new();
+    }
     push_unique(
         &mut paths,
         &mut seen,
         fd_search(query, limit, include_hidden, extra_roots),
     );
+    if cancelled() {
+        return Vec::new();
+    }
     if paths.len() < limit && system_wide {
         let remain = limit.saturating_sub(paths.len());
         push_unique(&mut paths, &mut seen, locate_search(query, remain));
+    }
+    if cancelled() {
+        return Vec::new();
     }
     if paths.is_empty() {
         push_unique(
@@ -522,6 +602,9 @@ fn discover(
             &mut seen,
             find_search(query, limit, include_hidden, extra_roots),
         );
+    }
+    if cancelled() {
+        return Vec::new();
     }
     if paths.is_empty() {
         push_unique(
@@ -818,9 +901,26 @@ fn run_find(root: &Path, query: &FileQuery, limit: usize, include_hidden: bool) 
 }
 
 fn read_paths(mut cmd: Command, root: &Path) -> Vec<PathBuf> {
+    if cancelled() {
+        return Vec::new();
+    }
     cmd.stdin(Stdio::null());
     cmd.stderr(Stdio::null());
-    let Ok(output) = cmd.output() else {
+    cmd.stdout(Stdio::piped());
+    let Ok(child) = cmd.spawn() else {
+        return Vec::new();
+    };
+    if let Some(cancel) = current_cancel() {
+        cancel.attach(child.id());
+    }
+    let output = child.wait_with_output();
+    if let Some(cancel) = current_cancel() {
+        cancel.detach();
+        if cancel.is_cancelled() {
+            return Vec::new();
+        }
+    }
+    let Ok(output) = output else {
         return Vec::new();
     };
     if !output.status.success() && output.stdout.is_empty() {
