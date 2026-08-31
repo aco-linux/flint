@@ -12,7 +12,7 @@
 - Swapped letters match (`weahter` → weather); the old matcher only rewarded missing letters
 - Fast path no longer shells out to `fd` or `hyprctl` per keystroke
 - Hyprland window list is pushed over `.socket2.sock`; keystrokes never poll `hyprctl`
-- One cancellable file worker; a new query kills in-flight `fd` instead of stacking threads
+- One cancellable file worker; a new query SIGKILLs the in-flight process group instead of stacking threads or forking `kill`
 - File previews read only the first bytes; images decode off the UI thread and cache
 - Usage ranking includes recency; a prefix bonus is no longer ~200× one use
 - Results have a live slot: weather, image thumbs, and document snippets render in the row
