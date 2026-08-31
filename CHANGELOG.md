@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.3.0 — search, ranking, and dictation
+
+- Starting dictation no longer aborts: the GTK callback dropped its `RefCell` borrow before updating status
 - File search understands type words (`markdown`, `pdf`, `images`), extensions (`*.md`), and filters (`type:md readme`)
 - Search Files mode (`file`, Ctrl+F, `--files`) returns a long scrollable list instead of 12 rows
 - Root search mixes apps with many more file hits; `plocate`/`locate` covers folders outside `$HOME`

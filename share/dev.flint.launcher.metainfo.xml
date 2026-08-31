@@ -39,6 +39,15 @@
   </supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-08-31">
+      <description>
+        <ul>
+          <li>Instant search, recency ranking, and live file and weather results</li>
+          <li>Fix dictation aborting the app when recording starts</li>
+          <li>In-launcher previews for images, documents, folders, and media</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-08-31">
       <description>
         <ul>
