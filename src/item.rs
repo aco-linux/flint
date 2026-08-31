@@ -20,6 +20,8 @@ pub enum Kind {
     Settings,
     Store,
     Script,
+    Weather,
+    Media,
 }
 
 impl Kind {
@@ -41,6 +43,8 @@ impl Kind {
             Kind::Settings => "SET",
             Kind::Store => "STORE",
             Kind::Script => "SCRIPT",
+            Kind::Weather => "NOW",
+            Kind::Media => "MEDIA",
         }
     }
 }
@@ -57,6 +61,9 @@ pub enum Action {
     Paste(String),
     OpenUri(String),
     OpenPath(PathBuf),
+    PlayMedia {
+        path: PathBuf,
+    },
     Spawn {
         program: String,
         args: Vec<String>,

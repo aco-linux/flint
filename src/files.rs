@@ -773,14 +773,20 @@ pub fn file_item(path: PathBuf, type_label: Option<&str>) -> Item {
         .unwrap_or_default();
     let alias = type_label.unwrap_or("");
     let keywords = format!("{alias} {ext} {parent} file folder");
+    let media = crate::preview::classify(&path);
+    let (kind, action) = if crate::preview::is_playable(media) {
+        (Kind::Media, Action::PlayMedia { path: path.clone() })
+    } else {
+        (Kind::File, Action::OpenPath(path.clone()))
+    };
     Item {
         id: format!("file:{}", path.display()),
         title: name,
         subtitle,
         keywords,
-        kind: Kind::File,
+        kind,
         icon: file_icon(&path),
-        action: Action::OpenPath(path),
+        action,
     }
 }
 

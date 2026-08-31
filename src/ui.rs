@@ -14,7 +14,7 @@ use gtk4::{
 use crate::action;
 use crate::ai;
 use crate::auth;
-use crate::catalog::{Catalog, Scored};
+use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
 use crate::item::{Action, Icon, Item, Kind};
 use crate::mode::Mode;
@@ -35,6 +35,9 @@ pub struct Shell {
     empty_sub: Label,
     results_host: Box,
     results_scroll: ScrolledWindow,
+    preview: Box,
+    preview_image: Image,
+    preview_text: Label,
     empty: Box,
     status: Label,
     detail: ScrolledWindow,
@@ -52,13 +55,14 @@ struct State {
     status: String,
     editing_note: Option<String>,
     voice: VoiceSession,
+    search_gen: u64,
 }
 
 pub fn build(app: &Application, catalog: Catalog) -> Shell {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Flint")
-        .default_width(820)
+        .default_width(980)
         .default_height(720)
         .decorated(true)
         .resizable(true)
@@ -151,7 +155,46 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         .child(&results_host)
         .css_classes(["results-scroll"])
         .build();
-    panel.append(&scroll);
+
+    let preview_image = Image::new();
+    preview_image.set_pixel_size(240);
+    preview_image.add_css_class("preview-image");
+    preview_image.set_visible(false);
+
+    let preview_text = Label::new(None);
+    preview_text.set_xalign(0.0);
+    preview_text.set_yalign(0.0);
+    preview_text.set_wrap(true);
+    preview_text.set_wrap_mode(pango::WrapMode::WordChar);
+    preview_text.set_selectable(true);
+    preview_text.add_css_class("preview-text");
+
+    let preview_inner = Box::new(Orientation::Vertical, 10);
+    preview_inner.append(&preview_image);
+    preview_inner.append(&preview_text);
+
+    let preview_scroll = ScrolledWindow::builder()
+        .min_content_width(280)
+        .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
+        .child(&preview_inner)
+        .build();
+
+    let preview = Box::new(Orientation::Vertical, 0);
+    preview.add_css_class("preview");
+    preview.set_hexpand(false);
+    preview.set_vexpand(true);
+    preview.set_width_request(300);
+    preview.append(&preview_scroll);
+    preview.set_visible(false);
+
+    let body = Box::new(Orientation::Horizontal, 0);
+    body.add_css_class("body");
+    body.set_hexpand(true);
+    body.set_vexpand(true);
+    body.append(&scroll);
+    body.append(&preview);
+    panel.append(&body);
 
     let detail_view = TextView::builder()
         .wrap_mode(WrapMode::WordChar)
@@ -184,6 +227,9 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         empty_sub: empty_sub.clone(),
         results_host: results_host.clone(),
         results_scroll: scroll.clone(),
+        preview: preview.clone(),
+        preview_image: preview_image.clone(),
+        preview_text: preview_text.clone(),
         empty: empty.clone(),
         status: status.clone(),
         detail: detail.clone(),
@@ -198,6 +244,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             status: String::new(),
             editing_note: None,
             voice: VoiceSession::new(),
+            search_gen: 0,
         })),
     };
 
@@ -259,6 +306,9 @@ impl Clone for Shell {
             empty_sub: self.empty_sub.clone(),
             results_host: self.results_host.clone(),
             results_scroll: self.results_scroll.clone(),
+            preview: self.preview.clone(),
+            preview_image: self.preview_image.clone(),
+            preview_text: self.preview_text.clone(),
             empty: self.empty.clone(),
             status: self.status.clone(),
             detail: self.detail.clone(),
@@ -296,18 +346,131 @@ impl Shell {
 
     fn refresh(&self) {
         let query = self.entry.text().to_string();
-        {
+        let (generation, include_in_root) = {
             let mut st = self.state.borrow_mut();
             if st.editing_note.is_some() {
                 return;
             }
-            let (mode, results) = st.catalog.search(&query);
+            st.search_gen = st.search_gen.saturating_add(1);
+            let (mode, results) = st.catalog.search_fast(&query);
             st.mode = mode;
             st.results = results;
             st.selected = 0;
+            let include_in_root = st.catalog.settings.borrow().files.include_in_root;
+            (st.search_gen, include_in_root)
+        };
+        self.sync_chrome();
+        rebuild_rows(self);
+        self.update_preview();
+        self.schedule_live(generation, query, include_in_root);
+    }
+
+    fn schedule_live(&self, generation: u64, query: String, include_in_root: bool) {
+        let mode = self.state.borrow().mode;
+        if !catalog::live_needed(&query, mode, include_in_root) {
+            return;
+        }
+        let settings = self.state.borrow().catalog.settings.borrow().clone();
+        let usage = self.state.borrow().catalog.usage.clone();
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+            if shell.state.borrow().search_gen != generation {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let q = query.clone();
+            let s = settings.clone();
+            let u = usage.clone();
+            thread::spawn(move || {
+                let _ = tx.send(catalog::live_extras(&q, mode, &s, &u));
+            });
+            let shell = shell.clone();
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+                match rx.try_recv() {
+                    Ok(live) => {
+                        if shell.state.borrow().search_gen == generation {
+                            shell.apply_live(live);
+                        }
+                        gtk4::glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        gtk4::glib::ControlFlow::Break
+                    }
+                }
+            });
+            gtk4::glib::ControlFlow::Break
+        });
+    }
+
+    fn apply_live(&self, live: LiveExtras) {
+        {
+            let mut st = self.state.borrow_mut();
+            let selected = st
+                .results
+                .get(st.selected)
+                .map(|row| row.item.id.clone())
+                .unwrap_or_default();
+            if let Some(weather) = live.weather {
+                st.results.retain(|row| row.item.id != "live:weather");
+                st.results.insert(0, weather);
+            }
+            let incoming: std::collections::HashSet<String> =
+                live.files.iter().map(|row| row.item.id.clone()).collect();
+            st.results.retain(|row| !incoming.contains(&row.item.id));
+            st.results.extend(live.files);
+            st.results.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| a.item.title.cmp(&b.item.title))
+            });
+            st.results.dedup_by(|a, b| a.item.id == b.item.id);
+            if let Some(idx) = st.results.iter().position(|row| row.item.id == selected) {
+                st.selected = idx;
+            } else {
+                st.selected = 0;
+            }
         }
         self.sync_chrome();
         rebuild_rows(self);
+        self.update_preview();
+    }
+
+    fn update_preview(&self) {
+        if self.state.borrow().editing_note.is_some() {
+            self.preview.set_visible(false);
+            return;
+        }
+        let item = {
+            let st = self.state.borrow();
+            st.results.get(st.selected).map(|row| row.item.clone())
+        };
+        let Some(item) = item else {
+            self.preview.set_visible(false);
+            return;
+        };
+        match crate::preview::for_item(&item) {
+            crate::preview::Preview::None => self.preview.set_visible(false),
+            crate::preview::Preview::Text(text) => {
+                self.preview_image.set_visible(false);
+                self.preview_text.set_text(&text);
+                self.preview_text.set_visible(true);
+                self.preview.set_visible(true);
+            }
+            crate::preview::Preview::Image(path) => {
+                self.preview_image.set_from_file(Some(&path));
+                self.preview_image.set_visible(true);
+                self.preview_text.set_text(&path.to_string_lossy());
+                self.preview_text.set_visible(true);
+                self.preview.set_visible(true);
+            }
+            crate::preview::Preview::Media { hint } => {
+                self.preview_image.set_visible(false);
+                self.preview_text.set_text(&hint);
+                self.preview_text.set_visible(true);
+                self.preview.set_visible(true);
+            }
+        }
     }
 
     fn sync_chrome(&self) {
@@ -335,6 +498,9 @@ impl Shell {
         }
         let editing = st.editing_note.is_some();
         self.detail.set_visible(editing);
+        if editing {
+            self.preview.set_visible(false);
+        }
     }
 
     fn set_status(&self, text: impl Into<String>) {
@@ -436,6 +602,7 @@ impl Shell {
         if let Some(row) = row {
             scroll_row_into_view(&self.results_scroll, &self.results_host, &row);
         }
+        self.update_preview();
     }
 
     fn activate(&self) {
@@ -906,7 +1073,7 @@ fn result_hint(state: &State) -> Option<String> {
     let files = state
         .results
         .iter()
-        .filter(|row| row.item.kind == Kind::File)
+        .filter(|row| matches!(row.item.kind, Kind::File | Kind::Media))
         .count();
     if state.mode == Mode::Files || files >= 8 {
         if files == n {
@@ -1083,6 +1250,8 @@ fn kind_icon(kind: Kind) -> &'static str {
         Kind::Settings => "preferences-system",
         Kind::Store => "folder-download",
         Kind::Script => "utilities-terminal",
+        Kind::Weather => "weather-few-clouds",
+        Kind::Media => "audio-x-generic",
     }
 }
 

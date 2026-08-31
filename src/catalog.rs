@@ -10,6 +10,7 @@ use crate::config::Settings;
 use crate::desktop;
 use crate::files;
 use crate::hypr;
+use crate::intent::{self, IntentKind};
 use crate::item::{Action, Icon, Item, Kind};
 use crate::mode::Mode;
 use crate::models;
@@ -18,12 +19,13 @@ use crate::smart;
 use crate::snippets;
 use crate::store;
 use crate::usage;
+use crate::weather;
 
 pub struct Catalog {
     apps: Vec<Item>,
     commands: Vec<Item>,
     extensions: Vec<Item>,
-    usage: std::collections::HashMap<String, u32>,
+    pub(crate) usage: std::collections::HashMap<String, u32>,
     clips: Rc<RefCell<ClipStore>>,
     pub settings: Rc<RefCell<Settings>>,
 }
@@ -32,6 +34,12 @@ pub struct Catalog {
 pub struct Scored {
     pub item: Item,
     pub score: u32,
+}
+
+#[derive(Clone, Default)]
+pub struct LiveExtras {
+    pub files: Vec<Scored>,
+    pub weather: Option<Scored>,
 }
 
 impl Catalog {
@@ -46,7 +54,7 @@ impl Catalog {
         }
     }
 
-    pub fn search(&self, query: &str) -> (Mode, Vec<Scored>) {
+    pub fn search_fast(&self, query: &str) -> (Mode, Vec<Scored>) {
         let (mode, rest) = Mode::parse(query);
         let results = match mode {
             Mode::Root => self.search_root(&rest),
@@ -67,12 +75,9 @@ impl Catalog {
         let query = query.trim();
         let mut results = Vec::new();
         let settings = self.settings.borrow();
-        let include_files = settings.files.include_in_root;
+        let include_in_root = settings.files.include_in_root;
         let file_limit = settings.files.max_results.min(files::ROOT_FILE_LIMIT);
         let mix_limit = settings.general.max_results.max(24);
-        let hidden = settings.files.include_hidden;
-        let system_wide = settings.files.system_wide;
-        let extra_roots = settings.files.search_roots.clone();
         drop(settings);
 
         if query.is_empty() {
@@ -90,6 +95,21 @@ impl Catalog {
                 item,
                 score: 95_000,
             });
+        }
+
+        let lexicon: Vec<&str> = self.apps.iter().map(|app| app.title.as_str()).collect();
+        let meaning = intent::resolve_with(query, &lexicon);
+        for hit in &meaning.intents {
+            match hit.kind {
+                IntentKind::Weather => results.push(Scored {
+                    item: weather::item(weather::cached().as_ref()),
+                    score: 70_000 + hit.score,
+                }),
+                IntentKind::Time => results.push(Scored {
+                    item: weather::time_item(),
+                    score: 60_000 + hit.score,
+                }),
+            }
         }
 
         if query.starts_with('>') {
@@ -157,10 +177,29 @@ impl Catalog {
                     item: item.clone(),
                     score,
                 });
+            } else {
+                for expansion in &meaning.expansions {
+                    let expanded =
+                        Pattern::parse(expansion, CaseMatching::Smart, Normalization::Smart);
+                    if let Some(score) = rank(
+                        &mut matcher,
+                        &expanded,
+                        expansion,
+                        item,
+                        &self.usage,
+                        file_heavy,
+                    ) {
+                        results.push(Scored {
+                            item: item.clone(),
+                            score: score.saturating_sub(600),
+                        });
+                        break;
+                    }
+                }
             }
         }
 
-        if include_files && file_query.wants_files() {
+        if include_in_root && file_query.wants_files() {
             for item in files::well_known_folders(query) {
                 let score = rank(
                     &mut matcher,
@@ -171,17 +210,6 @@ impl Catalog {
                     file_heavy,
                 )
                 .unwrap_or(8_000);
-                results.push(Scored { item, score });
-            }
-            for item in files::search(query, file_limit, hidden, &extra_roots, system_wide) {
-                let score = rank_file(
-                    &mut matcher,
-                    &pattern,
-                    query,
-                    &item,
-                    &self.usage,
-                    file_heavy,
-                );
                 results.push(Scored { item, score });
             }
         }
@@ -213,22 +241,12 @@ impl Catalog {
     fn search_files(&self, query: &str) -> Vec<Scored> {
         let settings = self.settings.borrow();
         let limit = settings.files.max_results.max(files::FILES_MODE_LIMIT);
-        let hidden = settings.files.include_hidden;
-        let system_wide = settings.files.system_wide;
-        let extra_roots = settings.files.search_roots.clone();
         drop(settings);
 
         let q = query.trim();
         let mut results = Vec::new();
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        let pattern = Pattern::parse(
-            if q.is_empty() { "file" } else { q },
-            CaseMatching::Smart,
-            Normalization::Smart,
-        );
 
         if q.is_empty() {
-            let mut recent_ids = Vec::new();
             let mut used: Vec<(String, u32)> = self
                 .usage
                 .iter()
@@ -239,25 +257,12 @@ impl Catalog {
             for (id, count) in used.into_iter().take(24) {
                 let path = std::path::PathBuf::from(id.trim_start_matches("file:"));
                 if path.exists() {
-                    recent_ids.push(id);
                     let item = files::file_item(path, None);
                     results.push(Scored {
                         score: 20_000 + count.saturating_mul(40),
                         item,
                     });
                 }
-            }
-            for item in files::recent(40, hidden, &extra_roots) {
-                if recent_ids.iter().any(|id| id == &item.id) {
-                    continue;
-                }
-                results.push(Scored {
-                    score: 8_000
-                        + files::recency_bonus(std::path::Path::new(
-                            item.id.trim_start_matches("file:"),
-                        )),
-                    item,
-                });
             }
             return finish_limited(results, limit);
         }
@@ -267,10 +272,6 @@ impl Catalog {
                 item,
                 score: 30_000,
             });
-        }
-        for item in files::search(q, limit, hidden, &extra_roots, system_wide) {
-            let score = rank_file(&mut matcher, &pattern, q, &item, &self.usage, true);
-            results.push(Scored { item, score });
         }
         finish_limited(results, limit)
     }
@@ -713,6 +714,91 @@ impl Catalog {
     }
 }
 
+pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
+    let (_, rest) = Mode::parse(query);
+    if intent::resolve(&rest)
+        .intents
+        .iter()
+        .any(|hit| hit.kind == IntentKind::Weather)
+        && weather::cached().is_none()
+    {
+        return true;
+    }
+    match mode {
+        Mode::Files => true,
+        Mode::Root => include_in_root && files::parse_query(&rest).wants_files(),
+        _ => false,
+    }
+}
+
+pub fn live_extras(
+    query: &str,
+    mode: Mode,
+    settings: &crate::config::Settings,
+    usage: &std::collections::HashMap<String, u32>,
+) -> LiveExtras {
+    let (parsed, rest) = Mode::parse(query);
+    let mode = if mode == Mode::Root { parsed } else { mode };
+    let q = rest;
+    let mut extras = LiveExtras::default();
+
+    if intent::resolve(&q)
+        .intents
+        .iter()
+        .any(|hit| hit.kind == IntentKind::Weather)
+        && let Ok(snap) = weather::fetch()
+    {
+        extras.weather = Some(Scored {
+            item: weather::item(Some(&snap)),
+            score: 88_000,
+        });
+    }
+
+    let file_query = files::parse_query(&q);
+    let want_files = match mode {
+        Mode::Files => true,
+        Mode::Root => settings.files.include_in_root && file_query.wants_files(),
+        _ => false,
+    };
+    if !want_files {
+        return extras;
+    }
+
+    let limit = if mode == Mode::Files {
+        settings.files.max_results.max(files::FILES_MODE_LIMIT)
+    } else {
+        settings.files.max_results.min(files::ROOT_FILE_LIMIT)
+    };
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::parse(
+        if q.is_empty() { "file" } else { &q },
+        CaseMatching::Smart,
+        Normalization::Smart,
+    );
+    let items = if q.is_empty() {
+        files::recent(
+            40,
+            settings.files.include_hidden,
+            &settings.files.search_roots,
+        )
+    } else {
+        files::search(
+            &q,
+            limit,
+            settings.files.include_hidden,
+            &settings.files.search_roots,
+            settings.files.system_wide,
+        )
+    };
+    for item in items {
+        extras.files.push(Scored {
+            score: rank_file(&mut matcher, &pattern, &q, &item, usage, true),
+            item,
+        });
+    }
+    extras
+}
+
 fn extension_items() -> Vec<Item> {
     vec![
         Item {
@@ -905,8 +991,11 @@ fn rank(
     let hay = item.haystack();
     let title_score = pattern.score(Utf32Str::new(&item.title, &mut buf), matcher);
     buf.clear();
-    let hay_score = pattern.score(Utf32Str::new(&hay, &mut buf), matcher)?;
-    let mut score = hay_score;
+    let hay_score = pattern.score(Utf32Str::new(&hay, &mut buf), matcher);
+    let mut score = match hay_score {
+        Some(value) => value,
+        None => intent::title_typo_score(query, &item.title)?,
+    };
     if let Some(ts) = title_score {
         score = score.saturating_add(ts.saturating_mul(2));
     }
@@ -916,8 +1005,10 @@ fn rank(
     }
     score = score.saturating_add(usage_of(usage_map, &item.id).saturating_mul(40));
     score = score.saturating_add(match item.kind {
+        Kind::Weather => 220,
         Kind::Extension => 120,
         Kind::Ai | Kind::Note => 90,
+        Kind::Media => 90,
         Kind::App => 80,
         Kind::Window => 70,
         Kind::Snippet => 70,
@@ -1170,5 +1261,24 @@ mod tests {
     fn mode_prefix_still_works() {
         assert_eq!(Mode::parse("clip rust").0, Mode::Clipboard);
         assert_eq!(Mode::parse("file markdown").0, Mode::Files);
+    }
+
+    #[test]
+    fn we_surfaces_live_weather() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let (mode, results) = catalog.search_fast("we");
+        assert_eq!(mode, crate::mode::Mode::Root);
+        assert!(
+            results.iter().any(|row| row.item.id == "live:weather"),
+            "typing we should surface weather"
+        );
     }
 }

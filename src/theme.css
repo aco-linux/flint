@@ -94,6 +94,29 @@ entry.search placeholder {
   min-height: 160px;
 }
 
+.body {
+  min-height: 160px;
+}
+
+.preview {
+  min-width: 280px;
+  max-width: 340px;
+  padding: 12px 16px 12px 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.preview-text {
+  color: #c4b7aa;
+  font-family: "IBM Plex Mono", Inter, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.preview-image {
+  min-width: 160px;
+  min-height: 120px;
+}
+
 .row {
   border-radius: 10px;
   padding: 8px 10px;

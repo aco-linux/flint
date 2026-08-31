@@ -56,6 +56,9 @@ Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to cre
 
 Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
+- Type `we` and Flint already means weather: it geolocates you and fills in the current conditions. Close spellings (`weatr`, `wether`) still resolve.
+- Apps still match through typos (`firfox` → Firefox). Each keystroke updates instantly; file hits and live weather stream in without blocking the list.
+- Selecting a result shows a preview in Flint: images, the start of a document, a folder listing, or a play prompt for audio/video. Enter plays media or opens the file in your editor.
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
 - Calculator, unit conversion (`10 km to mi`, `32f`), hex colors (`#ff5a1f`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.

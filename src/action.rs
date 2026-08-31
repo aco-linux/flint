@@ -27,6 +27,7 @@ pub fn run(action: &Action) {
                 gtk4::gio::AppInfo::launch_default_for_uri(uri, gtk4::gio::AppLaunchContext::NONE);
         }
         Action::OpenPath(path) => open_path(path),
+        Action::PlayMedia { path } => play_media(path),
         Action::Spawn { program, args } => {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = detach(program, &args);
@@ -102,6 +103,25 @@ fn launch_desktop(path: &Path) {
     if !id.is_empty() {
         let _ = detach("gtk-launch", &[id]);
     }
+}
+
+fn play_media(path: &Path) {
+    let Some(path_str) = path.to_str() else {
+        return;
+    };
+    for (bin, prefix) in [
+        ("mpv", &["--force-window=immediate"][..]),
+        ("vlc", &[][..]),
+        ("ffplay", &["-autoexit"][..]),
+    ] {
+        if which(bin) {
+            let mut args: Vec<&str> = prefix.to_vec();
+            args.push(path_str);
+            let _ = detach(bin, &args);
+            return;
+        }
+    }
+    open_path(path);
 }
 
 fn open_path(path: &Path) {
