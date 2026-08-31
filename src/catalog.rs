@@ -1,7 +1,7 @@
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -10,20 +10,31 @@ use crate::auth;
 use crate::clipboard::{self, Store as ClipStore};
 use crate::config::Settings;
 use crate::desktop;
+use crate::files;
 use crate::hypr;
-use crate::item::{Action, Icon, Item, Kind};
+use crate::intent::{self, IntentKind};
+use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
+use crate::smart;
 use crate::snippets;
 use crate::store;
 use crate::usage;
+use crate::weather;
+
+const WINDOWS_STALE: Duration = Duration::from_millis(750);
 
 pub struct Catalog {
     apps: Vec<Item>,
     commands: Vec<Item>,
     extensions: Vec<Item>,
-    usage: std::collections::HashMap<String, u32>,
+    lexicon: Vec<String>,
+    haystacks: RefCell<HashMap<String, String>>,
+    windows: RefCell<Vec<Item>>,
+    windows_at: RefCell<Option<Instant>>,
+    matcher: RefCell<Matcher>,
+    pub(crate) usage: usage::Map,
     clips: Rc<RefCell<ClipStore>>,
     pub settings: Rc<RefCell<Settings>>,
 }
@@ -32,24 +43,88 @@ pub struct Catalog {
 pub struct Scored {
     pub item: Item,
     pub score: u32,
+    pub live: Live,
+}
+
+impl Scored {
+    pub(crate) fn new(item: Item, score: u32) -> Self {
+        let live = Live::from_item(&item);
+        Self { item, score, live }
+    }
+
+    fn with_live(item: Item, score: u32, live: Live) -> Self {
+        Self { item, score, live }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct LiveExtras {
+    pub files: Vec<Scored>,
+    pub weather: Option<Scored>,
+    pub windows: Option<Vec<Item>>,
 }
 
 impl Catalog {
     pub fn load(clips: Rc<RefCell<ClipStore>>, settings: Rc<RefCell<Settings>>) -> Self {
+        let apps = desktop::load_apps();
+        let commands = system_commands();
+        let extensions = extension_items();
+        let mut haystacks = HashMap::new();
+        let mut lexicon = files::type_words();
+        for item in apps.iter().chain(commands.iter()).chain(extensions.iter()) {
+            haystacks.insert(item.id.clone(), item.haystack());
+            lexicon.push(item.title.clone());
+            for part in item
+                .title
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .chain(item.keywords.split_whitespace())
+            {
+                if part.len() >= 4 {
+                    lexicon.push(part.to_string());
+                }
+            }
+        }
         Self {
-            apps: desktop::load_apps(),
-            commands: system_commands(),
-            extensions: extension_items(),
+            apps,
+            commands,
+            extensions,
+            lexicon,
+            haystacks: RefCell::new(haystacks),
+            windows: RefCell::new(Vec::new()),
+            windows_at: RefCell::new(None),
+            matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
             usage: usage::load(),
             clips,
             settings,
         }
     }
 
-    pub fn search(&self, query: &str) -> (Mode, Vec<Scored>) {
+    pub fn windows_stale(&self) -> bool {
+        match *self.windows_at.borrow() {
+            None => true,
+            Some(at) => at.elapsed() > WINDOWS_STALE,
+        }
+    }
+
+    pub fn adopt_windows(&self, windows: Vec<Item>) {
+        let mut cache = self.haystacks.borrow_mut();
+        for item in &windows {
+            cache.insert(item.id.clone(), item.haystack());
+        }
+        *self.windows.borrow_mut() = windows;
+        *self.windows_at.borrow_mut() = Some(Instant::now());
+    }
+
+    pub fn score_windows(&self, query: &str) -> Vec<Scored> {
+        let windows = self.windows.borrow();
+        self.score_pool(&windows, query, 18)
+    }
+
+    pub fn search_fast(&self, query: &str) -> (Mode, Vec<Scored>) {
         let (mode, rest) = Mode::parse(query);
         let results = match mode {
             Mode::Root => self.search_root(&rest),
+            Mode::Files => self.search_files(&rest),
             Mode::Windows => self.search_windows(&rest),
             Mode::Clipboard => self.search_clipboard(&rest),
             Mode::Snippets => self.search_snippets(&rest),
@@ -65,33 +140,46 @@ impl Catalog {
     fn search_root(&self, query: &str) -> Vec<Scored> {
         let query = query.trim();
         let mut results = Vec::new();
+        let settings = self.settings.borrow();
+        let include_in_root = settings.files.include_in_root;
+        let file_limit = settings.files.max_results.min(files::ROOT_FILE_LIMIT);
+        let mix_limit = settings.general.max_results.max(24);
+        drop(settings);
 
         if query.is_empty() {
             return self.empty_state();
         }
 
         if let Some(item) = calculator_item(query) {
-            results.push(Scored {
-                item,
-                score: 100_000,
-            });
+            results.push(Scored::new(item, 100_000));
+        }
+        for item in smart::instant_items(query) {
+            results.push(Scored::new(item, 95_000));
+        }
+
+        let lexicon: Vec<&str> = self.lexicon.iter().map(String::as_str).collect();
+        let meaning = intent::resolve_with(query, &lexicon);
+        for hit in &meaning.intents {
+            match hit.kind {
+                IntentKind::Weather => results.push(Scored::new(
+                    weather::item(weather::cached().as_ref()),
+                    70_000 + hit.score,
+                )),
+                IntentKind::Time => {
+                    results.push(Scored::new(weather::time_item(), 60_000 + hit.score))
+                }
+            }
         }
 
         if query.starts_with('>') {
             let cmd = query.trim_start_matches('>').trim();
             if !cmd.is_empty() {
-                results.push(Scored {
-                    item: run_item(cmd.to_string(), false),
-                    score: 90_000,
-                });
+                results.push(Scored::new(run_item(cmd.to_string(), false), 90_000));
             }
         } else if query.starts_with('$') {
             let cmd = query.trim_start_matches('$').trim();
             if !cmd.is_empty() {
-                results.push(Scored {
-                    item: run_item(cmd.to_string(), true),
-                    score: 90_000,
-                });
+                results.push(Scored::new(run_item(cmd.to_string(), true), 90_000));
             }
         }
 
@@ -101,8 +189,8 @@ impl Catalog {
             } else {
                 format!("https://{query}")
             };
-            results.push(Scored {
-                item: Item {
+            results.push(Scored::new(
+                Item {
                     id: format!("web:{uri}"),
                     title: format!("Open {uri}"),
                     subtitle: "Open in default browser".into(),
@@ -111,41 +199,93 @@ impl Catalog {
                     icon: Icon::Name("web-browser".into()),
                     action: Action::OpenUri(uri),
                 },
-                score: 80_000,
-            });
+                80_000,
+            ));
         }
 
-        let mut matcher = Matcher::new(Config::DEFAULT);
+        if let Some(item) = smart::path_command(query) {
+            results.push(Scored::new(item, 12_000));
+        }
+
+        let file_query = files::parse_query(query);
+        let file_heavy = file_query.is_type_search() || file_query.path_like || file_query.explicit;
+        let now = usage::now_secs();
+        let hay = self.haystacks.borrow();
+        let windows = self.windows.borrow();
+        let mut matcher = self.matcher.borrow_mut();
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
         let mut pool: Vec<&Item> = Vec::new();
         pool.extend(self.apps.iter());
         pool.extend(self.commands.iter());
         pool.extend(self.extensions.iter());
-        let windows = hypr::load_windows();
         pool.extend(windows.iter());
 
+        let mut ranked: Vec<(u32, &Item)> = Vec::new();
         for item in pool {
-            if let Some(score) = rank(&mut matcher, &pattern, query, item, &self.usage) {
-                results.push(Scored {
-                    item: item.clone(),
-                    score,
-                });
+            let glued;
+            let haystack = if let Some(cached) = hay.get(&item.id) {
+                cached.as_str()
+            } else {
+                glued = item.haystack();
+                glued.as_str()
+            };
+            let input = RankInput {
+                query,
+                item,
+                haystack,
+                usage: &self.usage,
+                now,
+                file_heavy,
+            };
+            if let Some(score) = rank(&mut matcher, &pattern, input) {
+                ranked.push((score, item));
+            } else if let Some(score) = rank_expansions(
+                &mut matcher,
+                &meaning.expansions,
+                RankInput {
+                    query,
+                    item,
+                    haystack,
+                    usage: &self.usage,
+                    now,
+                    file_heavy,
+                },
+            ) {
+                ranked.push((score, item));
             }
         }
 
-        if query.len() >= 2 {
-            for item in file_items(query) {
-                let score =
-                    rank(&mut matcher, &pattern, query, &item, &self.usage).unwrap_or(1_000);
-                results.push(Scored { item, score });
+        results.extend(take_scored(ranked, mix_limit.max(file_limit)));
+
+        if include_in_root && file_query.wants_files() {
+            for item in files::well_known_folders(query) {
+                let scratch = item.haystack();
+                let score = rank(
+                    &mut matcher,
+                    &pattern,
+                    RankInput {
+                        query,
+                        item: &item,
+                        haystack: &scratch,
+                        usage: &self.usage,
+                        now,
+                        file_heavy,
+                    },
+                )
+                .unwrap_or(8_000);
+                results.push(Scored::new(item, score));
             }
         }
+
+        drop(matcher);
+        drop(windows);
+        drop(hay);
 
         if !query.starts_with(['>', '$', '=', '/', '~', ';']) {
             let encoded = urlencoding_lite(query);
-            results.push(Scored {
-                item: Item {
+            results.push(Scored::new(
+                Item {
                     id: format!("search:{query}"),
                     title: format!("Search the web for “{query}”"),
                     subtitle: "DuckDuckGo".into(),
@@ -154,15 +294,64 @@ impl Catalog {
                     icon: Icon::Name("system-search".into()),
                     action: Action::OpenUri(format!("https://duckduckgo.com/?q={encoded}")),
                 },
-                score: 400,
-            });
+                400,
+            ));
         }
 
-        finish(results)
+        let limit = if file_heavy {
+            file_limit.max(mix_limit)
+        } else {
+            mix_limit
+        };
+        finish_limited(results, limit)
+    }
+
+    fn search_files(&self, query: &str) -> Vec<Scored> {
+        let settings = self.settings.borrow();
+        let limit = settings.files.max_results.max(files::FILES_MODE_LIMIT);
+        drop(settings);
+
+        let q = query.trim();
+        let mut results = Vec::new();
+
+        if q.is_empty() {
+            let now = usage::now_secs();
+            let mut used: Vec<(String, u32)> = self
+                .usage
+                .iter()
+                .filter(|(id, _)| id.starts_with("file:"))
+                .map(|(id, rec)| (id.clone(), usage::score(Some(rec), now)))
+                .collect();
+            used.sort_by_key(|a| std::cmp::Reverse(a.1));
+            for (id, score) in used.into_iter().take(24) {
+                let path = std::path::PathBuf::from(id.trim_start_matches("file:"));
+                if path.exists() {
+                    let item = files::file_item(path, None);
+                    results.push(Scored::new(item, 20_000 + score));
+                }
+            }
+            return finish_limited(results, limit);
+        }
+
+        for item in files::well_known_folders(q) {
+            results.push(Scored::new(item, 30_000));
+        }
+        finish_limited(results, limit)
     }
 
     fn search_windows(&self, query: &str) -> Vec<Scored> {
-        score_pool(&hypr::load_windows(), query, &self.usage, 18)
+        self.score_windows(query)
+    }
+
+    fn score_pool(&self, items: &[Item], query: &str, limit: usize) -> Vec<Scored> {
+        score_pool(
+            items,
+            query,
+            &self.usage,
+            limit,
+            &mut self.matcher.borrow_mut(),
+            &self.haystacks.borrow(),
+        )
     }
 
     fn search_clipboard(&self, query: &str) -> Vec<Scored> {
@@ -173,7 +362,7 @@ impl Catalog {
             .iter()
             .map(|e| e.to_item())
             .collect();
-        score_pool(&items, query, &self.usage, 18)
+        self.score_pool(&items, query, 18)
     }
 
     fn search_snippets(&self, query: &str) -> Vec<Scored> {
@@ -186,8 +375,8 @@ impl Catalog {
             let preview = clipboard::current_text()
                 .map(|t| t.chars().take(64).collect::<String>())
                 .unwrap_or_else(|| "clipboard is empty".into());
-            results.push(Scored {
-                item: Item {
+            results.push(Scored::new(
+                Item {
                     id: format!("snip-save:{keyword}"),
                     title: format!("Save snippet “{keyword}”"),
                     subtitle: preview,
@@ -198,13 +387,13 @@ impl Catalog {
                         keyword: keyword.to_string(),
                     },
                 },
-                score: 100_000,
-            });
+                100_000,
+            ));
         }
 
         let items: Vec<Item> = snippets::load().into_iter().map(|s| s.to_item()).collect();
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
-        results.extend(score_pool(&items, rest, &self.usage, 18));
+        results.extend(self.score_pool(&items, rest, 18));
         finish(results)
     }
 
@@ -214,8 +403,8 @@ impl Catalog {
         if let Some(title) = q.strip_prefix('+').map(str::trim)
             && !title.is_empty()
         {
-            results.push(Scored {
-                item: Item {
+            results.push(Scored::new(
+                Item {
                     id: format!("note-new:{title}"),
                     title: format!("New note “{title}”"),
                     subtitle: "Create a quick note".into(),
@@ -226,12 +415,12 @@ impl Catalog {
                         title: title.to_string(),
                     },
                 },
-                score: 100_000,
-            });
+                100_000,
+            ));
         }
         let items: Vec<Item> = notes::load().into_iter().map(|n| n.to_item()).collect();
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
-        results.extend(score_pool(&items, rest, &self.usage, 18));
+        results.extend(self.score_pool(&items, rest, 18));
         finish(results)
     }
 
@@ -240,8 +429,8 @@ impl Catalog {
         let settings = self.settings.borrow();
         let mut results = Vec::new();
         if !q.is_empty() {
-            results.push(Scored {
-                item: Item {
+            results.push(Scored::new(
+                Item {
                     id: format!("ask:{q}"),
                     title: format!("Ask “{q}”"),
                     subtitle: format!("{} · {}", settings.ai.provider, settings.ai.model),
@@ -252,11 +441,11 @@ impl Catalog {
                         prompt: q.to_string(),
                     },
                 },
-                score: 100_000,
-            });
+                100_000,
+            ));
         }
-        results.push(Scored {
-            item: Item {
+        results.push(Scored::new(
+            Item {
                 id: "ask:signin".into(),
                 title: "Sign in with OAuth".into(),
                 subtitle: auth::signed_in_label(),
@@ -265,16 +454,13 @@ impl Catalog {
                 icon: Icon::Name("network-workgroup".into()),
                 action: Action::EnterMode(Mode::Settings),
             },
-            score: 2_000,
-        });
+            2_000,
+        ));
         for model in models::items().into_iter().take(8) {
-            results.push(Scored {
-                item: model,
-                score: 5_000,
-            });
+            results.push(Scored::new(model, 5_000));
         }
-        results.push(Scored {
-            item: Item {
+        results.push(Scored::new(
+            Item {
                 id: "ask:settings".into(),
                 title: "AI settings".into(),
                 subtitle: format!(
@@ -286,15 +472,15 @@ impl Catalog {
                 icon: Icon::Name("preferences-system".into()),
                 action: Action::EnterMode(Mode::Settings),
             },
-            score: 1_000,
-        });
+            1_000,
+        ));
         results
     }
 
     fn search_voice(&self, _query: &str) -> Vec<Scored> {
         vec![
-            Scored {
-                item: Item {
+            Scored::new(
+                Item {
                     id: "voice:toggle".into(),
                     title: "Start dictation".into(),
                     subtitle:
@@ -305,10 +491,10 @@ impl Catalog {
                     icon: Icon::Name("audio-input-microphone".into()),
                     action: Action::ToggleVoice,
                 },
-                score: 100_000,
-            },
-            Scored {
-                item: Item {
+                100_000,
+            ),
+            Scored::new(
+                Item {
                     id: "voice:settings".into(),
                     title: "Voice settings".into(),
                     subtitle: "Language and Whisper model".into(),
@@ -317,8 +503,8 @@ impl Catalog {
                     icon: Icon::Name("preferences-system".into()),
                     action: Action::EnterMode(Mode::Settings),
                 },
-                score: 1_000,
-            },
+                1_000,
+            ),
         ]
     }
 
@@ -349,6 +535,34 @@ impl Catalog {
                 "Allow MCP tool listing",
                 s.general.allow_mcp,
                 "mcp npx spawn tools",
+            ),
+            setting_toggle(
+                "files-root",
+                "Include files in root search",
+                s.files.include_in_root,
+                "raycast files launcher",
+            ),
+            setting_toggle(
+                "files-system",
+                "System-wide file search",
+                s.files.system_wide,
+                "locate plocate entire disk markdown",
+            ),
+            setting_toggle(
+                "files-hidden",
+                "Search hidden files",
+                s.files.include_hidden,
+                "dotfiles hidden",
+            ),
+            setting_value(
+                "max-results",
+                "Max search results",
+                &format!(
+                    "root {} · files {}",
+                    s.general.max_results, s.files.max_results
+                ),
+                q,
+                "limit scroll",
             ),
             setting_cycle(
                 "provider",
@@ -525,50 +739,148 @@ impl Catalog {
                 },
             );
         }
-        score_pool(&items, q, &self.usage, 18)
+        self.score_pool(&items, q, 36)
     }
 
     fn search_store(&self, query: &str) -> Vec<Scored> {
         let settings = self.settings.borrow();
         let items = store::items(&settings);
-        score_pool(&items, query, &self.usage, 24)
+        self.score_pool(&items, query, 36)
     }
 
     fn empty_state(&self) -> Vec<Scored> {
         let mut out = Vec::new();
+        let now = usage::now_secs();
 
         for item in &self.extensions {
-            out.push(Scored {
-                item: item.clone(),
-                score: 20_000,
-            });
+            out.push(Scored::new(item.clone(), 20_000));
         }
 
         let mut apps: Vec<&Item> = self.apps.iter().collect();
         apps.sort_by(|a, b| {
-            usage_of(&self.usage, &a.id)
-                .cmp(&usage_of(&self.usage, &b.id))
+            usage::score(self.usage.get(&a.id), now)
+                .cmp(&usage::score(self.usage.get(&b.id), now))
                 .reverse()
                 .then_with(|| a.title.cmp(&b.title))
         });
         for item in apps.into_iter().take(5) {
-            out.push(Scored {
-                score: 10_000 + usage_of(&self.usage, &item.id),
-                item: item.clone(),
-            });
+            out.push(Scored::new(
+                item.clone(),
+                10_000 + usage::score(self.usage.get(&item.id), now),
+            ));
         }
 
         for item in &self.commands {
-            out.push(Scored {
-                score: 1_000 + usage_of(&self.usage, &item.id),
-                item: item.clone(),
-            });
+            out.push(Scored::new(
+                item.clone(),
+                1_000 + usage::score(self.usage.get(&item.id), now),
+            ));
         }
 
         out.sort_by_key(|item| std::cmp::Reverse(item.score));
-        out.truncate(12);
+        out.truncate(16);
         out
     }
+}
+
+pub fn live_needed(query: &str, mode: Mode, include_in_root: bool, windows_stale: bool) -> bool {
+    if windows_stale || mode == Mode::Windows {
+        return true;
+    }
+    let (_, rest) = Mode::parse(query);
+    if intent::resolve(&rest)
+        .intents
+        .iter()
+        .any(|hit| hit.kind == IntentKind::Weather)
+        && weather::cached().is_none()
+    {
+        return true;
+    }
+    match mode {
+        Mode::Files => true,
+        Mode::Root => include_in_root && files::parse_query(&rest).wants_files(),
+        _ => false,
+    }
+}
+
+pub fn live_extras(
+    query: &str,
+    mode: Mode,
+    settings: &crate::config::Settings,
+    usage: &usage::Map,
+) -> LiveExtras {
+    let (parsed, rest) = Mode::parse(query);
+    let mode = if mode == Mode::Root { parsed } else { mode };
+    let q = rest;
+    let mut extras = LiveExtras {
+        windows: Some(hypr::load_windows()),
+        ..LiveExtras::default()
+    };
+
+    if intent::resolve(&q)
+        .intents
+        .iter()
+        .any(|hit| hit.kind == IntentKind::Weather)
+        && let Ok(snap) = weather::fetch()
+    {
+        let item = weather::item(Some(&snap));
+        extras.weather = Some(Scored::with_live(
+            item,
+            88_000,
+            Live::Weather {
+                summary: snap.summary,
+                location: snap.location,
+                extra: snap.extra,
+            },
+        ));
+    }
+
+    let file_query = files::parse_query(&q);
+    let want_files = match mode {
+        Mode::Files => true,
+        Mode::Root => settings.files.include_in_root && file_query.wants_files(),
+        _ => false,
+    };
+    if !want_files {
+        return extras;
+    }
+
+    let limit = if mode == Mode::Files {
+        settings.files.max_results.max(files::FILES_MODE_LIMIT)
+    } else {
+        settings.files.max_results.min(files::ROOT_FILE_LIMIT)
+    };
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::parse(
+        if q.is_empty() { "file" } else { &q },
+        CaseMatching::Smart,
+        Normalization::Smart,
+    );
+    let items = if q.is_empty() {
+        files::recent(
+            40,
+            settings.files.include_hidden,
+            &settings.files.search_roots,
+        )
+    } else {
+        files::search(
+            &q,
+            limit,
+            settings.files.include_hidden,
+            &settings.files.search_roots,
+            settings.files.system_wide,
+        )
+    };
+    let now = usage::now_secs();
+    for item in items {
+        let mut live = Live::from_item(&item);
+        if let Action::OpenPath(path) | Action::PlayMedia { path } = &item.action {
+            live.fill_snippet(path);
+        }
+        let score = rank_file(&mut matcher, &pattern, &q, &item, usage, now);
+        extras.files.push(Scored::with_live(item, score, live));
+    }
+    extras
 }
 
 fn extension_items() -> Vec<Item> {
@@ -599,6 +911,15 @@ fn extension_items() -> Vec<Item> {
             kind: Kind::Extension,
             icon: Icon::Name("audio-input-microphone".into()),
             action: Action::EnterMode(Mode::Voice),
+        },
+        Item {
+            id: "ext:files".into(),
+            title: "Search Files".into(),
+            subtitle: "Every markdown, PDF, or named file — scroll the full list".into(),
+            keywords: "file files find fd locate markdown pdf documents".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("system-file-manager".into()),
+            action: Action::EnterMode(Mode::Files),
         },
         Item {
             id: "ext:windows".into(),
@@ -697,37 +1018,56 @@ fn setting_value(id: &str, title: &str, current: &str, typed: &str, keywords: &s
 fn score_pool(
     items: &[Item],
     query: &str,
-    usage_map: &std::collections::HashMap<String, u32>,
+    usage_map: &usage::Map,
     limit: usize,
+    matcher: &mut Matcher,
+    haystacks: &HashMap<String, String>,
 ) -> Vec<Scored> {
     let query = query.trim();
     if query.is_empty() {
         return items
             .iter()
             .enumerate()
-            .map(|(i, item)| Scored {
-                item: item.clone(),
-                score: 10_000u32.saturating_sub((i as u32) * 10),
-            })
+            .map(|(i, item)| Scored::new(item.clone(), 10_000u32.saturating_sub((i as u32) * 10)))
             .take(limit)
             .collect();
     }
-    let mut matcher = Matcher::new(Config::DEFAULT);
+    let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
+    let meaning = intent::resolve_with(query, &titles);
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-    let mut results = Vec::new();
+    let now = usage::now_secs();
+    let mut ranked: Vec<(u32, &Item)> = Vec::new();
     for item in items {
-        if let Some(score) = rank(&mut matcher, &pattern, query, item, usage_map) {
-            results.push(Scored {
-                item: item.clone(),
-                score,
-            });
+        let owned = cached_or_glue(item, haystacks);
+        let input = RankInput {
+            query,
+            item,
+            haystack: &owned,
+            usage: usage_map,
+            now,
+            file_heavy: false,
+        };
+        if let Some(score) = rank(matcher, &pattern, input) {
+            ranked.push((score, item));
+        } else if let Some(score) = rank_expansions(matcher, &meaning.expansions, input) {
+            ranked.push((score, item));
         }
     }
-    finish_limited(results, limit)
+    take_scored(ranked, limit)
+}
+
+fn take_scored(mut ranked: Vec<(u32, &Item)>, limit: usize) -> Vec<Scored> {
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+    ranked.dedup_by(|a, b| a.1.id == b.1.id);
+    ranked.truncate(limit);
+    ranked
+        .into_iter()
+        .map(|(score, item)| Scored::new(item.clone(), score))
+        .collect()
 }
 
 fn finish(results: Vec<Scored>) -> Vec<Scored> {
-    finish_limited(results, 12)
+    finish_limited(results, 48)
 }
 
 fn finish_limited(mut results: Vec<Scored>, limit: usize) -> Vec<Scored> {
@@ -741,44 +1081,140 @@ fn finish_limited(mut results: Vec<Scored>, limit: usize) -> Vec<Scored> {
     results
 }
 
-fn rank(
+fn cached_or_glue(item: &Item, cache: &HashMap<String, String>) -> String {
+    cache
+        .get(&item.id)
+        .cloned()
+        .unwrap_or_else(|| item.haystack())
+}
+
+#[derive(Clone, Copy)]
+struct RankInput<'a> {
+    query: &'a str,
+    item: &'a Item,
+    haystack: &'a str,
+    usage: &'a usage::Map,
+    now: u64,
+    file_heavy: bool,
+}
+
+fn rank_expansions(
     matcher: &mut Matcher,
-    pattern: &Pattern,
-    query: &str,
-    item: &Item,
-    usage_map: &std::collections::HashMap<String, u32>,
+    expansions: &[String],
+    input: RankInput<'_>,
 ) -> Option<u32> {
+    for expansion in expansions {
+        let expanded = Pattern::parse(expansion, CaseMatching::Smart, Normalization::Smart);
+        let mut next = input;
+        next.query = expansion;
+        if let Some(score) = rank(matcher, &expanded, next) {
+            return Some(score.saturating_sub(600));
+        }
+    }
+    None
+}
+
+fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Option<u32> {
     let mut buf = Vec::new();
-    let title = item.title.to_lowercase();
-    let hay = item.haystack();
-    let title_score = pattern.score(Utf32Str::new(&item.title, &mut buf), matcher);
+    let title = input.item.title.to_lowercase();
+    let title_score = pattern.score(Utf32Str::new(&input.item.title, &mut buf), matcher);
     buf.clear();
-    let hay_score = pattern.score(Utf32Str::new(&hay, &mut buf), matcher)?;
-    let mut score = hay_score;
+    let hay_score = pattern.score(Utf32Str::new(input.haystack, &mut buf), matcher);
+    let typo = typo_score(input.query, input.item);
+    let mut score = match hay_score {
+        Some(value) => value,
+        None => typo?,
+    };
+    if hay_score.is_some()
+        && let Some(typo) = typo
+    {
+        score = score.max(typo);
+    }
     if let Some(ts) = title_score {
         score = score.saturating_add(ts.saturating_mul(2));
     }
-    let q = query.to_lowercase();
+    let q = input.query.to_lowercase();
     if title.starts_with(&q) {
-        score = score.saturating_add(8_000);
+        score = score.saturating_add(usage::PREFIX_BONUS);
+    } else if title.split_whitespace().any(|word| word.starts_with(&q)) {
+        score = score.saturating_add(usage::PREFIX_BONUS / 2);
     }
-    score = score.saturating_add(usage_of(usage_map, &item.id).saturating_mul(40));
-    score = score.saturating_add(match item.kind {
+    score = score.saturating_add(usage::score(input.usage.get(&input.item.id), input.now));
+    score = score.saturating_add(match input.item.kind {
+        Kind::Weather => 220,
         Kind::Extension => 120,
         Kind::Ai | Kind::Note => 90,
+        Kind::Media => 90,
         Kind::App => 80,
         Kind::Window => 70,
         Kind::Snippet => 70,
         Kind::Command | Kind::Settings | Kind::Store => 60,
         Kind::Clipboard | Kind::Voice | Kind::Script => 50,
+        Kind::File if input.file_heavy => 2_400,
         Kind::File => 30,
-        _ => 10,
+        Kind::Calc | Kind::Web | Kind::Shell => 10,
     });
     Some(score)
 }
 
-fn usage_of(map: &std::collections::HashMap<String, u32>, id: &str) -> u32 {
-    map.get(id).copied().unwrap_or(0)
+fn typo_score(query: &str, item: &Item) -> Option<u32> {
+    if let Some(score) = intent::title_typo_score(query, &item.title) {
+        return Some(score);
+    }
+    let q = query.trim().to_ascii_lowercase();
+    let title = item.title.to_ascii_lowercase();
+    if intent::is_adjacent_swap(&q, &title)
+        || title
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| intent::is_adjacent_swap(&q, word))
+    {
+        return Some(2_400);
+    }
+    item.keywords
+        .split_whitespace()
+        .find_map(|word| intent::title_typo_score(query, word))
+}
+
+fn rank_file(
+    matcher: &mut Matcher,
+    pattern: &Pattern,
+    query: &str,
+    item: &Item,
+    usage_map: &usage::Map,
+    now: u64,
+) -> u32 {
+    let path = std::path::Path::new(item.id.trim_start_matches("file:"));
+    let hay = item.haystack();
+    let nucleo = rank(
+        matcher,
+        pattern,
+        RankInput {
+            query,
+            item,
+            haystack: &hay,
+            usage: usage_map,
+            now,
+            file_heavy: true,
+        },
+    )
+    .unwrap_or(800);
+    let mut score = nucleo;
+    score = score.saturating_add(4_000);
+    let title = item.title.to_ascii_lowercase();
+    let q = query.to_ascii_lowercase();
+    if title == q || title.starts_with(&q) {
+        score = score.saturating_add(6_000);
+    }
+    if let Some(ext) = path.extension().and_then(|s| s.to_str())
+        && q.contains(ext)
+    {
+        score = score.saturating_add(1_500);
+    }
+    score = score.saturating_add(files::recency_bonus(path));
+    let depth = path.components().count() as u32;
+    score = score.saturating_add(800u32.saturating_sub(depth.saturating_mul(20)));
+    score
 }
 
 fn calculator_item(query: &str) -> Option<Item> {
@@ -843,128 +1279,6 @@ fn run_item(command: String, terminal: bool) -> Item {
         icon: Icon::Name("utilities-terminal".into()),
         action: Action::Shell { command, terminal },
     }
-}
-
-fn file_items(query: &str) -> Vec<Item> {
-    let q = query.trim();
-    let path_like = q.starts_with('/') || q.starts_with("~/") || q.starts_with("./");
-    let explicit = q.starts_with("f ") || q.starts_with("file ");
-    if !path_like && !explicit && q.len() < 3 {
-        return Vec::new();
-    }
-
-    if path_like {
-        let expanded = expand_tilde(q);
-        let path = PathBuf::from(&expanded);
-        if path.is_file() {
-            return vec![file_item(path)];
-        }
-        if path.is_dir() {
-            return list_dir(&path);
-        }
-    }
-
-    let expanded = expand_tilde(q);
-    let term = if let Some(rest) = q.strip_prefix("file ").or_else(|| q.strip_prefix("f ")) {
-        rest.trim()
-    } else if path_like {
-        Path::new(&expanded)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(q)
-    } else {
-        q
-    };
-    fd_search(term)
-}
-
-fn list_dir(path: &Path) -> Vec<Item> {
-    let mut items = Vec::new();
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return items;
-    };
-    for entry in entries.flatten().take(20) {
-        items.push(file_item(entry.path()));
-    }
-    items.sort_by(|a, b| a.title.cmp(&b.title));
-    items
-}
-
-fn fd_search(term: &str) -> Vec<Item> {
-    if term.is_empty() {
-        return Vec::new();
-    }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let output = Command::new("fd")
-        .args([
-            "--color=never",
-            "--max-results",
-            "20",
-            "--exclude",
-            ".git",
-            "--exclude",
-            "node_modules",
-            "--exclude",
-            "target",
-            term,
-        ])
-        .current_dir(&home)
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            let path = if Path::new(line).is_absolute() {
-                PathBuf::from(line)
-            } else {
-                home.join(line)
-            };
-            file_item(path)
-        })
-        .collect()
-}
-
-fn file_item(path: PathBuf) -> Item {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let subtitle = path.to_string_lossy().to_string();
-    let icon = if path.is_dir() {
-        Icon::Name("folder".into())
-    } else {
-        Icon::Name("text-x-generic".into())
-    };
-    Item {
-        id: format!("file:{}", path.display()),
-        title: name,
-        subtitle,
-        keywords: String::new(),
-        kind: Kind::File,
-        icon,
-        action: Action::OpenPath(path),
-    }
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().into_owned();
-    }
-    if path == "~"
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.to_string_lossy().into_owned();
-    }
-    path.to_string()
 }
 
 fn urlencoding_lite(input: &str) -> String {
@@ -1108,5 +1422,163 @@ mod tests {
     #[test]
     fn mode_prefix_still_works() {
         assert_eq!(Mode::parse("clip rust").0, Mode::Clipboard);
+        assert_eq!(Mode::parse("file markdown").0, Mode::Files);
+    }
+
+    #[test]
+    fn we_surfaces_live_weather() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let (mode, results) = catalog.search_fast("we");
+        assert_eq!(mode, crate::mode::Mode::Root);
+        assert!(
+            results.iter().any(|row| row.item.id == "live:weather"),
+            "typing we should surface weather"
+        );
+        let weahter = catalog.search_fast("weahter").1;
+        assert!(
+            weahter.iter().any(|row| row.item.id == "live:weather"),
+            "swapped letters should still surface weather"
+        );
+        assert!(
+            catalog.windows.borrow().is_empty(),
+            "fast path must not wait on Hyprland"
+        );
+    }
+
+    #[test]
+    fn recent_use_outranks_stale_prefix_habit() {
+        use crate::item::{Action, Icon, Item, Kind};
+        use crate::usage::{self, Record};
+
+        let weather = Item {
+            id: "app:weather.desktop".into(),
+            title: "Weather".into(),
+            subtitle: "Forecast".into(),
+            keywords: String::new(),
+            kind: Kind::App,
+            icon: Icon::None,
+            action: Action::Copy(String::new()),
+        };
+        let web = Item {
+            id: "app:web.desktop".into(),
+            title: "Web Search Helper".into(),
+            subtitle: "Search".into(),
+            keywords: String::new(),
+            kind: Kind::App,
+            icon: Icon::None,
+            action: Action::Copy(String::new()),
+        };
+        let now = 1_800_000_000;
+        let mut usage = usage::Map::new();
+        usage.insert(
+            weather.id.clone(),
+            Record {
+                count: 2,
+                last: now - 3_600,
+            },
+        );
+        usage.insert(
+            web.id.clone(),
+            Record {
+                count: 200,
+                last: now - 2 * 365 * 24 * 3600,
+            },
+        );
+        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let pattern = nucleo_matcher::pattern::Pattern::parse(
+            "we",
+            nucleo_matcher::pattern::CaseMatching::Smart,
+            nucleo_matcher::pattern::Normalization::Smart,
+        );
+        let hay_w = weather.haystack();
+        let hay_web = web.haystack();
+        let weather_score = super::rank(
+            &mut matcher,
+            &pattern,
+            super::RankInput {
+                query: "we",
+                item: &weather,
+                haystack: &hay_w,
+                usage: &usage,
+                now,
+                file_heavy: false,
+            },
+        )
+        .unwrap();
+        let web_score = super::rank(
+            &mut matcher,
+            &pattern,
+            super::RankInput {
+                query: "we",
+                item: &web,
+                haystack: &hay_web,
+                usage: &usage,
+                now,
+                file_heavy: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            weather_score > web_score,
+            "yesterday's Weather ({weather_score}) should beat 200 ancient Web uses ({web_score})"
+        );
+    }
+
+    #[test]
+    fn swapped_letters_rank_an_app_title() {
+        use crate::item::{Action, Icon, Item, Kind};
+
+        let item = Item {
+            id: "app:weather.desktop".into(),
+            title: "Weather".into(),
+            subtitle: String::new(),
+            keywords: String::new(),
+            kind: Kind::App,
+            icon: Icon::None,
+            action: Action::Copy(String::new()),
+        };
+        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let pattern = nucleo_matcher::pattern::Pattern::parse(
+            "weahter",
+            nucleo_matcher::pattern::CaseMatching::Smart,
+            nucleo_matcher::pattern::Normalization::Smart,
+        );
+        let hay = item.haystack();
+        let usage = crate::usage::Map::new();
+        let score = super::rank(
+            &mut matcher,
+            &pattern,
+            super::RankInput {
+                query: "weahter",
+                item: &item,
+                haystack: &hay,
+                usage: &usage,
+                now: 1_800_000_000,
+                file_heavy: false,
+            },
+        );
+        assert!(
+            score.is_some(),
+            "weahter must match Weather (transposition), not only missing letters"
+        );
+    }
+
+    #[test]
+    fn live_slot_is_more_than_title_and_action() {
+        use crate::item::Live;
+        let item = crate::weather::item(Some(&crate::weather::Snapshot {
+            location: "Boardman".into(),
+            extra: "12%".into(),
+            summary: "+79°F ☀️ Sunny".into(),
+        }));
+        assert!(matches!(Live::from_item(&item), Live::Weather { .. }));
     }
 }

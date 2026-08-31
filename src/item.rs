@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::mode::Mode;
 
@@ -20,6 +20,8 @@ pub enum Kind {
     Settings,
     Store,
     Script,
+    Weather,
+    Media,
 }
 
 impl Kind {
@@ -41,6 +43,8 @@ impl Kind {
             Kind::Settings => "SET",
             Kind::Store => "STORE",
             Kind::Script => "SCRIPT",
+            Kind::Weather => "NOW",
+            Kind::Media => "MEDIA",
         }
     }
 }
@@ -57,6 +61,9 @@ pub enum Action {
     Paste(String),
     OpenUri(String),
     OpenPath(PathBuf),
+    PlayMedia {
+        path: PathBuf,
+    },
     Spawn {
         program: String,
         args: Vec<String>,
@@ -99,6 +106,99 @@ pub enum Action {
     },
     SignOut,
     RefreshModels,
+}
+
+/// What a result *shows* — not what happens when you press Enter.
+/// Weather, a photo, a document snippet. Icon+title+action is not enough.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Live {
+    #[default]
+    None,
+    Weather {
+        summary: String,
+        location: String,
+        extra: String,
+    },
+    Image {
+        path: PathBuf,
+    },
+    Snippet {
+        text: String,
+    },
+    Media {
+        hint: String,
+    },
+}
+
+impl Live {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub fn from_item(item: &Item) -> Self {
+        match item.kind {
+            Kind::Weather => Self::Weather {
+                summary: item.title.clone(),
+                location: item.subtitle.clone(),
+                extra: String::new(),
+            },
+            Kind::Calc => {
+                if item.subtitle.is_empty() {
+                    Self::None
+                } else {
+                    Self::Snippet {
+                        text: item.subtitle.clone(),
+                    }
+                }
+            }
+            Kind::File | Kind::Media => match &item.action {
+                Action::OpenPath(path) | Action::PlayMedia { path } => Self::from_path(path),
+                _ => Self::None,
+            },
+            Kind::App
+            | Kind::Window
+            | Kind::Command
+            | Kind::Web
+            | Kind::Clipboard
+            | Kind::Shell
+            | Kind::Snippet
+            | Kind::Extension
+            | Kind::Note
+            | Kind::Ai
+            | Kind::Voice
+            | Kind::Settings
+            | Kind::Store
+            | Kind::Script => Self::None,
+        }
+    }
+
+    pub fn from_path(path: &Path) -> Self {
+        match crate::preview::classify(path) {
+            crate::preview::MediaKind::Image => Self::Image {
+                path: path.to_path_buf(),
+            },
+            crate::preview::MediaKind::Audio => Self::Media {
+                hint: format!("▶  {}", path.display()),
+            },
+            crate::preview::MediaKind::Video => Self::Media {
+                hint: format!("▶  {}", path.display()),
+            },
+            crate::preview::MediaKind::Text | crate::preview::MediaKind::Document => {
+                Self::Snippet {
+                    text: String::new(),
+                }
+            }
+            crate::preview::MediaKind::Other => Self::None,
+        }
+    }
+
+    pub fn fill_snippet(&mut self, path: &Path) {
+        if let Self::Snippet { text } = self
+            && text.is_empty()
+        {
+            *text = crate::preview::snippet(path, 220);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

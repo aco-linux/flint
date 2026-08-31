@@ -90,6 +90,33 @@ entry.search placeholder {
   padding: 8px 10px 6px 10px;
 }
 
+.results-scroll {
+  min-height: 160px;
+}
+
+.body {
+  min-height: 160px;
+}
+
+.preview {
+  min-width: 280px;
+  max-width: 340px;
+  padding: 12px 16px 12px 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.preview-text {
+  color: #c4b7aa;
+  font-family: "IBM Plex Mono", Inter, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.preview-image {
+  min-width: 160px;
+  min-height: 120px;
+}
+
 .row {
   border-radius: 10px;
   padding: 8px 10px;
@@ -99,6 +126,29 @@ entry.search placeholder {
 
 .row.selected {
   background: rgba(255, 90, 31, 0.12);
+}
+
+.row.live-row {
+  min-height: 64px;
+  padding: 10px 10px;
+}
+
+.live-thumb {
+  min-width: 48px;
+  min-height: 48px;
+  border-radius: 6px;
+}
+
+.live-snippet {
+  color: #9a928a;
+  font-family: "IBM Plex Mono", Inter, monospace;
+  font-size: 11.5px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.row.selected .live-snippet {
+  color: #c4b7aa;
 }
 
 .accent {
