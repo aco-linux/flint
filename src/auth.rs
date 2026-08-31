@@ -1,14 +1,24 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+use url::{Url, form_urlencoded};
 
 use crate::config::Settings;
+
+const AUTH_VERSION: u8 = 2;
+const KEYRING_APP: &str = "dev.flint.launcher";
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_CALLBACK_BYTES: usize = 8 * 1024;
+const MAX_TOKEN_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Tokens {
@@ -20,6 +30,12 @@ pub struct Tokens {
     pub expires_at: u64,
     #[serde(default)]
     pub account: String,
+    #[serde(default)]
+    pub token_url: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub api_origin: String,
 }
 
 #[derive(Debug, Clone)]
@@ -33,288 +49,545 @@ pub struct Provider {
     pub default_model: &'static str,
 }
 
-pub const PROVIDERS: &[Provider] = &[
-    Provider {
-        id: "openai",
-        title: "OpenAI",
-        authorize: "https://auth.openai.com/oauth/authorize",
-        token: "https://auth.openai.com/oauth/token",
-        scopes: "openid profile email api.completions",
-        chat_endpoint: "https://api.openai.com",
-        default_model: "gpt-4.1",
-    },
-    Provider {
-        id: "google",
-        title: "Google Gemini",
-        authorize: "https://accounts.google.com/o/oauth2/v2/auth",
-        token: "https://oauth2.googleapis.com/token",
-        scopes: "https://www.googleapis.com/auth/generative-language.retriever openid email",
-        chat_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
-        default_model: "gemini-2.0-flash",
-    },
-];
+/// Providers with a documented OAuth flow that can authorize API calls.
+/// Consumer ChatGPT and Claude subscriptions do not grant API access, so they
+/// intentionally are not represented as OAuth presets here.
+pub const PROVIDERS: &[Provider] = &[Provider {
+    id: "google",
+    title: "Google Gemini API",
+    authorize: "https://accounts.google.com/o/oauth2/v2/auth",
+    token: "https://oauth2.googleapis.com/token",
+    scopes: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/generative-language.retriever",
+    chat_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
+    default_model: "gemini-3.7-flash",
+}];
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PersistedTokens {
+    version: u8,
+    provider: String,
+    account: String,
+    expires_at: u64,
+    token_url: String,
+    client_id: String,
+    api_origin: String,
+    storage: String,
+    // Present only when the desktop Secret Service is unavailable.
+    access_token: String,
+    refresh_token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenSecret {
+    access_token: String,
+    refresh_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    expires_in: u64,
+    #[serde(default)]
+    token_type: String,
+}
 
 pub fn path() -> PathBuf {
     crate::paths::config_dir().join("auth.json")
 }
 
+fn api_keys_path() -> PathBuf {
+    crate::paths::config_dir().join("api-keys.json")
+}
+
 pub fn load() -> Option<Tokens> {
-    let raw = fs::read_to_string(path()).ok()?;
-    serde_json::from_str(&raw).ok()
+    let stored = load_persisted()?;
+    materialize(stored)
 }
 
-pub fn save(tokens: &Tokens) {
-    crate::paths::ensure();
-    if let Ok(raw) = serde_json::to_string_pretty(tokens) {
-        let _ = crate::paths::write_private(&path(), raw);
-    }
-}
-
-pub fn clear() {
-    let _ = fs::remove_file(path());
-}
-
-pub fn bearer() -> Option<String> {
+pub fn load_for(provider: &str) -> Option<Tokens> {
     let tokens = load()?;
-    if tokens.access_token.is_empty() {
-        return None;
-    }
-    if tokens.expires_at > 0 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if now + 30 >= tokens.expires_at {
-            return None;
+    (tokens.provider == provider).then_some(tokens)
+}
+
+fn load_persisted() -> Option<PersistedTokens> {
+    let raw = fs::read_to_string(path()).ok()?;
+    let mut stored: PersistedTokens = serde_json::from_str(&raw).ok()?;
+    // Version 1 stored both tokens directly in auth.json.
+    if stored.version == 0 {
+        stored.version = 1;
+        if stored.storage.is_empty() {
+            stored.storage = "private-file".into();
         }
     }
-    Some(tokens.access_token)
+    Some(stored)
+}
+
+fn materialize(stored: PersistedTokens) -> Option<Tokens> {
+    let secret = if stored.storage == "secret-service" {
+        keyring_lookup("oauth", &stored.provider)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<TokenSecret>(&raw).ok())?
+    } else {
+        TokenSecret {
+            access_token: stored.access_token.clone(),
+            refresh_token: stored.refresh_token.clone(),
+        }
+    };
+    if secret.access_token.is_empty() {
+        return None;
+    }
+    Some(Tokens {
+        provider: stored.provider,
+        access_token: secret.access_token,
+        refresh_token: secret.refresh_token,
+        expires_at: stored.expires_at,
+        account: stored.account,
+        token_url: stored.token_url,
+        client_id: stored.client_id,
+        api_origin: stored.api_origin,
+    })
+}
+
+fn save(tokens: &Tokens) -> Result<&'static str, String> {
+    crate::paths::ensure();
+    if let Some(previous) = load_persisted()
+        && previous.provider != tokens.provider
+        && previous.storage == "secret-service"
+    {
+        let _ = keyring_clear("oauth", &previous.provider);
+    }
+    let secret = serde_json::to_string(&TokenSecret {
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token.clone(),
+    })
+    .map_err(|error| error.to_string())?;
+    let keyring_saved = keyring_store("oauth", &tokens.provider, &secret).is_ok();
+    let stored = PersistedTokens {
+        version: AUTH_VERSION,
+        provider: tokens.provider.clone(),
+        account: tokens.account.clone(),
+        expires_at: tokens.expires_at,
+        token_url: tokens.token_url.clone(),
+        client_id: tokens.client_id.clone(),
+        api_origin: tokens.api_origin.clone(),
+        storage: if keyring_saved {
+            "secret-service".into()
+        } else {
+            "private-file".into()
+        },
+        access_token: if keyring_saved {
+            String::new()
+        } else {
+            tokens.access_token.clone()
+        },
+        refresh_token: if keyring_saved {
+            String::new()
+        } else {
+            tokens.refresh_token.clone()
+        },
+    };
+    let raw = serde_json::to_string_pretty(&stored).map_err(|error| error.to_string())?;
+    crate::paths::write_private(&path(), raw).map_err(|error| error.to_string())?;
+    Ok(if keyring_saved {
+        "desktop keyring"
+    } else {
+        "private file (mode 600)"
+    })
+}
+
+pub fn clear() -> Result<(), String> {
+    let keyring_result = load_persisted()
+        .filter(|stored| stored.storage == "secret-service")
+        .map(|stored| keyring_clear("oauth", &stored.provider));
+    let _ = fs::remove_file(path());
+    keyring_result.unwrap_or(Ok(()))
+}
+
+pub fn bearer(settings: &Settings) -> Result<Option<String>, String> {
+    let provider = settings.ai.provider.as_str();
+    let Some(mut tokens) = load_for(provider) else {
+        return Ok(None);
+    };
+    let configured_origin = api_origin(&settings.ai.endpoint)?;
+    if tokens.api_origin.is_empty() || tokens.api_origin != configured_origin {
+        return Err(
+            "The saved OAuth token is bound to a different API origin. Sign in again for this endpoint."
+                .into(),
+        );
+    }
+    if !is_expired(&tokens) {
+        return Ok(Some(tokens.access_token));
+    }
+    if tokens.refresh_token.is_empty() {
+        return Err("OAuth access expired. Sign in again in Settings.".into());
+    }
+    refresh(&mut tokens)?;
+    Ok(Some(tokens.access_token))
 }
 
 pub fn signed_in_label() -> String {
     match load() {
-        Some(t) if !t.access_token.is_empty() => {
-            if t.account.is_empty() {
-                format!("Signed in · {}", t.provider)
+        Some(tokens) if !tokens.access_token.is_empty() => {
+            if tokens.account.is_empty() {
+                format!("Signed in · {}", tokens.provider)
             } else {
-                format!("Signed in as {} · {}", t.account, t.provider)
+                format!("Signed in as {} · {}", tokens.account, tokens.provider)
             }
         }
         _ => "Not signed in".into(),
     }
 }
 
+pub fn api_key(provider: &str) -> Option<String> {
+    if let Ok(secret) = keyring_lookup("api-key", provider)
+        && !secret.is_empty()
+    {
+        return Some(secret);
+    }
+    let raw = fs::read_to_string(api_keys_path()).ok()?;
+    let keys: BTreeMap<String, String> = serde_json::from_str(&raw).ok()?;
+    keys.get(provider).filter(|key| !key.is_empty()).cloned()
+}
+
+pub fn has_api_key(provider: &str) -> bool {
+    api_key(provider).is_some()
+}
+
+pub fn save_api_key(provider: &str, value: &str) -> Result<&'static str, String> {
+    let provider = validate_provider_id(provider)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("API key cannot be empty".into());
+    }
+    if value.len() > 16 * 1024 || value.chars().any(char::is_control) {
+        return Err("API key is not a valid credential".into());
+    }
+    if keyring_store("api-key", provider, value).is_ok() {
+        remove_fallback_api_key(provider)?;
+        return Ok("desktop keyring");
+    }
+    let mut keys = load_fallback_api_keys();
+    keys.insert(provider.to_string(), value.to_string());
+    write_fallback_api_keys(&keys)?;
+    Ok("private file (mode 600)")
+}
+
+pub fn clear_api_key(provider: &str) -> Result<(), String> {
+    let provider = validate_provider_id(provider)?;
+    let _ = keyring_clear("api-key", provider);
+    remove_fallback_api_key(provider)
+}
+
+fn load_fallback_api_keys() -> BTreeMap<String, String> {
+    fs::read_to_string(api_keys_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_fallback_api_keys(keys: &BTreeMap<String, String>) -> Result<(), String> {
+    if keys.is_empty() {
+        let _ = fs::remove_file(api_keys_path());
+        return Ok(());
+    }
+    let raw = serde_json::to_string_pretty(keys).map_err(|error| error.to_string())?;
+    crate::paths::write_private(&api_keys_path(), raw).map_err(|error| error.to_string())
+}
+
+fn remove_fallback_api_key(provider: &str) -> Result<(), String> {
+    let mut keys = load_fallback_api_keys();
+    keys.remove(provider);
+    write_fallback_api_keys(&keys)
+}
+
 pub fn login(provider_id: &str, settings: &Settings) -> Result<String, String> {
-    let preset = PROVIDERS.iter().find(|p| p.id == provider_id);
+    let preset = PROVIDERS.iter().find(|provider| provider.id == provider_id);
+    if provider_id != "custom" && preset.is_none() {
+        return Err(format!(
+            "{provider_id} does not expose a supported API OAuth flow. Use an API key or a custom standards-compatible provider."
+        ));
+    }
     let authorize = if provider_id == "custom" {
-        settings.ai.oauth_authorize_url.trim().to_string()
+        settings.ai.oauth_authorize_url.trim()
     } else {
         preset
-            .map(|p| p.authorize.to_string())
+            .map(|provider| provider.authorize)
             .unwrap_or_default()
     };
     let token_url = if provider_id == "custom" {
-        settings.ai.oauth_token_url.trim().to_string()
+        settings.ai.oauth_token_url.trim()
     } else {
-        preset
-            .map(|p| p.token.to_string())
-            .unwrap_or_default()
+        preset.map(|provider| provider.token).unwrap_or_default()
     };
     let scopes = if provider_id == "custom" {
-        settings.ai.oauth_scopes.clone()
+        settings.ai.oauth_scopes.trim()
     } else {
-        preset.map(|p| p.scopes.to_string()).unwrap_or_default()
+        preset.map(|provider| provider.scopes).unwrap_or_default()
     };
-    if authorize.is_empty() {
-        return Err("Set an OAuth authorize URL in Settings, then try again".into());
-    }
-    if !authorize.starts_with("https://") {
-        return Err("OAuth authorize URL must start with https://".into());
-    }
-    if token_url.is_empty() {
-        return Err(
-            "Set an OAuth token URL in Settings. Flint will not store the authorization code as a bearer token."
-                .into(),
-        );
-    }
-    if !token_url.starts_with("https://") {
-        return Err("OAuth token URL must start with https://".into());
-    }
     let client_id = settings.ai.client_id.trim();
     if client_id.is_empty() {
-        return Err("Add an OAuth client ID in Settings — Flint never ships a shared secret".into());
+        return Err("Add a desktop OAuth client ID in Settings first".into());
     }
+    if client_id.len() > 2048 || client_id.chars().any(char::is_control) {
+        return Err("OAuth client ID is invalid".into());
+    }
+    let mut authorize_url = secure_url(authorize, "OAuth authorize URL")?;
+    let token_url = secure_url(token_url, "OAuth token URL")?;
+    reject_reserved_authorize_parameters(&authorize_url)?;
+    let api_origin = api_origin(&settings.ai.endpoint)?;
 
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    listener.set_nonblocking(true).ok();
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Could not secure OAuth callback listener: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .port();
     let redirect = format!("http://127.0.0.1:{port}/callback");
-    let verifier = random_token(32)?;
-    let challenge = pkce_challenge(&verifier)?;
-    let state = random_token(16)?;
+    let verifier = random_token(64)?;
+    let challenge = pkce_challenge(&verifier);
+    let state = random_token(32)?;
 
-    let mut url = authorize;
-    let join = if url.contains('?') { "&" } else { "?" };
-    url.push_str(join);
-    url.push_str(&format!(
-        "response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
-        urlencode(client_id),
-        urlencode(&redirect),
-        urlencode(&state),
-        urlencode(&challenge),
-    ));
-    if !scopes.is_empty() {
-        url.push_str("&scope=");
-        url.push_str(&urlencode(&scopes));
+    {
+        let mut query = authorize_url.query_pairs_mut();
+        query
+            .append_pair("response_type", "code")
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", &redirect)
+            .append_pair("state", &state)
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256");
+        if !scopes.is_empty() {
+            query.append_pair("scope", scopes);
+        }
+        if provider_id == "google" {
+            query
+                .append_pair("access_type", "offline")
+                .append_pair("prompt", "consent");
+        }
     }
 
-    open_browser(&url)?;
-    let (code, returned_state) = wait_for_code(&listener)?;
-    if returned_state != state {
-        return Err("OAuth state mismatch — sign-in cancelled".into());
-    }
-    let body = format!(
-        "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
-        urlencode(&code),
-        urlencode(&redirect),
-        urlencode(client_id),
-        urlencode(&verifier),
-    );
-    let raw = token_request(&token_url, &body)?;
-    let access = json_str(&raw, "access_token").ok_or("Provider did not return an access token")?;
-    let refresh = json_str(&raw, "refresh_token").unwrap_or_default();
-    let expires_in = json_u64(&raw, "expires_in").unwrap_or(0);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let account = json_str(&raw, "email")
-        .or_else(|| json_str(&raw, "name"))
-        .unwrap_or_default();
-    save(&Tokens {
+    open_browser(authorize_url.as_str())?;
+    let code = wait_for_code(&listener, port, &state)?;
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("code", &code)
+        .append_pair("redirect_uri", &redirect)
+        .append_pair("client_id", client_id)
+        .append_pair("code_verifier", &verifier)
+        .finish();
+    let response = token_request(&token_url, &body)?;
+    validate_token_response(&response)?;
+    let now = unix_now();
+    let storage = save(&Tokens {
         provider: provider_id.to_string(),
-        access_token: access,
-        refresh_token: refresh,
-        expires_at: if expires_in == 0 { 0 } else { now + expires_in },
-        account,
-    });
+        access_token: response.access_token,
+        refresh_token: response.refresh_token,
+        expires_at: expiry(now, response.expires_in),
+        account: String::new(),
+        token_url: token_url.to_string(),
+        client_id: client_id.to_string(),
+        api_origin,
+    })?;
     Ok(format!(
-        "Signed in with {}",
-        preset.map(|p| p.title).unwrap_or("custom OAuth")
+        "Signed in with {} · credentials stored in {storage}",
+        preset
+            .map(|provider| provider.title)
+            .unwrap_or("custom OAuth")
     ))
 }
 
 pub fn apply_provider_defaults(settings: &mut Settings, provider_id: &str) {
-    if let Some(preset) = PROVIDERS.iter().find(|p| p.id == provider_id) {
+    if let Some(preset) = PROVIDERS.iter().find(|provider| provider.id == provider_id) {
         settings.ai.provider = preset.id.to_string();
-        if settings.ai.endpoint.is_empty()
-            || settings.ai.endpoint.contains("127.0.0.1")
-            || settings.ai.endpoint.contains("localhost")
-        {
-            settings.ai.endpoint = preset.chat_endpoint.to_string();
-        }
-        if settings.ai.model.is_empty()
-            || settings.ai.model.contains("qwen")
-            || settings.ai.model.contains("gemma")
-            || settings.ai.model.contains("llama")
-        {
-            settings.ai.model = preset.default_model.to_string();
-        }
+        settings.ai.endpoint = preset.chat_endpoint.to_string();
+        settings.ai.model = preset.default_model.to_string();
+        settings.save();
+    } else if provider_id == "custom" {
+        settings.ai.provider = "custom".into();
         settings.save();
     }
 }
 
-fn wait_for_code(listener: &TcpListener) -> Result<(String, String), String> {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let (mut stream, _) = loop {
-        match listener.accept() {
-            Ok(pair) => break pair,
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+fn refresh(tokens: &mut Tokens) -> Result<(), String> {
+    let token_url = secure_url(&tokens.token_url, "Saved OAuth token URL")?;
+    if tokens.client_id.is_empty() {
+        return Err("OAuth client information is missing. Sign in again.".into());
+    }
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", &tokens.refresh_token)
+        .append_pair("client_id", &tokens.client_id)
+        .finish();
+    let response = token_request(&token_url, &body)?;
+    validate_token_response(&response)?;
+    tokens.access_token = response.access_token;
+    if !response.refresh_token.is_empty() {
+        tokens.refresh_token = response.refresh_token;
+    }
+    tokens.expires_at = expiry(unix_now(), response.expires_in);
+    save(tokens)?;
+    Ok(())
+}
+
+fn wait_for_code(
+    listener: &TcpListener,
+    port: u16,
+    expected_state: &str,
+) -> Result<String, String> {
+    let deadline = Instant::now() + CALLBACK_TIMEOUT;
+    loop {
+        let (mut stream, peer) = match listener.accept() {
+            Ok(pair) => pair,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
-                    return Err(
-                        "Sign-in timed out. Nothing reached Flint’s local callback.".into(),
-                    );
+                    return Err("Sign-in timed out. Nothing reached Flint’s local callback.".into());
                 }
-                thread::sleep(Duration::from_millis(120));
+                thread::sleep(Duration::from_millis(100));
+                continue;
             }
-            Err(_) => {
-                return Err("Sign-in timed out. Nothing reached Flint’s local callback.".into());
+            Err(error) => return Err(format!("OAuth callback failed: {error}")),
+        };
+        if !peer.ip().is_loopback() {
+            continue;
+        }
+        match read_callback(&mut stream, port, expected_state) {
+            Ok(Callback::Success(code)) => {
+                send_callback_page(&mut stream, true, "Sign-in complete");
+                return Ok(code);
+            }
+            Ok(Callback::ProviderError(error)) => {
+                send_callback_page(&mut stream, false, &error);
+                return Err(format!("Provider denied sign-in: {error}"));
+            }
+            Err(error) => {
+                send_callback_page(&mut stream, false, &error);
+                // Ignore unrelated or forged loopback requests and keep waiting for
+                // the browser callback until the original deadline.
             }
         }
-    };
-    stream.set_nonblocking(false).ok();
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let line = req.lines().next().unwrap_or("");
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("");
-    if method != "GET" {
+    }
+}
+
+enum Callback {
+    Success(String),
+    ProviderError(String),
+}
+
+fn read_callback(
+    stream: &mut TcpStream,
+    port: u16,
+    expected_state: &str,
+) -> Result<Callback, String> {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..read]);
+        if raw.len() > MAX_CALLBACK_BYTES {
+            return Err("OAuth callback headers were too large".into());
+        }
+    }
+    let request = std::str::from_utf8(&raw).map_err(|_| "OAuth callback was not UTF-8")?;
+    parse_callback_request(request, port, expected_state)
+}
+
+fn parse_callback_request(
+    request: &str,
+    port: u16,
+    expected_state: &str,
+) -> Result<Callback, String> {
+    let mut lines = request.split("\r\n");
+    let mut request_line = lines.next().unwrap_or("").split_whitespace();
+    if request_line.next() != Some("GET") {
         return Err("Unexpected OAuth callback method".into());
     }
-    let path_only = path.split('?').next().unwrap_or("");
-    if path_only != "/callback" {
+    let target = request_line
+        .next()
+        .ok_or("OAuth callback target was missing")?;
+    if request_line.next() != Some("HTTP/1.1") {
+        return Err("OAuth callback must use HTTP/1.1".into());
+    }
+    let expected_host = format!("127.0.0.1:{port}");
+    let host = lines
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
+                .map(|(_, value)| value.trim())
+        })
+        .ok_or("OAuth callback Host was missing")?;
+    if host != expected_host {
+        return Err("OAuth callback Host did not match the listener".into());
+    }
+    let callback_url = Url::parse(&format!("http://{expected_host}{target}"))
+        .map_err(|_| "OAuth callback URL was invalid")?;
+    if callback_url.path() != "/callback" || callback_url.fragment().is_some() {
         return Err("Unexpected OAuth callback path".into());
     }
-    let host_ok = req.lines().any(|l| {
-        let lower = l.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("host:") {
-            let host = rest.trim();
-            host == "127.0.0.1"
-                || host == "localhost"
-                || host.starts_with("127.0.0.1:")
-                || host.starts_with("localhost:")
-        } else {
-            false
-        }
-    });
-    if !host_ok {
-        return Err("OAuth callback Host was not local".into());
-    }
-    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let mut code = String::new();
-    let mut state = String::new();
-    let mut error = String::new();
-    for pair in query.split('&') {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let v = urldecode(v);
-        match k {
-            "code" => code = v,
-            "state" => state = v,
-            "error" | "error_description" => error = v,
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    for (key, value) in callback_url.query_pairs() {
+        match key.as_ref() {
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            "error_description" => error = Some(value.into_owned()),
+            "error" if error.is_none() => error = Some(value.into_owned()),
             _ => {}
         }
     }
-    let body = if code.is_empty() {
-        format!(
-            "<html><body style='background:#121214;color:#f6f1ea;font-family:Inter,sans-serif;padding:48px'>
-             <h1>Flint</h1><p>Sign-in did not finish. {}</p></body></html>",
-            html_escape(&error)
-        )
-    } else {
-        "<html><body style='background:#121214;color:#f6f1ea;font-family:Inter,sans-serif;padding:48px'>
-         <h1 style='color:#ff5a1f'>Flint</h1><p>You’re signed in. You can return to the launcher.</p></body></html>".into()
-    };
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(resp.as_bytes());
-    if !error.is_empty() && code.is_empty() {
-        return Err(format!("Provider returned {error}"));
+    let returned_state = state.ok_or("OAuth callback state was missing")?;
+    if !constant_time_eq(expected_state.as_bytes(), returned_state.as_bytes()) {
+        return Err("OAuth state mismatch".into());
     }
-    if code.is_empty() {
-        return Err("No authorization code in the callback".into());
+    if let Some(error) = error {
+        return Ok(Callback::ProviderError(error));
     }
-    Ok((code, state))
+    let code = code.ok_or("No authorization code in the callback")?;
+    if code.is_empty() || code.len() > 16 * 1024 || code.chars().any(char::is_control) {
+        return Err("OAuth authorization code was invalid".into());
+    }
+    Ok(Callback::Success(code))
 }
 
-fn token_request(url: &str, body: &str) -> Result<String, String> {
+fn send_callback_page(stream: &mut TcpStream, success: bool, message: &str) {
+    let title = if success {
+        "Signed in"
+    } else {
+        "Sign-in failed"
+    };
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>\
+         <title>Flint — {title}</title><style>body{{background:#121214;color:#f6f1ea;\
+         font:16px system-ui;padding:48px;max-width:42rem}}h1{{color:#ff5a1f}}</style>\
+         <h1>Flint</h1><p>{}</p><p>You can close this tab and return to Flint.</p>",
+        html_escape(message)
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\n\
+         Referrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn token_request(url: &Url, body: &str) -> Result<TokenResponse, String> {
     let output = Command::new("curl")
         .args([
             "-sS",
-            "--fail",
+            "--fail-with-body",
+            "--connect-timeout",
+            "10",
             "--max-time",
             "30",
             "--proto",
@@ -325,9 +598,11 @@ fn token_request(url: &str, body: &str) -> Result<String, String> {
             "POST",
             "-H",
             "Content-Type: application/x-www-form-urlencoded",
+            "-H",
+            "Accept: application/json",
             "--data-binary",
             "@-",
-            url,
+            url.as_str(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -339,14 +614,47 @@ fn token_request(url: &str, body: &str) -> Result<String, String> {
             }
             child.wait_with_output()
         })
-        .map_err(|e| format!("Token exchange failed: {e}"))?;
+        .map_err(|error| format!("Token exchange failed: {error}"))?;
+    if output.stdout.len() > MAX_TOKEN_RESPONSE_BYTES {
+        return Err("Token endpoint response was too large".into());
+    }
     if !output.status.success() {
+        let detail = oauth_error_detail(&output.stdout)
+            .unwrap_or_else(|| String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(format!("Token exchange failed: {detail}"));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Invalid token response: {error}"))
+}
+
+fn oauth_error_detail(raw: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    value
+        .get("error_description")
+        .or_else(|| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn validate_token_response(response: &TokenResponse) -> Result<(), String> {
+    if response.access_token.is_empty()
+        || response.access_token.len() > 256 * 1024
+        || response.access_token.chars().any(char::is_control)
+    {
+        return Err("Provider returned an invalid access token".into());
+    }
+    if response.refresh_token.len() > 256 * 1024
+        || response.refresh_token.chars().any(char::is_control)
+    {
+        return Err("Provider returned an invalid refresh token".into());
+    }
+    if !response.token_type.is_empty() && !response.token_type.eq_ignore_ascii_case("bearer") {
         return Err(format!(
-            "Token exchange failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "Unsupported OAuth token type: {}",
+            response.token_type
         ));
     }
-    String::from_utf8(output.stdout).map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn open_browser(url: &str) -> Result<(), String> {
@@ -357,153 +665,295 @@ fn open_browser(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("Could not open browser: {e}"))
+        .map_err(|error| format!("Could not open browser: {error}"))
 }
 
-fn pkce_challenge(verifier: &str) -> Result<String, String> {
-    let output = Command::new("openssl")
-        .args(["dgst", "-sha256", "-binary"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(verifier.as_bytes())?;
-            }
-            child.wait_with_output()
-        })
-        .map_err(|e| format!("openssl is required for PKCE: {e}"))?;
-    if !output.status.success() {
-        return Err("openssl sha256 failed".into());
-    }
-    Ok(b64url(&output.stdout))
+fn pkce_challenge(verifier: &str) -> String {
+    b64url(&Sha256::digest(verifier.as_bytes()))
 }
 
 fn random_token(bytes: usize) -> Result<String, String> {
-    let mut buf = vec![0u8; bytes];
-    let mut f = fs::File::open("/dev/urandom").map_err(|_| "No /dev/urandom".to_string())?;
-    f.read_exact(&mut buf)
+    let mut buffer = vec![0u8; bytes];
+    let mut random = fs::File::open("/dev/urandom").map_err(|_| "No /dev/urandom".to_string())?;
+    random
+        .read_exact(&mut buffer)
         .map_err(|_| "Could not read /dev/urandom".to_string())?;
-    Ok(b64url(&buf))
+    Ok(b64url(&buffer))
 }
 
 fn b64url(data: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    let mut i = 0;
-    while i < data.len() {
-        let b0 = data[i];
-        let b1 = if i + 1 < data.len() { data[i + 1] } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] } else { 0 };
-        out.push(T[(b0 >> 2) as usize] as char);
-        out.push(T[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-        if i + 1 < data.len() {
-            out.push(T[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::new();
+    let mut index = 0;
+    while index < data.len() {
+        let first = data[index];
+        let second = data.get(index + 1).copied().unwrap_or(0);
+        let third = data.get(index + 2).copied().unwrap_or(0);
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[(((first & 3) << 4) | (second >> 4)) as usize] as char);
+        if index + 1 < data.len() {
+            output.push(TABLE[(((second & 15) << 2) | (third >> 6)) as usize] as char);
         }
-        if i + 2 < data.len() {
-            out.push(T[(b2 & 63) as usize] as char);
+        if index + 2 < data.len() {
+            output.push(TABLE[(third & 63) as usize] as char);
         }
-        i += 3;
+        index += 3;
     }
-    out
+    output
 }
 
-fn urlencode(input: &str) -> String {
-    let mut out = String::new();
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
+fn secure_url(input: &str, label: &str) -> Result<Url, String> {
+    let url = Url::parse(input).map_err(|_| format!("{label} is invalid"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "{label} must be an HTTPS URL without credentials or a fragment"
+        ));
+    }
+    Ok(url)
+}
+
+fn api_origin(endpoint: &str) -> Result<String, String> {
+    let url = secure_url(endpoint, "OAuth API endpoint")?;
+    Ok(url.origin().ascii_serialization())
+}
+
+fn reject_reserved_authorize_parameters(url: &Url) -> Result<(), String> {
+    const RESERVED: &[&str] = &[
+        "response_type",
+        "client_id",
+        "redirect_uri",
+        "state",
+        "code_challenge",
+        "code_challenge_method",
+        "scope",
+    ];
+    if url
+        .query_pairs()
+        .any(|(key, _)| RESERVED.contains(&key.as_ref()))
+    {
+        return Err("OAuth authorize URL contains a reserved query parameter".into());
+    }
+    Ok(())
+}
+
+fn validate_provider_id(provider: &str) -> Result<&str, String> {
+    if provider.is_empty()
+        || provider.len() > 64
+        || provider
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return Err("Provider ID is invalid".into());
+    }
+    Ok(provider)
+}
+
+fn keyring_store(kind: &str, provider: &str, secret: &str) -> Result<(), String> {
+    let provider = validate_provider_id(provider)?;
+    let mut child = Command::new("secret-tool")
+        .args([
+            "store",
+            "--label=Flint AI credential",
+            "application",
+            KEYRING_APP,
+            "kind",
+            kind,
+            "provider",
+            provider,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("Could not open keyring input")?
+        .write_all(secret.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let status = child.wait().map_err(|error| error.to_string())?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "Desktop keyring rejected the credential".into())
+}
+
+fn keyring_lookup(kind: &str, provider: &str) -> Result<String, String> {
+    let provider = validate_provider_id(provider)?;
+    let output = Command::new("secret-tool")
+        .args([
+            "lookup",
+            "application",
+            KEYRING_APP,
+            "kind",
+            kind,
+            "provider",
+            provider,
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("Credential not found in desktop keyring".into());
+    }
+    let mut secret = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    if secret.ends_with('\n') {
+        secret.pop();
+        if secret.ends_with('\r') {
+            secret.pop();
         }
     }
-    out
+    Ok(secret)
 }
 
-fn urldecode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let h = |c: u8| match c {
-                b'0'..=b'9' => c - b'0',
-                b'a'..=b'f' => c - b'a' + 10,
-                b'A'..=b'F' => c - b'A' + 10,
-                _ => 0,
-            };
-            out.push((h(bytes[i + 1]) << 4) | h(bytes[i + 2]));
-            i += 3;
-        } else if bytes[i] == b'+' {
-            out.push(b' ');
-            i += 1;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+fn keyring_clear(kind: &str, provider: &str) -> Result<(), String> {
+    let provider = validate_provider_id(provider)?;
+    let status = Command::new("secret-tool")
+        .args([
+            "clear",
+            "application",
+            KEYRING_APP,
+            "kind",
+            kind,
+            "provider",
+            provider,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "Credential was not present in desktop keyring".into())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len() && bool::from(left.ct_eq(right))
+}
+
+fn is_expired(tokens: &Tokens) -> bool {
+    tokens.expires_at > 0 && unix_now().saturating_add(60) >= tokens.expires_at
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn expiry(now: u64, expires_in: u64) -> u64 {
+    if expires_in == 0 {
+        0
+    } else {
+        now.saturating_add(expires_in)
     }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
-fn json_str(raw: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let idx = raw.find(&needle)?;
-    let rest = &raw[idx + needle.len()..];
-    let rest = rest.trim_start().trim_start_matches(':').trim_start();
-    if !rest.starts_with('"') {
-        return None;
-    }
-    let mut out = String::new();
-    let bytes: Vec<char> = rest.chars().skip(1).collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            '"' => break,
-            '\\' if i + 1 < bytes.len() => {
-                out.push(bytes[i + 1]);
-                i += 2;
-            }
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn json_u64(raw: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{key}\"");
-    let idx = raw.find(&needle)?;
-    let rest = &raw[idx + needle.len()..];
-    let rest = rest.trim_start().trim_start_matches(':').trim_start();
-    rest.split(|c: char| !c.is_ascii_digit())
-        .next()
-        .and_then(|s| s.parse().ok())
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{b64url, json_str};
+    use super::{
+        Callback, TokenResponse, api_origin, b64url, constant_time_eq, parse_callback_request,
+        pkce_challenge, reject_reserved_authorize_parameters, secure_url, validate_token_response,
+    };
+    use url::Url;
 
     #[test]
-    fn b64url_is_url_safe() {
-        let s = b64url(&[0xff, 0xee, 0xdd, 0xcc]);
-        assert!(!s.contains('+'));
-        assert!(!s.contains('/'));
+    fn b64url_is_url_safe_and_unpadded() {
+        let encoded = b64url(&[0xff, 0xee, 0xdd, 0xcc]);
+        assert!(!encoded.contains('+'));
+        assert!(!encoded.contains('/'));
+        assert!(!encoded.contains('='));
     }
 
     #[test]
-    fn pulls_access_token() {
-        let raw = r#"{"token_type":"bearer","access_token":"abc-123"}"#;
-        assert_eq!(json_str(raw, "access_token").as_deref(), Some("abc-123"));
+    fn pkce_matches_rfc_7636_vector() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        assert_eq!(
+            pkce_challenge(verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn secure_urls_reject_credential_and_fragment_confusion() {
+        assert!(secure_url("http://example.com/oauth", "test").is_err());
+        assert!(secure_url("https://user@example.com/oauth", "test").is_err());
+        assert!(secure_url("https://example.com/oauth#fragment", "test").is_err());
+        assert!(secure_url("https://example.com/oauth", "test").is_ok());
+    }
+
+    #[test]
+    fn api_tokens_are_bound_to_origin() {
+        assert_eq!(
+            api_origin("https://api.example.com/v1/chat").unwrap(),
+            "https://api.example.com"
+        );
+        assert_eq!(
+            api_origin("https://api.example.com:8443/v1/chat").unwrap(),
+            "https://api.example.com:8443"
+        );
+    }
+
+    #[test]
+    fn reserved_authorize_parameters_are_rejected() {
+        let bad = Url::parse("https://id.example.com/auth?client_id=attacker").unwrap();
+        let good = Url::parse("https://id.example.com/auth?audience=api").unwrap();
+        assert!(reject_reserved_authorize_parameters(&bad).is_err());
+        assert!(reject_reserved_authorize_parameters(&good).is_ok());
+    }
+
+    #[test]
+    fn state_comparison_checks_length_and_content() {
+        assert!(constant_time_eq(b"same", b"same"));
+        assert!(!constant_time_eq(b"same", b"diff"));
+        assert!(!constant_time_eq(b"same", b"same-longer"));
+    }
+
+    #[test]
+    fn callback_requires_exact_host_port_and_state() {
+        let valid =
+            "GET /callback?code=code-123&state=expected HTTP/1.1\r\nHost: 127.0.0.1:4242\r\n\r\n";
+        match parse_callback_request(valid, 4242, "expected").unwrap() {
+            Callback::Success(code) => assert_eq!(code, "code-123"),
+            Callback::ProviderError(error) => panic!("unexpected provider error: {error}"),
+        }
+
+        let forged_state =
+            "GET /callback?code=x&state=forged HTTP/1.1\r\nHost: 127.0.0.1:4242\r\n\r\n";
+        assert!(parse_callback_request(forged_state, 4242, "expected").is_err());
+
+        let forged_host =
+            "GET /callback?code=x&state=expected HTTP/1.1\r\nHost: 127.0.0.1:9999\r\n\r\n";
+        assert!(parse_callback_request(forged_host, 4242, "expected").is_err());
+    }
+
+    #[test]
+    fn token_response_rejects_control_characters() {
+        let response = TokenResponse {
+            access_token: "valid-access-token".into(),
+            refresh_token: "invalid\nrefresh-token".into(),
+            expires_in: 3600,
+            token_type: "Bearer".into(),
+        };
+        assert!(validate_token_response(&response).is_err());
     }
 }

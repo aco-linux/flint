@@ -1,9 +1,25 @@
 window.flint-root {
-  background: transparent;
+  background: #09090b;
+}
+
+headerbar.flint-titlebar {
+  min-height: 34px;
+  padding: 0 8px;
+  background: #101012;
+  border-bottom: 1px solid rgba(255, 210, 178, 0.12);
+  box-shadow: none;
+}
+
+headerbar.flint-titlebar .flint-title {
+  color: #cfc6bd;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
 }
 
 .scrim {
-  background: rgba(5, 5, 7, 0.42);
+  background: #09090b;
 }
 
 .panel {
@@ -11,7 +27,7 @@ window.flint-root {
   border: 1px solid rgba(255, 210, 178, 0.14);
   border-radius: 18px;
   padding: 6px 0 0 0;
-  min-width: 720px;
+  min-width: 420px;
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.45),
     0 28px 80px rgba(0, 0, 0, 0.55),

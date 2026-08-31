@@ -29,10 +29,7 @@ impl Mode {
         if let Some(rest) = q.strip_prefix('?') {
             return (Mode::Ask, rest.trim_start().to_string());
         }
-        if let Some(rest) = strip_kw(
-            q,
-            &["ask ", "ai ", "ask ai", "askai"],
-        ) {
+        if let Some(rest) = strip_kw(q, &["ask ", "ai ", "ask ai", "askai"]) {
             return (Mode::Ask, rest);
         }
         if let Some(rest) = strip_kw(q, &["note ", "notes ", "n "]) {

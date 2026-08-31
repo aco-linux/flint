@@ -47,32 +47,56 @@ impl Kind {
 
 #[derive(Debug, Clone)]
 pub enum Action {
-    LaunchDesktop { path: PathBuf },
-    FocusWindow { address: String },
+    LaunchDesktop {
+        path: PathBuf,
+    },
+    FocusWindow {
+        address: String,
+    },
     Copy(String),
     Paste(String),
     OpenUri(String),
     OpenPath(PathBuf),
-    Spawn { program: String, args: Vec<String> },
-    Shell { command: String, terminal: bool },
+    Spawn {
+        program: String,
+        args: Vec<String>,
+    },
+    Shell {
+        command: String,
+        terminal: bool,
+    },
     EnterMode(Mode),
-    SaveSnippet { keyword: String },
-    CreateNote { title: String },
-    OpenNote { id: String },
-    AskAi { prompt: String },
+    SaveSnippet {
+        keyword: String,
+    },
+    CreateNote {
+        title: String,
+    },
+    OpenNote {
+        id: String,
+    },
+    AskAi {
+        prompt: String,
+    },
     ToggleVoice,
     SaveSettings,
-    InstallExt { id: String },
+    InstallExt {
+        id: String,
+    },
     SyncScriptCommands,
     SyncVicinae,
-    RunScript { path: PathBuf },
+    RunScript {
+        path: PathBuf,
+    },
     UseModel {
         source: String,
         model: String,
         endpoint: String,
         api: String,
     },
-    SignIn { provider: String },
+    SignIn {
+        provider: String,
+    },
     SignOut,
     RefreshModels,
 }
@@ -99,7 +123,10 @@ impl Item {
     pub fn haystack(&self) -> String {
         format!(
             "{} {} {} {}",
-            self.title, self.subtitle, self.keywords, self.kind.label()
+            self.title,
+            self.subtitle,
+            self.keywords,
+            self.kind.label()
         )
     }
 }

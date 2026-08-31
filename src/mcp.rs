@@ -2,18 +2,19 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::McpServer;
 
 pub fn tool_primer(servers: &[McpServer]) -> Option<String> {
-    let live: Vec<&McpServer> = servers.iter().filter(|s| s.enabled && !s.command.is_empty()).collect();
+    let live: Vec<&McpServer> = servers
+        .iter()
+        .filter(|s| s.enabled && !s.command.is_empty())
+        .collect();
     if live.is_empty() {
         return None;
     }
-    let mut lines = vec![
-        "Connected MCP servers (tools are listed when reachable):".to_string(),
-    ];
+    let mut lines = vec!["Connected MCP servers (tools are listed when reachable):".to_string()];
     for server in live {
         match list_tools(server) {
             Ok(tools) if !tools.is_empty() => {
@@ -41,11 +42,15 @@ fn list_tools(server: &McpServer) -> Result<Vec<String>, String> {
         .spawn()
         .map_err(|e| e.to_string())?;
 
-    let init = rpc(1, "initialize", json!({
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "flint", "version": "0.1.0"}
-    }));
+    let init = rpc(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "flint", "version": env!("CARGO_PKG_VERSION")}
+        }),
+    );
     let list = rpc(2, "tools/list", json!({}));
 
     {
@@ -62,17 +67,17 @@ fn list_tools(server: &McpServer) -> Result<Vec<String>, String> {
         let Some(body) = read_msg(&mut reader)? else {
             break;
         };
-        if let Ok(value) = serde_json::from_str::<Value>(&body) {
-            if value.get("id") == Some(&json!(2)) {
-                if let Some(list) = value.pointer("/result/tools").and_then(Value::as_array) {
-                    for tool in list {
-                        if let Some(name) = tool.get("name").and_then(Value::as_str) {
-                            tools.push(name.to_string());
-                        }
+        if let Ok(value) = serde_json::from_str::<Value>(&body)
+            && value.get("id") == Some(&json!(2))
+        {
+            if let Some(list) = value.pointer("/result/tools").and_then(Value::as_array) {
+                for tool in list {
+                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                        tools.push(name.to_string());
                     }
                 }
-                break;
             }
+            break;
         }
     }
     let _ = child.kill();

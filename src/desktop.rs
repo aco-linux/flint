@@ -43,7 +43,7 @@ pub fn load_apps() -> Vec<Item> {
             }
         }
     }
-    apps.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    apps.sort_by_key(|app| app.title.to_lowercase());
     apps
 }
 
@@ -141,10 +141,7 @@ fn command_exists(bin: &str) -> bool {
         return Path::new(bin).is_file();
     }
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| dir.join(bin).is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
 }
 

@@ -47,17 +47,13 @@ pub fn load_windows() -> Vec<Item> {
         .into_iter()
         .filter(|c| c.mapped && !c.hidden && !c.address.is_empty())
         .filter(|c| {
-                c.class != "flint"
-                    && c.class != "dev.flint.Launcher"
-                    && c.class != "rayblast"
-                    && c.class != "dev.rayblast.Launcher"
-            })
+            c.class != "flint"
+                && c.class != "dev.flint.launcher"
+                && c.class != "rayblast"
+                && c.class != "dev.rayblast.Launcher"
+        })
         .map(|c| {
-            let workspace = c
-                .workspace
-                .as_ref()
-                .map(|w| w.name.as_str())
-                .unwrap_or("?");
+            let workspace = c.workspace.as_ref().map(|w| w.name.as_str()).unwrap_or("?");
             let title = if c.title.is_empty() {
                 c.class.clone()
             } else {
@@ -77,11 +73,7 @@ pub fn load_windows() -> Vec<Item> {
 }
 
 fn display_class(class: &str) -> String {
-    class
-        .rsplit(['.', ' '])
-        .next()
-        .unwrap_or(class)
-        .to_string()
+    class.rsplit(['.', ' ']).next().unwrap_or(class).to_string()
 }
 
 fn guess_icon(class: &str) -> String {

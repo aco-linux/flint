@@ -183,7 +183,8 @@ pub fn looks_secret(text: &str) -> bool {
 }
 
 fn looks_openai_key(lower: &str) -> bool {
-    lower.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
         .any(|tok| tok.starts_with("sk-") && tok.len() >= 20)
 }
 

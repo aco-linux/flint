@@ -27,12 +27,11 @@ pub fn warm() {
 }
 
 pub fn discover() -> Vec<LocalModel> {
-    if let Ok(guard) = CACHE.lock() {
-        if let Some(cache) = guard.as_ref() {
-            if cache.at.elapsed() < Duration::from_secs(45) {
-                return cache.models.clone();
-            }
-        }
+    if let Ok(guard) = CACHE.lock()
+        && let Some(cache) = guard.as_ref()
+        && cache.at.elapsed() < Duration::from_secs(45)
+    {
+        return cache.models.clone();
     }
     let models = probe();
     if let Ok(mut guard) = CACHE.lock() {

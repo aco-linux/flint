@@ -136,7 +136,8 @@ impl Catalog {
 
         if query.len() >= 2 {
             for item in file_items(query) {
-                let score = rank(&mut matcher, &pattern, query, &item, &self.usage).unwrap_or(1_000);
+                let score =
+                    rank(&mut matcher, &pattern, query, &item, &self.usage).unwrap_or(1_000);
                 results.push(Scored { item, score });
             }
         }
@@ -179,26 +180,26 @@ impl Catalog {
         let q = query.trim();
         let mut results = Vec::new();
 
-        if let Some(keyword) = q.strip_prefix('+').map(str::trim) {
-            if !keyword.is_empty() {
-                let preview = clipboard::current_text()
-                    .map(|t| t.chars().take(64).collect::<String>())
-                    .unwrap_or_else(|| "clipboard is empty".into());
-                results.push(Scored {
-                    item: Item {
-                        id: format!("snip-save:{keyword}"),
-                        title: format!("Save snippet “{keyword}”"),
-                        subtitle: preview,
-                        keywords: keyword.to_string(),
-                        kind: Kind::Snippet,
-                        icon: Icon::Name("document-save".into()),
-                        action: Action::SaveSnippet {
-                            keyword: keyword.to_string(),
-                        },
+        if let Some(keyword) = q.strip_prefix('+').map(str::trim)
+            && !keyword.is_empty()
+        {
+            let preview = clipboard::current_text()
+                .map(|t| t.chars().take(64).collect::<String>())
+                .unwrap_or_else(|| "clipboard is empty".into());
+            results.push(Scored {
+                item: Item {
+                    id: format!("snip-save:{keyword}"),
+                    title: format!("Save snippet “{keyword}”"),
+                    subtitle: preview,
+                    keywords: keyword.to_string(),
+                    kind: Kind::Snippet,
+                    icon: Icon::Name("document-save".into()),
+                    action: Action::SaveSnippet {
+                        keyword: keyword.to_string(),
                     },
-                    score: 100_000,
-                });
-            }
+                },
+                score: 100_000,
+            });
         }
 
         let items: Vec<Item> = snippets::load().into_iter().map(|s| s.to_item()).collect();
@@ -210,23 +211,23 @@ impl Catalog {
     fn search_notes(&self, query: &str) -> Vec<Scored> {
         let q = query.trim();
         let mut results = Vec::new();
-        if let Some(title) = q.strip_prefix('+').map(str::trim) {
-            if !title.is_empty() {
-                results.push(Scored {
-                    item: Item {
-                        id: format!("note-new:{title}"),
-                        title: format!("New note “{title}”"),
-                        subtitle: "Create a quick note".into(),
-                        keywords: title.to_string(),
-                        kind: Kind::Note,
-                        icon: Icon::Name("document-new".into()),
-                        action: Action::CreateNote {
-                            title: title.to_string(),
-                        },
+        if let Some(title) = q.strip_prefix('+').map(str::trim)
+            && !title.is_empty()
+        {
+            results.push(Scored {
+                item: Item {
+                    id: format!("note-new:{title}"),
+                    title: format!("New note “{title}”"),
+                    subtitle: "Create a quick note".into(),
+                    keywords: title.to_string(),
+                    kind: Kind::Note,
+                    icon: Icon::Name("document-new".into()),
+                    action: Action::CreateNote {
+                        title: title.to_string(),
                     },
-                    score: 100_000,
-                });
-            }
+                },
+                score: 100_000,
+            });
         }
         let items: Vec<Item> = notes::load().into_iter().map(|n| n.to_item()).collect();
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
@@ -296,8 +297,9 @@ impl Catalog {
                 item: Item {
                     id: "voice:toggle".into(),
                     title: "Start dictation".into(),
-                    subtitle: "Stay in Flint. Speak, then Enter — the transcript fills the search box."
-                        .into(),
+                    subtitle:
+                        "Stay in Flint. Speak, then Enter — the transcript fills the search box."
+                            .into(),
                     keywords: "voice dictate speech".into(),
                     kind: Kind::Voice,
                     icon: Icon::Name("audio-input-microphone".into()),
@@ -357,21 +359,10 @@ impl Catalog {
             setting_value("model", "AI model", &s.ai.model, q, "model"),
             setting_value("endpoint", "AI endpoint", &s.ai.endpoint, q, "url host"),
             Item {
-                id: "set:signin-openai".into(),
-                title: "Sign in with OpenAI".into(),
-                subtitle: auth::signed_in_label(),
-                keywords: "oauth openai chatgpt plus subscription".into(),
-                kind: Kind::Ai,
-                icon: Icon::Name("network-workgroup".into()),
-                action: Action::SignIn {
-                    provider: "openai".into(),
-                },
-            },
-            Item {
                 id: "set:signin-google".into(),
-                title: "Sign in with Google".into(),
-                subtitle: "Use a Gemini subscription via OAuth".into(),
-                keywords: "oauth google gemini".into(),
+                title: "Connect Google Gemini API with OAuth".into(),
+                subtitle: auth::signed_in_label(),
+                keywords: "oauth google gemini api cloud project".into(),
                 kind: Kind::Ai,
                 icon: Icon::Name("network-workgroup".into()),
                 action: Action::SignIn {
@@ -380,9 +371,9 @@ impl Catalog {
             },
             Item {
                 id: "set:signin-custom".into(),
-                title: "Sign in with custom OAuth URL".into(),
-                subtitle: "Uses the authorize / token URLs below".into(),
-                keywords: "oauth custom url".into(),
+                title: "Connect a custom API with OAuth".into(),
+                subtitle: "PKCE · authorize/token URLs · token bound to the API origin".into(),
+                keywords: "oauth custom url api provider".into(),
                 kind: Kind::Ai,
                 icon: Icon::Name("network-workgroup".into()),
                 action: Action::SignIn {
@@ -432,16 +423,47 @@ impl Catalog {
                 "oauth token",
             ),
             setting_value(
-                "apikey",
-                "AI API key (fallback)",
-                if s.ai.api_key.is_empty() {
-                    "(not set — prefer OAuth)"
+                "oauth-scopes",
+                "Custom OAuth scopes",
+                if s.ai.oauth_scopes.is_empty() {
+                    "(space-separated scopes)"
                 } else {
-                    "••••••••"
+                    &s.ai.oauth_scopes
+                },
+                q,
+                "oauth scopes permissions",
+            ),
+            setting_value(
+                "oauth-project",
+                "Google OAuth quota project ID",
+                if s.ai.oauth_project_id.is_empty() {
+                    "(required for Google API OAuth)"
+                } else {
+                    &s.ai.oauth_project_id
+                },
+                q,
+                "oauth google cloud quota project",
+            ),
+            setting_value(
+                "apikey",
+                "API key for selected provider",
+                if auth::has_api_key(&s.ai.provider) {
+                    "•••••••• (stored)"
+                } else {
+                    "(not set)"
                 },
                 q,
                 "secret token",
             ),
+            Item {
+                id: "set:clear-apikey".into(),
+                title: "Remove selected provider API key".into(),
+                subtitle: format!("Delete the stored {} credential", s.ai.provider),
+                keywords: "delete clear api key secret".into(),
+                kind: Kind::Settings,
+                icon: Icon::Name("edit-delete".into()),
+                action: Action::SaveSettings,
+            },
             Item {
                 id: "set:refresh-models".into(),
                 title: "Scan local models".into(),
@@ -451,7 +473,13 @@ impl Catalog {
                 icon: Icon::Name("view-refresh".into()),
                 action: Action::RefreshModels,
             },
-            setting_value("voice-lang", "Voice language", &s.voice.language, q, "locale"),
+            setting_value(
+                "voice-lang",
+                "Voice language",
+                &s.voice.language,
+                q,
+                "locale",
+            ),
             setting_value(
                 "voice-model",
                 "Voice model",
@@ -537,7 +565,7 @@ impl Catalog {
             });
         }
 
-        out.sort_by(|a, b| b.score.cmp(&a.score));
+        out.sort_by_key(|item| std::cmp::Reverse(item.score));
         out.truncate(12);
         out
     }
@@ -624,7 +652,12 @@ fn setting_toggle(id: &str, title: &str, on: bool, keywords: &str) -> Item {
     Item {
         id: format!("set:{id}"),
         title: title.into(),
-        subtitle: if on { "On · Enter to disable" } else { "Off · Enter to enable" }.into(),
+        subtitle: if on {
+            "On · Enter to disable"
+        } else {
+            "Off · Enter to enable"
+        }
+        .into(),
         keywords: keywords.into(),
         kind: Kind::Settings,
         icon: Icon::Name("preferences-system".into()),
@@ -721,9 +754,9 @@ fn rank(
     let title_score = pattern.score(Utf32Str::new(&item.title, &mut buf), matcher);
     buf.clear();
     let hay_score = pattern.score(Utf32Str::new(&hay, &mut buf), matcher)?;
-    let mut score = hay_score as u32;
+    let mut score = hay_score;
     if let Some(ts) = title_score {
-        score = score.saturating_add((ts as u32).saturating_mul(2));
+        score = score.saturating_add(ts.saturating_mul(2));
     }
     let q = query.to_lowercase();
     if title.starts_with(&q) {
@@ -791,8 +824,7 @@ fn looks_like_uri(query: &str) -> bool {
         || q.starts_with("file://")
         || (q.contains('.')
             && q.chars().any(|c| c.is_ascii_alphabetic())
-            && q
-                .chars()
+            && q.chars()
                 .all(|c| c.is_ascii_alphanumeric() || ".-_:/?#=&".contains(c)))
 }
 
@@ -922,15 +954,15 @@ fn file_item(path: PathBuf) -> Item {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
     }
-    if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.to_string_lossy().into_owned();
-        }
+    if path == "~"
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.to_string_lossy().into_owned();
     }
     path.to_string()
 }
@@ -1050,10 +1082,7 @@ fn spawn(program: &str) -> Action {
 
 fn which(bin: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| dir.join(bin).is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
 }
 
