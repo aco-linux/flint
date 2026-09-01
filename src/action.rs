@@ -8,6 +8,17 @@ use gtk4::gdk::prelude::DisplayExt;
 
 use crate::item::Action;
 
+/// Space on Audio/Video runs the same play action as Enter and must be consumed.
+pub fn spacebar_play(item: &crate::item::Item) -> Option<Action> {
+    match &item.action {
+        Action::PlayMedia { path } => Some(Action::PlayMedia { path: path.clone() }),
+        Action::OpenPath(path) if crate::preview::is_playable(crate::preview::classify(path)) => {
+            Some(Action::PlayMedia { path: path.clone() })
+        }
+        _ => None,
+    }
+}
+
 pub fn run(action: &Action) {
     match action {
         Action::LaunchDesktop { path } => launch_desktop(path),
@@ -228,7 +239,56 @@ fn is_under_store(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_uri;
+    use super::{is_safe_uri, spacebar_play};
+    use crate::item::{Action, Icon, Item, Kind};
+    use std::path::PathBuf;
+
+    #[test]
+    fn spacebar_plays_audio_and_video_and_ignores_text() {
+        let audio = Item {
+            id: "file:/tmp/song.mp3".into(),
+            title: "song.mp3".into(),
+            subtitle: String::new(),
+            keywords: String::new(),
+            kind: Kind::Media,
+            icon: Icon::None,
+            action: Action::PlayMedia {
+                path: PathBuf::from("/tmp/song.mp3"),
+            },
+        };
+        let video = Item {
+            id: "file:/tmp/clip.mp4".into(),
+            title: "clip.mp4".into(),
+            subtitle: String::new(),
+            keywords: String::new(),
+            kind: Kind::Media,
+            icon: Icon::None,
+            action: Action::PlayMedia {
+                path: PathBuf::from("/tmp/clip.mp4"),
+            },
+        };
+        let note = Item {
+            id: "file:/tmp/readme.md".into(),
+            title: "readme.md".into(),
+            subtitle: String::new(),
+            keywords: String::new(),
+            kind: Kind::File,
+            icon: Icon::None,
+            action: Action::OpenPath(PathBuf::from("/tmp/readme.md")),
+        };
+        assert!(matches!(
+            spacebar_play(&audio),
+            Some(Action::PlayMedia { path }) if path.ends_with("song.mp3")
+        ));
+        assert!(matches!(
+            spacebar_play(&video),
+            Some(Action::PlayMedia { path }) if path.ends_with("clip.mp4")
+        ));
+        assert!(
+            spacebar_play(&note).is_none(),
+            "space in a text query must still insert a space"
+        );
+    }
 
     #[test]
     fn rejects_dangerous_uri_schemes() {

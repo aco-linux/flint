@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.0 — floating window and media thumbs
+
+- Opens as a floating, resizable Hyprland window (`dev.flint.launcher`) instead of a large tile
+- Image and video thumbs share one producer: Freedesktop `thumbnails/large/` cache first, then pixbuf or one `ffmpeg` frame
+- Generated thumbs are written back as `file://` MD5 PNGs so other apps can reuse them
+- Video extract is cancellable (same process-group SIGKILL as file search) so arrowing does not leave `ffmpeg` running
+- Audio preview shows duration, bitrate, and tags, plus embedded cover art when present
+- Spacebar on audio/video plays in the default player (same action as Enter) and does not insert a space
+
 ## 0.3.0 — search, ranking, and dictation
 
 - Starting dictation no longer aborts: the GTK callback dropped its `RefCell` borrow before updating status

@@ -39,6 +39,15 @@
   </supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.0" date="2026-08-31">
+      <description>
+        <ul>
+          <li>Open as a floating, resizable Hyprland window</li>
+          <li>Video thumbs and audio cover art reuse the Freedesktop thumbnail cache</li>
+          <li>Spacebar plays audio and video in the default player</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-08-31">
       <description>
         <ul>

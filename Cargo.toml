@@ -1,6 +1,6 @@
 [package]
 name = "flint"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "A native command launcher for Linux (Wayland / Hyprland)"
 license = "MIT"
@@ -26,6 +26,7 @@ serde_json = "1.0.151"
 sha2 = "0.10.9"
 subtle = "2.6.1"
 url = "2.5.8"
+md-5 = "0.10"
 
 [profile.release]
 lto = true

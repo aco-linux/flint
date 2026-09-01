@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -52,6 +52,7 @@ pub struct Shell {
     live_jobs: Sender<LiveJob>,
     live_cancel: Arc<files::Cancel>,
     thumb_jobs: Sender<PathBuf>,
+    thumb_cancel: Arc<files::Cancel>,
 }
 
 struct State {
@@ -66,6 +67,8 @@ struct State {
     voice: VoiceSession,
     search_gen: u64,
     thumbs: HashMap<PathBuf, CachedThumb>,
+    captions: HashMap<PathBuf, String>,
+    thumb_miss: HashSet<PathBuf>,
 }
 
 struct CachedThumb {
@@ -85,8 +88,8 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Flint")
-        .default_width(980)
-        .default_height(720)
+        .default_width(crate::WINDOW_WIDTH)
+        .default_height(crate::WINDOW_HEIGHT)
         .decorated(true)
         .resizable(true)
         .icon_name("flint")
@@ -245,6 +248,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     let (live_tx, live_rx) = mpsc::channel();
     let live_cancel = files::Cancel::new();
     let (thumb_tx, thumb_rx) = mpsc::channel();
+    let thumb_cancel = files::Cancel::new();
 
     let shell = Shell {
         window: window.clone(),
@@ -273,16 +277,20 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             voice: VoiceSession::new(),
             search_gen: 0,
             thumbs: HashMap::new(),
+            captions: HashMap::new(),
+            thumb_miss: HashSet::new(),
         })),
         live_jobs: live_tx,
         live_cancel: live_cancel.clone(),
         thumb_jobs: thumb_tx,
+        thumb_cancel: thumb_cancel.clone(),
     };
 
     bind_shell(&shell);
     start_live_worker(live_rx, live_cancel);
-    start_thumb_worker(thumb_rx);
+    start_thumb_worker(thumb_rx, thumb_cancel);
     start_hypr_watch();
+    hypr::install_float_rule();
 
     {
         let shell = shell.clone();
@@ -353,6 +361,7 @@ impl Clone for Shell {
             live_jobs: self.live_jobs.clone(),
             live_cancel: self.live_cancel.clone(),
             thumb_jobs: self.thumb_jobs.clone(),
+            thumb_cancel: self.thumb_cancel.clone(),
         }
     }
 }
@@ -369,6 +378,15 @@ impl Shell {
     pub fn open(&self, mode: Mode) {
         self.state.borrow_mut().visible = true;
         self.window.present();
+        hypr::float_launcher();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), || {
+            hypr::float_launcher();
+            gtk4::glib::ControlFlow::Break
+        });
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(160), || {
+            hypr::float_launcher();
+            gtk4::glib::ControlFlow::Break
+        });
         self.enter_mode(mode);
         self.entry.grab_focus();
         self.refresh();
@@ -496,8 +514,12 @@ impl Shell {
             self.preview_image.set_visible(true);
             return;
         }
+        let already_missed = self.state.borrow().thumb_miss.contains(path);
         self.preview_image.set_icon_name(Some("image-x-generic"));
         self.preview_image.set_visible(true);
+        if already_missed {
+            return;
+        }
         self.request_thumb(path.to_path_buf());
     }
 
@@ -514,6 +536,7 @@ impl Shell {
     }
 
     fn request_thumb(&self, path: PathBuf) {
+        self.thumb_cancel.cancel();
         let _ = self.thumb_jobs.send(path);
     }
 
@@ -523,14 +546,12 @@ impl Shell {
             .borrow()
             .results
             .iter()
-            .filter_map(|row| match &row.live {
-                Live::Image { path } => Some(path.clone()),
-                _ => None,
-            })
+            .filter_map(|row| row.live.thumb_path().map(Path::to_path_buf))
             .collect();
+        self.thumb_cancel.cancel();
         for path in paths {
             if self.cached_texture(&path).is_none() {
-                self.request_thumb(path);
+                let _ = self.thumb_jobs.send(path);
             }
         }
     }
@@ -539,6 +560,7 @@ impl Shell {
         let mtime = crate::preview::mtime_secs(&path);
         let (visible, selected_is, in_results) = {
             let mut st = self.state.borrow_mut();
+            st.thumb_miss.remove(&path);
             st.thumbs.insert(
                 path.clone(),
                 CachedThumb {
@@ -546,13 +568,15 @@ impl Shell {
                     texture: texture.clone(),
                 },
             );
-            let selected_is = st.results.get(st.selected).is_some_and(
-                |row| matches!(&row.live, Live::Image { path: live } if live == &path),
-            );
+            let selected_is = st
+                .results
+                .get(st.selected)
+                .and_then(|row| row.live.thumb_path())
+                .is_some_and(|live| live == path);
             let in_results = st
                 .results
                 .iter()
-                .any(|row| matches!(&row.live, Live::Image { path: live } if live == &path));
+                .any(|row| row.live.thumb_path().is_some_and(|live| live == path));
             (st.visible, selected_is, in_results)
         };
         if !visible {
@@ -560,9 +584,26 @@ impl Shell {
         }
         if selected_is {
             self.preview_image.set_paintable(Some(&texture));
+            self.preview_image.set_visible(true);
         }
         if in_results {
             rebuild_rows(self);
+        }
+    }
+
+    fn apply_caption(&self, path: PathBuf, text: String) {
+        let selected = {
+            let mut st = self.state.borrow_mut();
+            st.captions.insert(path.clone(), text.clone());
+            st.visible
+                && st
+                    .results
+                    .get(st.selected)
+                    .and_then(|row| row.live.thumb_path())
+                    .is_some_and(|live| live == path)
+        };
+        if selected {
+            self.update_preview();
         }
     }
 
@@ -593,9 +634,14 @@ impl Shell {
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
-            crate::preview::Preview::Media { hint } => {
-                self.preview_image.set_visible(false);
-                self.preview_text.set_text(&hint);
+            crate::preview::Preview::Media { path, hint } => {
+                self.show_preview_image(&path);
+                let caption = self.state.borrow().captions.get(&path).cloned();
+                let body = match caption {
+                    Some(extra) if !extra.is_empty() => format!("{hint}\n\n{extra}"),
+                    _ => hint,
+                };
+                self.preview_text.set_text(&body);
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
@@ -692,6 +738,26 @@ impl Shell {
                 Key::Page_Up if self.state.borrow().editing_note.is_none() => {
                     self.move_selection(-8);
                     Propagation::Stop
+                }
+                Key::space | Key::KP_Space => {
+                    if self.state.borrow().editing_note.is_some() {
+                        Propagation::Proceed
+                    } else {
+                        let item = {
+                            let st = self.state.borrow();
+                            st.results.get(st.selected).map(|row| row.item.clone())
+                        };
+                        if let Some(item) = item
+                            && let Some(play) = action::spacebar_play(&item)
+                        {
+                            usage::bump(&item.id);
+                            self.hide();
+                            action::run(&play);
+                            Propagation::Stop
+                        } else {
+                            Propagation::Proceed
+                        }
+                    }
                 }
                 Key::Return | Key::KP_Enter => {
                     if self.state.borrow().editing_note.is_some() {
@@ -1158,6 +1224,11 @@ enum UiMsg {
         extras: std::boxed::Box<LiveExtras>,
     },
     Thumb(crate::preview::DecodedImage),
+    Caption {
+        path: PathBuf,
+        text: String,
+    },
+    ThumbMiss(PathBuf),
     Windows(Vec<Item>),
 }
 
@@ -1184,8 +1255,15 @@ fn push_ui(inbox: &Arc<Mutex<Vec<UiMsg>>>, msg: UiMsg) {
                         }
                         UiMsg::Thumb(decoded) => {
                             let path = decoded.path.clone();
+                            if let Some(caption) = decoded.caption.clone() {
+                                shell.apply_caption(path.clone(), caption);
+                            }
                             let texture = Texture::for_pixbuf(&decoded.to_pixbuf());
                             shell.apply_thumb(path, texture);
+                        }
+                        UiMsg::Caption { path, text } => shell.apply_caption(path, text),
+                        UiMsg::ThumbMiss(path) => {
+                            shell.state.borrow_mut().thumb_miss.insert(path);
                         }
                         UiMsg::Windows(windows) => shell.apply_hypr_windows(windows),
                     }
@@ -1221,12 +1299,47 @@ fn start_live_worker(rx: mpsc::Receiver<LiveJob>, cancel: Arc<files::Cancel>) {
     });
 }
 
-fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>) {
+fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>, cancel: Arc<files::Cancel>) {
     let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
     thread::spawn(move || {
-        while let Ok(path) = rx.recv() {
-            if let Some(decoded) = crate::preview::decode_image(&path) {
-                push_ui(&inbox, UiMsg::Thumb(decoded));
+        while let Ok(first) = rx.recv() {
+            let mut paths = vec![first];
+            while let Ok(next) = rx.try_recv() {
+                paths.push(next);
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut unique = Vec::new();
+            for path in paths.into_iter().rev() {
+                if seen.insert(path.clone()) {
+                    unique.push(path);
+                }
+            }
+            unique.reverse();
+            for path in unique {
+                cancel.reset();
+                let produced =
+                    files::with_cancel(cancel.clone(), || crate::preview::thumbnail(&path));
+                if cancel.is_cancelled() {
+                    continue;
+                }
+                let Some(produced) = produced else {
+                    continue;
+                };
+                if let Some(image) = produced.image {
+                    push_ui(&inbox, UiMsg::Thumb(image));
+                } else {
+                    push_ui(&inbox, UiMsg::ThumbMiss(path.clone()));
+                }
+                let summary = produced.info.summary();
+                if !summary.is_empty() {
+                    push_ui(
+                        &inbox,
+                        UiMsg::Caption {
+                            path: path.clone(),
+                            text: summary,
+                        },
+                    );
+                }
             }
         }
     });
@@ -1262,9 +1375,9 @@ fn rebuild_rows(shell: &Shell) {
         drop(st);
         let thumbs: Vec<Option<Texture>> = rows
             .iter()
-            .map(|(_, live)| match live {
-                Live::Image { path } => shell.cached_texture(path),
-                _ => None,
+            .map(|(_, live)| {
+                live.thumb_path()
+                    .and_then(|path| shell.cached_texture(path))
             })
             .collect();
         let mut st = shell.state.borrow_mut();
@@ -1363,27 +1476,24 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
     accent.set_valign(Align::Center);
     row.append(&accent);
 
-    let icon = match live {
-        Live::Image { .. } => {
-            let image = if let Some(texture) = thumb {
-                Image::from_paintable(Some(texture))
-            } else {
-                Image::from_icon_name("image-x-generic")
-            };
-            image.add_css_class("live-thumb");
-            image
-        }
-        _ => match &item.icon {
+    let icon = if live.thumb_path().is_some() {
+        let image = if let Some(texture) = thumb {
+            Image::from_paintable(Some(texture))
+        } else if matches!(live, Live::Media { .. }) {
+            Image::from_icon_name("audio-x-generic")
+        } else {
+            Image::from_icon_name("image-x-generic")
+        };
+        image.add_css_class("live-thumb");
+        image
+    } else {
+        match &item.icon {
             Icon::Name(name) => Image::from_icon_name(name),
             Icon::Path(path) => Image::from_file(path),
             Icon::None => Image::from_icon_name(kind_icon(item.kind)),
-        },
+        }
     };
-    icon.set_pixel_size(if matches!(live, Live::Image { .. }) {
-        48
-    } else {
-        28
-    });
+    icon.set_pixel_size(if live.thumb_path().is_some() { 48 } else { 28 });
     icon.set_valign(Align::Center);
     icon.add_css_class("icon-wrap");
     row.append(&icon);
@@ -1440,7 +1550,7 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
             snippet.add_css_class("live-snippet");
             text.append(&snippet);
         }
-        Live::Media { hint } => {
+        Live::Media { hint, .. } => {
             let hint_l = Label::new(Some(hint));
             hint_l.set_xalign(0.0);
             hint_l.set_ellipsize(pango::EllipsizeMode::End);

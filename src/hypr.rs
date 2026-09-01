@@ -65,6 +65,63 @@ fn listen(on_change: impl Fn(Vec<Item>)) {
     }
 }
 
+/// Ask Hyprland to float, size, and center the launcher after it maps.
+/// Window rules in `share/hyprland.conf` do the same; this covers a live session
+/// that has not copied those rules yet.
+pub fn float_launcher() {
+    install_float_rule();
+    let class = crate::APP_ID;
+    let width = crate::WINDOW_WIDTH;
+    let height = crate::WINDOW_HEIGHT;
+    lua_dispatch(&format!(
+        r#"hl.dsp.window.float({{ action = "set", window = "class:{class}" }})"#
+    ));
+    lua_dispatch(&format!(
+        r#"hl.dsp.window.resize({{ x = {width}, y = {height}, window = "class:{class}" }})"#
+    ));
+    lua_dispatch(&format!(
+        r#"hl.dsp.window.center({{ window = "class:{class}" }})"#
+    ));
+}
+
+pub fn install_float_rule() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let class = crate::APP_ID;
+        let width = crate::WINDOW_WIDTH;
+        let height = crate::WINDOW_HEIGHT;
+        lua_eval(&format!(
+            r#"hl.window_rule({{ name = "flint-float", match = {{ class = "{class}" }}, float = true, center = true, size = {{{width}, {height}}} }})"#
+        ));
+    });
+}
+
+fn lua_dispatch(dsp: &str) {
+    if command_ok(&format!("dispatch {dsp}")) {
+        return;
+    }
+    let _ = std::process::Command::new("hyprctl")
+        .args(["dispatch", dsp])
+        .status();
+}
+
+fn lua_eval(code: &str) {
+    if command_ok(&format!("eval {code}")) {
+        return;
+    }
+    let _ = std::process::Command::new("hyprctl")
+        .args(["eval", code])
+        .status();
+}
+
+fn command_ok(command: &str) -> bool {
+    command_socket_json(command).is_some_and(|bytes| {
+        String::from_utf8_lossy(&bytes)
+            .trim()
+            .eq_ignore_ascii_case("ok")
+    })
+}
+
 pub fn load_windows() -> Vec<Item> {
     let raw = clients_json();
     let Ok(mut clients) = serde_json::from_slice::<Vec<Client>>(&raw) else {
@@ -190,6 +247,26 @@ fn guess_icon(class: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::is_window_event;
+
+    #[test]
+    fn hyprland_snippet_floats_a_resizable_launcher() {
+        let conf = include_str!("../share/hyprland.conf");
+        assert!(
+            conf.contains("dev.flint.launcher"),
+            "window rules must match APP_ID"
+        );
+        assert!(
+            conf.contains("float = true") || conf.contains("float"),
+            "launcher must float, not tile"
+        );
+        assert!(conf.contains("center"));
+        assert!(
+            conf.contains(&crate::WINDOW_WIDTH.to_string())
+                && conf.contains(&crate::WINDOW_HEIGHT.to_string()),
+            "finite size, not a maximized tile"
+        );
+        assert!(conf.contains(crate::APP_ID));
+    }
 
     #[test]
     fn window_events_are_the_ones_that_change_the_list() {
