@@ -1,4 +1,4 @@
-.PHONY: build check test install uninstall
+.PHONY: build check test install uninstall update restart
 
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
@@ -39,3 +39,18 @@ uninstall:
 	rm -f "$(DATADIR)/metainfo/dev.flint.launcher.metainfo.xml"
 	rm -f "$(DATADIR)/icons/hicolor/"*/apps/flint.png
 	rm -f "$(DATADIR)/icons/hicolor/scalable/apps/flint.svg"
+
+# Fast-forward the current branch to origin, rebuild, install, restart.
+# Usage: make update
+#        make update REF=origin/main
+update:
+	./scripts/update.sh $(REF)
+
+restart:
+	@PATH="$(HOME)/.local/bin:$$PATH"; \
+	flint --quit >/dev/null 2>&1 || true; \
+	sleep 0.3; \
+	pkill -x flint >/dev/null 2>&1 || true; \
+	sleep 0.2; \
+	nohup flint --daemon >/dev/null 2>&1 & \
+	echo "Restarted $(BINDIR)/flint"

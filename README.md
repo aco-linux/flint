@@ -25,7 +25,13 @@ cd flint
 make install
 ```
 
-That puts `flint` in `~/.local/bin` and a desktop entry under `~/.local/share/applications`. Then bind it:
+That puts `flint` in `~/.local/bin` and a desktop entry under `~/.local/share/applications`. To refresh an existing checkout from origin, rebuild, install, and restart the resident daemon:
+
+```sh
+make update
+```
+
+`make update REF=origin/main` tracks a different ref. Then bind it:
 
 ```
 exec-once = flint --daemon
