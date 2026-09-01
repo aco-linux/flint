@@ -126,6 +126,7 @@ pub enum Live {
         text: String,
     },
     Media {
+        path: PathBuf,
         hint: String,
     },
 }
@@ -172,15 +173,24 @@ impl Live {
         }
     }
 
+    pub fn thumb_path(&self) -> Option<&Path> {
+        match self {
+            Self::Image { path } | Self::Media { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+
     pub fn from_path(path: &Path) -> Self {
         match crate::preview::classify(path) {
             crate::preview::MediaKind::Image => Self::Image {
                 path: path.to_path_buf(),
             },
             crate::preview::MediaKind::Audio => Self::Media {
+                path: path.to_path_buf(),
                 hint: format!("▶  {}", path.display()),
             },
             crate::preview::MediaKind::Video => Self::Media {
+                path: path.to_path_buf(),
                 hint: format!("▶  {}", path.display()),
             },
             crate::preview::MediaKind::Text | crate::preview::MediaKind::Document => {

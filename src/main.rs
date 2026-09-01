@@ -36,7 +36,9 @@ use catalog::Catalog;
 use config::Settings;
 use mode::Mode;
 
-const APP_ID: &str = "dev.flint.launcher";
+pub(crate) const APP_ID: &str = "dev.flint.launcher";
+pub(crate) const WINDOW_WIDTH: i32 = 980;
+pub(crate) const WINDOW_HEIGHT: i32 = 720;
 
 #[derive(Debug)]
 enum Cmd {

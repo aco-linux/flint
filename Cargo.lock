@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "flint"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dirs",
  "evalexpr",
@@ -157,6 +157,7 @@ dependencies = [
  "glib",
  "gtk4",
  "libc",
+ "md-5",
  "nucleo-matcher",
  "pango",
  "serde",
@@ -653,6 +654,16 @@ name = "litemap"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
 
 [[package]]
 name = "memchr"

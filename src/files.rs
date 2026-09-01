@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::item::{Action, Icon, Item, Kind};
 
-/// Cancels an in-flight `fd` / `find` / `locate` when the query is superseded.
+/// Cancels an in-flight `fd` / `find` / `locate` / `ffmpeg` when the query is superseded.
 pub struct Cancel {
     flag: AtomicBool,
     pid: AtomicU32,
@@ -40,15 +40,20 @@ impl Cancel {
         }
     }
 
-    fn attach(&self, pid: u32) {
+    pub(crate) fn attach(&self, pid: u32) {
         self.pid.store(pid, Ordering::SeqCst);
         if self.flag.load(Ordering::SeqCst) {
             signal_kill(pid);
         }
     }
 
-    fn detach(&self) {
+    pub(crate) fn detach(&self) {
         self.pid.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub fn attached_pid(&self) -> u32 {
+        self.pid.load(Ordering::SeqCst)
     }
 }
 
@@ -75,7 +80,7 @@ pub fn with_cancel<R>(cancel: Arc<Cancel>, f: impl FnOnce() -> R) -> R {
     result
 }
 
-fn cancelled() -> bool {
+pub(crate) fn cancelled() -> bool {
     CANCEL.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -85,6 +90,30 @@ fn cancelled() -> bool {
 
 fn current_cancel() -> Option<Arc<Cancel>> {
     CANCEL.with(|slot| slot.borrow().clone())
+}
+
+/// Spawn `cmd` in its own process group and attach it to the current `Cancel`.
+/// A superseded request SIGKILLs the group instead of leaving extractors running.
+pub fn run_attached(mut cmd: Command) -> Option<std::process::Output> {
+    if cancelled() {
+        return None;
+    }
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.process_group(0);
+    let child = cmd.spawn().ok()?;
+    if let Some(cancel) = current_cancel() {
+        cancel.attach(child.id());
+    }
+    let output = child.wait_with_output();
+    if let Some(cancel) = current_cancel() {
+        cancel.detach();
+        if cancel.is_cancelled() {
+            return None;
+        }
+    }
+    output.ok()
 }
 
 /// How many files root search can surface when the query looks like a type.
