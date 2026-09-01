@@ -294,6 +294,13 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     {
         let shell = shell.clone();
+        scroll.vadjustment().connect_value_changed(move |_| {
+            shell.request_visible_thumbs();
+        });
+    }
+
+    {
+        let shell = shell.clone();
         let panel = panel.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, x, y| {
@@ -419,6 +426,7 @@ impl Shell {
         self.sync_chrome();
         rebuild_rows(self);
         self.update_preview();
+        self.request_visible_thumbs();
         self.schedule_live(generation, query, include_in_root);
     }
 
@@ -541,17 +549,32 @@ impl Shell {
     }
 
     fn request_visible_thumbs(&self) {
-        let paths: Vec<PathBuf> = self
-            .state
-            .borrow()
-            .results
-            .iter()
-            .filter_map(|row| row.live.thumb_path().map(Path::to_path_buf))
-            .collect();
-        self.thumb_cancel.cancel();
-        for path in paths {
-            if self.cached_texture(&path).is_none() {
-                let _ = self.thumb_jobs.send(path);
+        let adj = self.results_scroll.vadjustment();
+        let view_top = adj.value();
+        let view_bottom = view_top + adj.page_size();
+        let (selected, bounds, paths) = {
+            let st = self.state.borrow();
+            let bounds: Vec<Option<(f64, f64)>> = st
+                .rows
+                .iter()
+                .map(|row| {
+                    row.compute_bounds(&self.results_host)
+                        .map(|rect| (f64::from(rect.y()), f64::from(rect.height())))
+                })
+                .collect();
+            let paths: Vec<Option<PathBuf>> = st
+                .results
+                .iter()
+                .map(|row| row.live.thumb_path().map(Path::to_path_buf))
+                .collect();
+            (st.selected, bounds, paths)
+        };
+        for idx in thumb_rows_in_view(paths.len(), selected, view_top, view_bottom, &bounds) {
+            let Some(Some(path)) = paths.get(idx) else {
+                continue;
+            };
+            if self.cached_texture(path).is_none() {
+                let _ = self.thumb_jobs.send(path.clone());
             }
         }
     }
@@ -798,6 +821,7 @@ impl Shell {
             scroll_row_into_view(&self.results_scroll, &self.results_host, &row);
         }
         self.update_preview();
+        self.request_visible_thumbs();
     }
 
     fn activate(&self) {
@@ -1299,6 +1323,70 @@ fn start_live_worker(rx: mpsc::Receiver<LiveJob>, cancel: Arc<files::Cancel>) {
     });
 }
 
+/// Selected row plus rows overlapping the viewport. If rows are not laid out yet,
+/// fall back to a small window around the selection instead of every result.
+fn thumb_rows_in_view(
+    count: usize,
+    selected: usize,
+    view_top: f64,
+    view_bottom: f64,
+    row_bounds: &[Option<(f64, f64)>],
+) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let selected = selected.min(count - 1);
+    let laid_out = row_bounds.iter().any(Option::is_some);
+    if !laid_out {
+        const FALLBACK: usize = 16;
+        let start = selected.saturating_sub(FALLBACK);
+        let end = (selected + FALLBACK + 1).min(count);
+        return (start..end).collect();
+    }
+    let mut out = Vec::new();
+    for (idx, bounds) in row_bounds.iter().take(count).enumerate() {
+        if idx == selected {
+            out.push(idx);
+            continue;
+        }
+        if let Some((y, height)) = *bounds {
+            let bottom = y + height;
+            if bottom >= view_top && y <= view_bottom {
+                out.push(idx);
+            }
+        }
+    }
+    out
+}
+
+fn unique_thumb_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for path in paths.into_iter().rev() {
+        if seen.insert(path.clone()) {
+            unique.push(path);
+        }
+    }
+    unique.reverse();
+    unique
+}
+
+/// Walk a drained batch until a newer request cancels it. Do not reset per path.
+fn for_each_live_thumb(
+    paths: Vec<PathBuf>,
+    cancel: &files::Cancel,
+    mut f: impl FnMut(&Path) -> bool,
+) {
+    for path in unique_thumb_paths(paths) {
+        if cancel.is_cancelled() {
+            break;
+        }
+        if !f(&path) {
+            break;
+        }
+    }
+}
+
 fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>, cancel: Arc<files::Cancel>) {
     let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
     thread::spawn(move || {
@@ -1307,40 +1395,33 @@ fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>, cancel: Arc<files::Cancel>) {
             while let Ok(next) = rx.try_recv() {
                 paths.push(next);
             }
-            let mut seen = std::collections::HashSet::new();
-            let mut unique = Vec::new();
-            for path in paths.into_iter().rev() {
-                if seen.insert(path.clone()) {
-                    unique.push(path);
-                }
-            }
-            unique.reverse();
-            for path in unique {
-                cancel.reset();
+            cancel.reset();
+            for_each_live_thumb(paths, &cancel, |path| {
                 let produced =
-                    files::with_cancel(cancel.clone(), || crate::preview::thumbnail(&path));
+                    files::with_cancel(cancel.clone(), || crate::preview::thumbnail(path));
                 if cancel.is_cancelled() {
-                    continue;
+                    return false;
                 }
                 let Some(produced) = produced else {
-                    continue;
+                    return true;
                 };
                 if let Some(image) = produced.image {
                     push_ui(&inbox, UiMsg::Thumb(image));
                 } else {
-                    push_ui(&inbox, UiMsg::ThumbMiss(path.clone()));
+                    push_ui(&inbox, UiMsg::ThumbMiss(path.to_path_buf()));
                 }
                 let summary = produced.info.summary();
                 if !summary.is_empty() {
                     push_ui(
                         &inbox,
                         UiMsg::Caption {
-                            path: path.clone(),
+                            path: path.to_path_buf(),
                             text: summary,
                         },
                     );
                 }
-            }
+                true
+            });
         }
     });
 }
@@ -1665,5 +1746,95 @@ fn load_css() {
             &provider,
             STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{for_each_live_thumb, thumb_rows_in_view, unique_thumb_paths};
+    use crate::files::Cancel;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn visible_thumbs_are_viewport_plus_selected_not_the_full_list() {
+        let count = 250;
+        let height = 40.0;
+        let bounds: Vec<Option<(f64, f64)>> = (0..count)
+            .map(|i| Some((i as f64 * height, height)))
+            .collect();
+        let rows = thumb_rows_in_view(count, 0, 0.0, 200.0, &bounds);
+        assert!(
+            rows.len() < 20,
+            "must not enqueue all {count} file hits, got {rows:?}"
+        );
+        assert_eq!(rows.first().copied(), Some(0));
+        assert!(!rows.contains(&80));
+
+        let with_selected = thumb_rows_in_view(count, 80, 0.0, 200.0, &bounds);
+        assert!(with_selected.contains(&80), "selected row is always queued");
+        assert!(with_selected.len() < 20);
+    }
+
+    #[test]
+    fn unlaid_out_rows_use_a_window_around_selection() {
+        let bounds = vec![None; 250];
+        let rows = thumb_rows_in_view(250, 100, 0.0, 0.0, &bounds);
+        assert_eq!(rows.first().copied(), Some(84));
+        assert_eq!(rows.last().copied(), Some(116));
+        assert!(!rows.contains(&0));
+        assert!(!rows.contains(&249));
+    }
+
+    #[test]
+    fn unique_thumb_paths_keep_last_occurrence_order() {
+        let paths = unique_thumb_paths(vec![
+            PathBuf::from("a"),
+            PathBuf::from("b"),
+            PathBuf::from("a"),
+            PathBuf::from("c"),
+        ]);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("b"), PathBuf::from("a"), PathBuf::from("c")]
+        );
+    }
+
+    #[test]
+    fn cancelled_thumb_batch_skips_remaining_paths() {
+        let cancel = Cancel::new();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for_each_live_thumb(
+            vec![
+                PathBuf::from("one"),
+                PathBuf::from("two"),
+                PathBuf::from("three"),
+            ],
+            &cancel,
+            |path| {
+                seen.push(path.to_path_buf());
+                if path == Path::new("one") {
+                    cancel.cancel();
+                    return false;
+                }
+                true
+            },
+        );
+        assert_eq!(seen, vec![PathBuf::from("one")]);
+    }
+
+    #[test]
+    fn already_cancelled_batch_processes_nothing() {
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let mut n = 0;
+        for_each_live_thumb(
+            vec![PathBuf::from("one"), PathBuf::from("two")],
+            &cancel,
+            |_| {
+                n += 1;
+                true
+            },
+        );
+        assert_eq!(n, 0);
     }
 }

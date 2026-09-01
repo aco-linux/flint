@@ -27,12 +27,17 @@ pub enum Preview {
 }
 
 /// Duration / bitrate / tags from one ffmpeg extract. Missing cover is not a failure.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MediaInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
 }
 
@@ -278,15 +283,24 @@ pub fn produce(path: &Path, cache_home: &Path) -> Option<Produced> {
         return None;
     }
     if let Some(image) = load_cached(path, cache_home) {
-        return Some(Produced {
+        let cached = large_thumb_path(cache_home, &thumb_hash(&file_uri(path)));
+        let mut info = load_persisted_info(cache_home, path, &cached);
+        if info.is_empty() && matches!(kind, MediaKind::Audio | MediaKind::Video) {
+            info = probe_metadata(path);
+            persist_info(cache_home, path, &info);
+        }
+        return Some(with_caption(Produced {
             image: Some(image),
-            info: MediaInfo::default(),
-        });
+            info,
+        }));
+    }
+    if let Some(produced) = cached_info_only(path, cache_home, kind) {
+        return Some(produced);
     }
     match kind {
         MediaKind::Image => {
             let image = decode_from_file(path)?;
-            write_cached(path, cache_home, &image);
+            write_cached(path, cache_home, &image, &MediaInfo::default());
             Some(Produced {
                 image: Some(image),
                 info: MediaInfo::default(),
@@ -294,22 +308,31 @@ pub fn produce(path: &Path, cache_home: &Path) -> Option<Produced> {
         }
         MediaKind::Video | MediaKind::Audio => {
             let (pixbuf, info) = extract_frame(path, kind);
+            persist_info(cache_home, path, &info);
             let image = pixbuf.and_then(|pixbuf| {
-                let mut image = from_pixbuf(path, &pixbuf)?;
-                let summary = info.summary();
-                if !summary.is_empty() {
-                    image.caption = Some(summary);
-                }
-                write_cached(path, cache_home, &image);
+                let image = from_pixbuf(path, &pixbuf)?;
+                write_cached(path, cache_home, &image, &info);
                 Some(image)
             });
             if image.is_none() && info.is_empty() {
                 return None;
             }
-            Some(Produced { image, info })
+            Some(with_caption(Produced { image, info }))
         }
         MediaKind::Text | MediaKind::Document | MediaKind::Other => None,
     }
+}
+
+fn cached_info_only(path: &Path, cache_home: &Path, kind: MediaKind) -> Option<Produced> {
+    if !matches!(kind, MediaKind::Audio | MediaKind::Video) {
+        return None;
+    }
+    let png = large_thumb_path(cache_home, &thumb_hash(&file_uri(path)));
+    let info = load_persisted_info(cache_home, path, &png);
+    if info.is_empty() {
+        return None;
+    }
+    Some(with_caption(Produced { image: None, info }))
 }
 
 fn load_cached(path: &Path, cache_home: &Path) -> Option<DecodedImage> {
@@ -324,10 +347,124 @@ fn load_cached(path: &Path, cache_home: &Path) -> Option<DecodedImage> {
     from_pixbuf(path, &pixbuf)
 }
 
-fn write_cached(path: &Path, cache_home: &Path, image: &DecodedImage) {
+fn with_caption(mut produced: Produced) -> Produced {
+    if let Some(image) = produced.image.as_mut()
+        && image.caption.is_none()
+    {
+        let summary = produced.info.summary();
+        if !summary.is_empty() {
+            image.caption = Some(summary);
+        }
+    }
+    produced
+}
+
+fn media_info_path(cache_home: &Path, hash: &str) -> PathBuf {
+    cache_home
+        .join("flint")
+        .join("media-info")
+        .join(format!("{hash}.json"))
+}
+
+fn persist_info(cache_home: &Path, path: &Path, info: &MediaInfo) {
+    if info.is_empty() {
+        return;
+    }
+    let dest = media_info_path(cache_home, &thumb_hash(&file_uri(path)));
+    if let Some(parent) = dest.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(info) {
+        let _ = fs::write(dest, bytes);
+    }
+}
+
+fn load_persisted_info(cache_home: &Path, path: &Path, png: &Path) -> MediaInfo {
+    let from_png = info_from_png(png);
+    if !from_png.is_empty() {
+        return from_png;
+    }
+    let sidecar = media_info_path(cache_home, &thumb_hash(&file_uri(path)));
+    if sidecar.is_file() && mtime_secs(path) > mtime_secs(&sidecar) {
+        return MediaInfo::default();
+    }
+    fs::read(&sidecar)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn latin1(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| *ch != '\0' && (*ch as u32) <= 255)
+        .collect()
+}
+
+fn info_from_png(png: &Path) -> MediaInfo {
+    let Ok(bytes) = fs::read(png) else {
+        return MediaInfo::default();
+    };
+    let mut info = MediaInfo::default();
+    for (key, value) in png_text_chunks(&bytes) {
+        if value.is_empty() {
+            continue;
+        }
+        match key.as_str() {
+            "Flint::Duration" => info.duration = Some(value),
+            "Flint::Bitrate" => info.bitrate = Some(value),
+            "Flint::Title" => info.title = Some(value),
+            "Flint::Artist" => info.artist = Some(value),
+            "Flint::Album" => info.album = Some(value),
+            _ => {}
+        }
+    }
+    info
+}
+
+/// PNG `tEXt` chunks. Used so a cache hit can restore tags without ffmpeg.
+pub fn png_text_chunks(bytes: &[u8]) -> Vec<(String, String)> {
+    const SIG: &[u8] = &[137, 80, 78, 71, 13, 10, 26, 10];
+    if bytes.len() < 8 || &bytes[..8] != SIG {
+        return Vec::new();
+    }
+    let mut i = 8;
+    let mut out = Vec::new();
+    while i + 12 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+        let Some(typ) = bytes.get(i + 4..i + 8) else {
+            break;
+        };
+        let data_start = i + 8;
+        let Some(data_end) = data_start.checked_add(len) else {
+            break;
+        };
+        if data_end + 4 > bytes.len() {
+            break;
+        }
+        if typ == b"tEXt"
+            && let Some(zero) = bytes[data_start..data_end].iter().position(|&b| b == 0)
+        {
+            let key = String::from_utf8_lossy(&bytes[data_start..data_start + zero]).into_owned();
+            let value =
+                String::from_utf8_lossy(&bytes[data_start + zero + 1..data_end]).into_owned();
+            out.push((key, value));
+        }
+        if typ == b"IEND" {
+            break;
+        }
+        i = data_end + 4;
+    }
+    out
+}
+
+fn write_cached(path: &Path, cache_home: &Path, image: &DecodedImage, info: &MediaInfo) {
     if image.is_empty() {
         return;
     }
+    persist_info(cache_home, path, info);
     let dir = cache_home.join("thumbnails").join("large");
     if fs::create_dir_all(&dir).is_err() {
         return;
@@ -338,17 +475,35 @@ fn write_cached(path: &Path, cache_home: &Path, image: &DecodedImage) {
     let uri = file_uri(path);
     let mtime = mtime_secs(path).to_string();
     let pixbuf = image.to_pixbuf();
-    let ok = pixbuf
-        .savev(
-            &tmp,
-            "png",
-            &[
-                ("tEXt::Thumb::URI", uri.as_str()),
-                ("tEXt::Thumb::MTime", mtime.as_str()),
-            ],
-        )
-        .is_ok()
-        || pixbuf.savev(&tmp, "png", &[]).is_ok();
+    let duration = info.duration.as_deref().map(latin1);
+    let bitrate = info.bitrate.as_deref().map(latin1);
+    let title = info.title.as_deref().map(latin1);
+    let artist = info.artist.as_deref().map(latin1);
+    let album = info.album.as_deref().map(latin1);
+    let mut options: Vec<(String, String)> = vec![
+        ("tEXt::Thumb::URI".into(), uri),
+        ("tEXt::Thumb::MTime".into(), mtime),
+    ];
+    if let Some(value) = duration.as_deref().filter(|v| !v.is_empty()) {
+        options.push(("tEXt::Flint::Duration".into(), value.to_string()));
+    }
+    if let Some(value) = bitrate.as_deref().filter(|v| !v.is_empty()) {
+        options.push(("tEXt::Flint::Bitrate".into(), value.to_string()));
+    }
+    if let Some(value) = title.as_deref().filter(|v| !v.is_empty()) {
+        options.push(("tEXt::Flint::Title".into(), value.to_string()));
+    }
+    if let Some(value) = artist.as_deref().filter(|v| !v.is_empty()) {
+        options.push(("tEXt::Flint::Artist".into(), value.to_string()));
+    }
+    if let Some(value) = album.as_deref().filter(|v| !v.is_empty()) {
+        options.push(("tEXt::Flint::Album".into(), value.to_string()));
+    }
+    let refs: Vec<(&str, &str)> = options
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let ok = pixbuf.savev(&tmp, "png", &refs).is_ok() || pixbuf.savev(&tmp, "png", &[]).is_ok();
     if ok {
         if fs::rename(&tmp, &dest).is_err() {
             let _ = fs::remove_file(&tmp);
@@ -438,6 +593,100 @@ fn run_ffmpeg(path: &Path, kind: MediaKind, seek: bool) -> Option<std::process::
         "-",
     ]);
     crate::files::run_attached(cmd)
+}
+
+fn probe_metadata(path: &Path) -> MediaInfo {
+    if crate::files::cancelled() {
+        return MediaInfo::default();
+    }
+    if bin_on_path("ffprobe") {
+        let mut cmd = Command::new("ffprobe");
+        cmd.args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_entries",
+            "format=duration,bit_rate:format_tags=title,artist,album",
+        ]);
+        cmd.arg(path);
+        if let Some(output) = crate::files::run_attached(cmd) {
+            let info = parse_ffprobe_json(&String::from_utf8_lossy(&output.stdout));
+            if !info.is_empty() {
+                return info;
+            }
+        }
+    }
+    if bin_on_path("ffmpeg") {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-nostdin", "-hide_banner", "-i"]);
+        cmd.arg(path);
+        cmd.args(["-f", "null", "-"]);
+        if let Some(output) = crate::files::run_attached(cmd) {
+            return parse_ffmpeg_info(&String::from_utf8_lossy(&output.stderr));
+        }
+    }
+    MediaInfo::default()
+}
+
+/// Parse ffprobe JSON (`duration` as seconds, `bit_rate` as bits/s).
+pub fn parse_ffprobe_json(json: &str) -> MediaInfo {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return MediaInfo::default();
+    };
+    let Some(format) = value.get("format") else {
+        return MediaInfo::default();
+    };
+    let mut info = MediaInfo::default();
+    if let Some(duration) = format.get("duration").and_then(|v| v.as_str()) {
+        info.duration = Some(format_ffprobe_duration(duration));
+    }
+    if let Some(bitrate) = format.get("bit_rate").and_then(|v| v.as_str()) {
+        info.bitrate = Some(format_ffprobe_bitrate(bitrate));
+    }
+    if let Some(tags) = format.get("tags").and_then(|v| v.as_object()) {
+        info.title = string_tag(tags, "title");
+        info.artist = string_tag(tags, "artist");
+        info.album = string_tag(tags, "album");
+    }
+    info
+}
+
+fn string_tag(tags: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    tags.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case(key) {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+fn format_ffprobe_duration(raw: &str) -> String {
+    let Ok(secs) = raw.parse::<f64>() else {
+        return raw.to_string();
+    };
+    let total = secs.round().max(0.0) as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn format_ffprobe_bitrate(raw: &str) -> String {
+    let Ok(bps) = raw.parse::<u64>() else {
+        return raw.to_string();
+    };
+    let kbps = (bps + 500) / 1000;
+    format!("{kbps} kb/s")
 }
 
 fn pixbuf_from_png_bytes(bytes: &[u8]) -> Option<gdk_pixbuf::Pixbuf> {
@@ -536,8 +785,8 @@ fn file_too_heavy(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MediaKind, classify, file_uri, large_thumb_path, parse_ffmpeg_info, produce, thumb_hash,
-        thumbnail, xdg_cache_home,
+        MediaInfo, MediaKind, classify, file_uri, large_thumb_path, parse_ffmpeg_info,
+        parse_ffprobe_json, png_text_chunks, produce, thumb_hash, thumbnail, xdg_cache_home,
     };
     use gdk_pixbuf::{Colorspace, Pixbuf};
     use std::path::{Path, PathBuf};
@@ -640,6 +889,43 @@ mod tests {
     }
 
     #[test]
+    fn cache_hit_restores_tags_from_persisted_info() {
+        let dir = scratch("thumb-info");
+        let cache = dir.join("cache");
+        let source = dir.join("song.mp3");
+        std::fs::write(&source, b"not a real song").unwrap();
+        let info = MediaInfo {
+            duration: Some("3:14".into()),
+            bitrate: Some("320 kb/s".into()),
+            title: Some("Ping".into()),
+            artist: Some("Flint".into()),
+            album: Some("Demos".into()),
+        };
+        let sidecar = cache
+            .join("flint")
+            .join("media-info")
+            .join(format!("{}.json", thumb_hash(&file_uri(&source))));
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, serde_json::to_vec(&info).unwrap()).unwrap();
+        let cached = large_thumb_path(&cache, &thumb_hash(&file_uri(&source)));
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        write_png(&cached, 24, 16, 0x3344ffff);
+        let produced = produce(&source, &cache).expect("cache hit");
+        let image = produced.image.expect("pixels");
+        assert!(!image.is_empty());
+        assert_eq!(produced.info.title.as_deref(), Some("Ping"));
+        assert_eq!(produced.info.artist.as_deref(), Some("Flint"));
+        assert_eq!(produced.info.duration.as_deref(), Some("3:14"));
+        assert!(
+            image
+                .caption
+                .as_deref()
+                .is_some_and(|caption| caption.contains("Ping")),
+            "caption should surface restored tags"
+        );
+    }
+
+    #[test]
     fn cache_miss_write_back_stores_png_under_hashed_large_path() {
         let dir = scratch("thumb-miss");
         let cache = dir.join("cache");
@@ -717,6 +1003,44 @@ mod tests {
         assert!(!still_alive, "child pid {pid} must not remain after cancel");
         let group_alive = unsafe { libc::kill(-(pid as i32), 0) == 0 };
         assert!(!group_alive, "process group must be gone after cancel");
+    }
+
+    #[test]
+    fn ffprobe_json_parser_reads_duration_bitrate_and_tags() {
+        let json = r#"{
+            "format": {
+                "duration": "194.28",
+                "bit_rate": "320000",
+                "tags": {
+                    "title": "Ping",
+                    "artist": "Test Band",
+                    "album": "Demos"
+                }
+            }
+        }"#;
+        let info = parse_ffprobe_json(json);
+        assert_eq!(info.duration.as_deref(), Some("3:14"));
+        assert_eq!(info.bitrate.as_deref(), Some("320 kb/s"));
+        assert_eq!(info.title.as_deref(), Some("Ping"));
+        assert_eq!(info.artist.as_deref(), Some("Test Band"));
+        assert_eq!(info.album.as_deref(), Some("Demos"));
+    }
+
+    #[test]
+    fn png_text_round_trip_on_write_back() {
+        let dir = scratch("thumb-text");
+        let cache = dir.join("cache");
+        let shot = dir.join("shot.png");
+        write_png(&shot, 16, 16, 0xaabbccff);
+        let produced = produce(&shot, &cache).expect("image produce");
+        let dest = large_thumb_path(&cache, &thumb_hash(&file_uri(&shot)));
+        let bytes = std::fs::read(&dest).unwrap();
+        let chunks = png_text_chunks(&bytes);
+        assert!(
+            chunks.iter().any(|(k, _)| k == "Thumb::URI"),
+            "Freedesktop URI should be stored, got {chunks:?}"
+        );
+        assert!(produced.image.is_some());
     }
 
     #[test]
@@ -820,6 +1144,15 @@ Input #0, mp3, from 'song.mp3':
                 || produced.info.artist.as_deref() == Some("Flint"),
             "expected duration, bitrate, or a tag, got {:?}",
             produced.info
+        );
+        let again = produce(&audio, &cache).expect("second produce is a cache/info hit");
+        assert!(
+            again.info.duration.is_some()
+                || again.info.bitrate.is_some()
+                || again.info.title.as_deref() == Some("Ping")
+                || again.info.artist.as_deref() == Some("Flint"),
+            "tags must survive a later produce, got {:?}",
+            again.info
         );
     }
 }
