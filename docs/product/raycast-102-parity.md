@@ -52,8 +52,8 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 14 | Dictate in any language | `voice.language` setting, not a first-class picker | partial |
 | 15 | Dictate with styles | Missing | core |
 | 16 | Remember everything you said | No dictation history | core |
-| 17 | Arrange windows in ~58 presets | Window *switcher* only (`win`) | core |
-| 18 | Custom window management commands | Missing | core |
+| 17 | Arrange windows in ~58 presets | Halves, quarters, maximize, center, almost-maximize, next/prev display | ships |
+| 18 | Custom window management commands | Named layouts in `layouts.json`; `layout +name` saves | ships |
 | 19 | Caps Lock as Hyper key, Caps Lock still works | Not a launcher feature | desktop |
 | 20 | Nicknames for apps | Aliases via Ctrl+K / `alias:` | ships |
 | 21 | Nicknames for commands | Same alias map | ships |
@@ -84,17 +84,17 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 46 | Quicklinks — files | Path targets | ships |
 | 47 | Quicklinks — folders | `~/Downloads` etc. | ships |
 | 48 | Quicklinks — app deep links | http/https/file URIs only | partial |
-| 49 | Screen recording | Missing as a Flint command | desktop |
-| 50 | Screenshot | `omarchy-capture-screenshot` / region if present | partial |
-| 51 | Annotate a screenshot | Missing (satty/swappy on Omarchy) | desktop |
+| 49 | Screen recording | `wf-recorder` command; second invoke stops | desktop |
+| 50 | Screenshot | grim, else Omarchy capture helpers | ships |
+| 51 | Annotate a screenshot | satty or swappy after a region capture | desktop |
 | 52 | Chat with current AI models | Ollama / LM Studio / llama.cpp / cloud keys | partial |
 | 53 | Make models *do* things (tools) | MCP is a prompt primer; model cannot run tools | core |
-| 54 | Quit an application | Missing | core |
+| 54 | Quit an application | Action panel + closewindow; force-quit is SIGKILL | ships |
 | 55 | Auto-quit applications | Missing | core |
-| 56 | Quit all applications at once | Missing | core |
+| 56 | Quit all applications at once | Confirm result; denylist in `quit-keep.json` | ships |
 | 57 | Fix grammar and spelling | Missing | core |
 | 58 | Inline Quick Fix | Missing | core |
-| 59 | Uninstall applications | Missing | core |
+| 59 | Uninstall applications | Flatpak / pacman when the desktop file maps; confirm first | ships |
 | 60 | Start a focus session | Missing | core |
 | 61 | Unfocus / break | Missing | core |
 | 62 | Download thousands of extensions | Vicinae store + script-commands; not Raycast's catalog | partial |
@@ -102,7 +102,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 64 | Build an extension by hand | Vicinae API host (`List`/`Detail`); no `Form`/`Grid`/OAuth | partial |
 | 65 | Time at a destination | Local time item only | core |
 | 66 | Time difference between two cities | Missing | core |
-| 67 | Switch display resolution | Missing | desktop |
+| 67 | Switch display resolution | `hyprctl` modes plus 720p/1080p/1440p/4K | desktop |
 | 68 | Convert images | Missing | ext |
 | 69 | Ask AI to convert images | No image-out tools | ext |
 | 70 | Translate text | Missing | core |

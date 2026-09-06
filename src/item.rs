@@ -122,6 +122,34 @@ pub enum Action {
         name: String,
         target: String,
     },
+    Layout {
+        name: String,
+        address: Option<String>,
+    },
+    SaveLayout {
+        name: String,
+    },
+    CloseWindow {
+        address: String,
+    },
+    KillPid {
+        pid: i32,
+    },
+    QuitClass {
+        class: String,
+    },
+    QuitAll,
+    ConfirmQuitAll,
+    Uninstall {
+        manager: String,
+        package: String,
+    },
+    Capture {
+        kind: String,
+    },
+    SetResolution {
+        spec: String,
+    },
 }
 
 /// Callback identity for an action rendered by a running extension.

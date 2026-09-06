@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — windows and system (Wave 2)
+
+- Window layouts: left/right/top/bottom halves, four quarters, maximize, center, almost-maximize (48px inset), next/previous display
+- Custom named layouts in `~/.config/flint/layouts.json`; `layout +name` (or `win +name`) saves the current arrangement and applies by class
+- Quit / force-quit a window or app; quit all except Flint and `~/.config/flint/quit-keep.json` (confirm step)
+- Uninstall via Flatpak (`--user` preferred) or `pkexec pacman -Rns` when the desktop file maps to a package; unknown packages are not guessed
+- Screenshot, region, record, and annotate commands wrap grim / slurp / wf-recorder / satty (or swappy); Omarchy capture helpers remain if grim is missing
+- Display resolution commands from `hyprctl monitors` plus 720p/1080p/1440p/4K
+
 ## Unreleased — command-bar parity (Wave 1)
 
 - Clipboard entries can be pinned, renamed, and edited; pinned clips survive the 80-item trim; paste-as-plain is in the action panel

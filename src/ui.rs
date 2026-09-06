@@ -158,6 +158,8 @@ enum PanelKind {
     Launch,
     SnippetPaste(String),
     SnippetCopy(String),
+    Run(Action),
+    Confirm(Item),
 }
 
 struct Particle {
@@ -1170,6 +1172,20 @@ impl Shell {
                 }
                 self.enter_mode(Mode::Quicklink);
             }
+            Action::Layout { name, address } => {
+                self.hide_then(Action::Layout { name, address });
+            }
+            Action::SaveLayout { name } => match crate::layout::save_current(&name) {
+                Some(_) => {
+                    self.set_status(format!("Saved layout {name}"));
+                    self.refresh();
+                }
+                None => self.set_status("Could not save layout"),
+            },
+            Action::QuitAll => {
+                self.show_oneshot(crate::quit::confirm_item(), "Enter to confirm quit all");
+            }
+            Action::Capture { kind } => self.hide_then(Action::Capture { kind }),
             Action::Confetti => self.throw_confetti(),
             Action::Paste(text) => {
                 let paste = if item.kind == Kind::Snippet {
@@ -1549,6 +1565,51 @@ impl Shell {
                 action::copy_text(&text);
                 self.close_actions();
                 self.set_status("Copied expanded snippet");
+            }
+            PanelKind::Run(action) => {
+                self.close_actions();
+                self.dispatch_action(action);
+            }
+            PanelKind::Confirm(item) => {
+                self.close_actions_inner(false);
+                self.show_oneshot(item, "Enter to confirm");
+            }
+        }
+    }
+
+    fn show_oneshot(&self, item: Item, status: &str) {
+        {
+            let mut st = self.state.borrow_mut();
+            st.search_gen = st.search_gen.saturating_add(1);
+            st.results = vec![Scored::new(item, 200_000)];
+            st.selected = 0;
+        }
+        self.set_status(status);
+        self.sync_chrome();
+        rebuild_rows(self);
+    }
+
+    fn hide_then(&self, action: Action) {
+        self.hide();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            action::run(&action);
+            gtk4::glib::ControlFlow::Break
+        });
+    }
+
+    fn dispatch_action(&self, action: Action) {
+        match action {
+            Action::Layout { .. } | Action::Capture { .. } => self.hide_then(action),
+            Action::QuitAll => {
+                self.show_oneshot(crate::quit::confirm_item(), "Enter to confirm quit all");
+            }
+            Action::SaveLayout { name } => match crate::layout::save_current(&name) {
+                Some(_) => self.set_status(format!("Saved layout {name}")),
+                None => self.set_status("Could not save layout"),
+            },
+            other => {
+                self.hide();
+                action::run(&other);
             }
         }
     }
@@ -2893,6 +2954,20 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
                     keywords: "open start".into(),
                     kind: PanelKind::Launch,
                 });
+                if let Some(class) = crate::pkg::class_hint(path) {
+                    out.push(PanelAction {
+                        title: "Quit".into(),
+                        keywords: "quit close exit".into(),
+                        kind: PanelKind::Run(Action::QuitClass { class }),
+                    });
+                }
+                if let Some(mapped) = crate::pkg::mapped_package(path) {
+                    out.push(PanelAction {
+                        title: "Uninstall".into(),
+                        keywords: "uninstall remove package".into(),
+                        kind: PanelKind::Confirm(crate::pkg::confirm_item(&item.title, &mapped)),
+                    });
+                }
                 out.push(PanelAction {
                     title: "Copy .desktop path".into(),
                     keywords: "copy path desktop".into(),
@@ -2995,6 +3070,47 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
                 keywords: "open focus".into(),
                 kind: PanelKind::Open,
             });
+            if let Action::FocusWindow { address } = &item.action {
+                for (title, name, keys) in [
+                    ("Left half", "left-half", "tile left half"),
+                    ("Right half", "right-half", "tile right half"),
+                    ("Maximize", "maximize", "max fullscreen"),
+                    ("Center", "center", "center window"),
+                    (
+                        "Almost maximize",
+                        "almost-maximize",
+                        "almost maximize inset",
+                    ),
+                ] {
+                    out.push(PanelAction {
+                        title: title.into(),
+                        keywords: keys.into(),
+                        kind: PanelKind::Run(Action::Layout {
+                            name: name.into(),
+                            address: Some(address.clone()),
+                        }),
+                    });
+                }
+                out.push(PanelAction {
+                    title: "Close".into(),
+                    keywords: "close quit window".into(),
+                    kind: PanelKind::Run(Action::CloseWindow {
+                        address: address.clone(),
+                    }),
+                });
+                if let Some(pid) = crate::hypr::clients()
+                    .iter()
+                    .find(|c| c.address == *address)
+                    .map(|c| c.pid)
+                    .filter(|pid| crate::quit::can_kill(*pid, std::process::id() as i32))
+                {
+                    out.push(PanelAction {
+                        title: "Force quit".into(),
+                        keywords: "kill force quit sigkill".into(),
+                        kind: PanelKind::Run(Action::KillPid { pid }),
+                    });
+                }
+            }
         }
         _ => {
             if let Some(path) = item_path(item) {

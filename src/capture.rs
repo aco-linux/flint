@@ -1,0 +1,347 @@
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::item::{Action, Icon, Item, Kind};
+use crate::paths;
+
+pub fn items(which: impl Fn(&str) -> bool) -> Vec<Item> {
+    let mut items = Vec::new();
+    if which("grim") {
+        items.push(capture_item(
+            "shot",
+            "Screenshot",
+            "Capture the current screen",
+            "screenshot",
+        ));
+        if which("slurp") {
+            items.push(capture_item(
+                "region",
+                "Capture region",
+                "Select an area to screenshot",
+                "region",
+            ));
+        }
+        if which("satty") || which("swappy") {
+            items.push(capture_item(
+                "annotate",
+                "Annotate screenshot",
+                "Capture a region and mark it up",
+                "annotate",
+            ));
+        }
+    } else {
+        if which("omarchy-capture-screenshot") {
+            items.push(cmd(
+                "shot",
+                "Screenshot",
+                "Capture the current screen",
+                Action::Spawn {
+                    program: "omarchy-capture-screenshot".into(),
+                    args: Vec::new(),
+                },
+            ));
+        }
+        if which("omarchy-capture-region") {
+            items.push(cmd(
+                "region",
+                "Capture region",
+                "Select an area to screenshot",
+                Action::Spawn {
+                    program: "omarchy-capture-region".into(),
+                    args: Vec::new(),
+                },
+            ));
+        }
+    }
+    if which("wf-recorder") {
+        items.push(capture_item(
+            "record",
+            "Screen recording",
+            "Start or stop recording with wf-recorder",
+            "record",
+        ));
+    }
+    items
+}
+
+fn capture_item(id: &str, title: &str, subtitle: &str, kind: &str) -> Item {
+    cmd(
+        id,
+        title,
+        subtitle,
+        Action::Capture {
+            kind: kind.to_string(),
+        },
+    )
+}
+
+fn cmd(id: &str, title: &str, subtitle: &str, action: Action) -> Item {
+    Item {
+        id: format!("cmd:{id}"),
+        title: title.into(),
+        subtitle: subtitle.into(),
+        keywords: "screenshot capture record annotate grim".into(),
+        kind: Kind::Command,
+        icon: Icon::Name("applets-screenshooter".into()),
+        action,
+    }
+}
+
+pub fn screenshot_filename(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    min: i32,
+    sec: i32,
+) -> String {
+    format!("flint-{year:04}{month:02}{day:02}-{hour:02}{min:02}{sec:02}.png")
+}
+
+pub fn recording_filename(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    min: i32,
+    sec: i32,
+) -> String {
+    format!("flint-{year:04}{month:02}{day:02}-{hour:02}{min:02}{sec:02}.mp4")
+}
+
+pub fn run(kind: &str) {
+    let kind = kind.to_string();
+    thread::spawn(move || run_sync(&kind));
+}
+
+fn run_sync(kind: &str) {
+    match kind {
+        "screenshot" => {
+            let path = screenshot_dir().join(screenshot_filename_now());
+            let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+            let _ = Command::new("grim")
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        "region" => {
+            let Some(geom) = slurp() else {
+                return;
+            };
+            let path = screenshot_dir().join(screenshot_filename_now());
+            let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+            let _ = Command::new("grim")
+                .args(["-g", &geom])
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        "annotate" => {
+            let Some(geom) = slurp() else {
+                return;
+            };
+            let path = screenshot_dir().join(screenshot_filename_now());
+            let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+            let ok = Command::new("grim")
+                .args(["-g", &geom])
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .ok()
+                .is_some_and(|s| s.success());
+            if !ok {
+                return;
+            }
+            if which("satty") {
+                let _ = Command::new("satty")
+                    .args(["--filename"])
+                    .arg(&path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            } else if which("swappy") {
+                let _ = Command::new("swappy")
+                    .arg("-f")
+                    .arg(&path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+        }
+        "record" => toggle_record(),
+        _ => {}
+    }
+}
+
+fn slurp() -> Option<String> {
+    let output = Command::new("slurp")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let geom = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if geom.is_empty() { None } else { Some(geom) }
+}
+
+fn toggle_record() {
+    if stop_record() {
+        return;
+    }
+    let path = video_dir().join(recording_filename_now());
+    let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+    let Ok(child) = Command::new("wf-recorder")
+        .arg("-f")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    write_pid(child.id());
+}
+
+fn stop_record() -> bool {
+    let Some(pid) = read_pid() else {
+        return false;
+    };
+    let alive = unsafe { libc::kill(pid, 0) == 0 };
+    if alive {
+        unsafe {
+            let _ = libc::kill(pid, libc::SIGINT);
+        }
+    }
+    let _ = fs::remove_file(pid_file());
+    alive
+}
+
+fn pid_file() -> PathBuf {
+    paths::runtime_dir().join("wf-recorder.pid")
+}
+
+fn write_pid(pid: u32) {
+    paths::ensure();
+    if let Ok(mut file) = fs::File::create(pid_file()) {
+        let _ = write!(file, "{pid}");
+        let _ = fs::set_permissions(pid_file(), fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn read_pid() -> Option<i32> {
+    let text = fs::read_to_string(pid_file()).ok()?;
+    text.trim().parse().ok().filter(|pid| *pid > 1)
+}
+
+fn screenshot_dir() -> PathBuf {
+    let pictures = dirs::picture_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Pictures")))
+        .unwrap_or_else(|| PathBuf::from("Pictures"));
+    pictures.join("Screenshots")
+}
+
+fn video_dir() -> PathBuf {
+    dirs::video_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Videos")))
+        .unwrap_or_else(|| PathBuf::from("Videos"))
+}
+
+fn screenshot_filename_now() -> String {
+    let t = local_parts().unwrap_or([1970, 1, 1, 0, 0, 0]);
+    screenshot_filename(t[0], t[1], t[2], t[3], t[4], t[5])
+}
+
+fn recording_filename_now() -> String {
+    let t = local_parts().unwrap_or([1970, 1, 1, 0, 0, 0]);
+    recording_filename(t[0], t[1], t[2], t[3], t[4], t[5])
+}
+
+fn local_parts() -> Option<[i32; 6]> {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
+    // SAFETY: `tm` is written by localtime_r before we read it.
+    unsafe {
+        let mut tm = std::mem::zeroed::<libc::tm>();
+        if libc::localtime_r(&ts, &mut tm).is_null() {
+            return None;
+        }
+        Some([
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+        ])
+    }
+}
+
+fn which(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{items, recording_filename, screenshot_filename};
+
+    #[test]
+    fn filename_pattern() {
+        assert_eq!(
+            screenshot_filename(2026, 9, 6, 14, 5, 7),
+            "flint-20260906-140507.png"
+        );
+        assert_eq!(
+            recording_filename(2026, 9, 6, 14, 5, 7),
+            "flint-20260906-140507.mp4"
+        );
+    }
+
+    #[test]
+    fn commands_omitted_when_binary_missing() {
+        let none = items(|_| false);
+        assert!(none.is_empty(), "no capture tools on PATH");
+
+        let grim_only = items(|bin| bin == "grim");
+        let ids: Vec<&str> = grim_only.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["cmd:shot"]);
+        assert!(
+            grim_only
+                .iter()
+                .all(|i| matches!(i.action, crate::item::Action::Capture { .. }))
+        );
+
+        let grim_slurp = items(|bin| matches!(bin, "grim" | "slurp" | "satty" | "wf-recorder"));
+        let ids: Vec<&str> = grim_slurp.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["cmd:shot", "cmd:region", "cmd:annotate", "cmd:record"]
+        );
+
+        let omarchy = items(|bin| bin.starts_with("omarchy-capture-"));
+        let ids: Vec<&str> = omarchy.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["cmd:shot", "cmd:region"]);
+        assert!(
+            omarchy
+                .iter()
+                .all(|i| matches!(i.action, crate::item::Action::Spawn { .. }))
+        );
+    }
+}

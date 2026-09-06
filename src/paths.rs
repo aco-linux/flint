@@ -45,6 +45,8 @@ pub fn ensure() {
     tighten_private_file(&config_dir().join("snippets.json"));
     tighten_private_file(&config_dir().join("aliases.json"));
     tighten_private_file(&config_dir().join("quicklinks.json"));
+    tighten_private_file(&config_dir().join("layouts.json"));
+    tighten_private_file(&config_dir().join("quit-keep.json"));
     tighten_private_file(&data_dir().join("notes.json"));
     tighten_private_file(&data_dir().join("clipboard.json"));
     tighten_private_file(&data_dir().join("usage.json"));

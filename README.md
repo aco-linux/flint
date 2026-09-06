@@ -78,7 +78,10 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
 - Calculator, unit conversion (`10 km to mi`, `32f`), hex colors (`#ff5a1f`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
 - Date and percent math too: `today + 7d`, `100 days from now`, `days until 2026-12-25`, `20% of 80`, `20% off 80`, `80 + 20%`. Type `calc` or `=` for recent answers (not dumped on an empty root query).
-- Ctrl+K opens an action panel on the selected result (pin favorite, set alias, copy path, paste, open with). Ctrl+? still opens Ask AI. Ctrl+F files, Ctrl+N notes, Ctrl+, settings stay.
+- Ctrl+K opens an action panel on the selected result (pin favorite, set alias, copy path, paste, open with, window layouts, quit, uninstall). Ctrl+? still opens Ask AI. Ctrl+F files, Ctrl+N notes, Ctrl+, settings stay.
+- Window layouts: halves, quarters, maximize, center, almost-maximize, next/previous display. `layout +name` saves the current arrangement; apply a saved layout from root or the window switcher.
+- Quit, force-quit, and quit-all (with a confirm step). Uninstall a mapped pacman or Flatpak app from the action panel.
+- Screenshot, region, record, and annotate (grim / slurp / wf-recorder / satty). Switch display resolution from `hyprctl` modes.
 - Snippets expand `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, and strip `{cursor}` on paste.
 - Quicklinks (`link`) open URLs, folders, or files. `{argument}` / `{Query}` is the rest of the query after the keyword. `+gh https://github.com/search?q={argument}` saves one. Defaults: Downloads, Documents, GitHub search.
 - Aliases: in the action panel, type a nickname then run **Set alias**. If the filter is empty, Flint puts `alias:` in the search box — finish the name and Enter. Aliases boost root ranking and match in the haystack.
@@ -89,7 +92,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
 | Works | Not 1.0 |
 | --- | --- |
-| Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, settings, store browse | Extensions: `List`, `Detail`, actions, navigation, toasts, storage — no `Form`, `Grid` layout, menu-bar, or extension OAuth yet |
+| Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, window layouts, quit/uninstall, screenshot/record, display resolution, settings, store browse | Extensions: `List`, `Detail`, actions, navigation, toasts, storage — no `Form`, `Grid` layout, menu-bar, or extension OAuth yet |
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
@@ -159,6 +162,8 @@ See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
 - Snippets: `~/.config/flint/snippets.json`
 - Aliases: `~/.config/flint/aliases.json`
 - Quicklinks: `~/.config/flint/quicklinks.json`
+- Window layouts: `~/.config/flint/layouts.json`
+- Quit-all denylist: `~/.config/flint/quit-keep.json`
 - Notes: `~/.local/share/flint/notes.json`
 - Clipboard: `~/.local/share/flint/clipboard.json`
 - Favorites: `~/.local/share/flint/favorites.json`

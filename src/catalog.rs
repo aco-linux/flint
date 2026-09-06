@@ -206,6 +206,10 @@ impl Catalog {
             }
         }
 
+        if let Some(name) = crate::layout::parse_save_query(query) {
+            results.push(Scored::new(crate::layout::save_item(&name), 100_000));
+        }
+
         if looks_like_uri(query) {
             let uri = if query.contains("://") {
                 query.to_string()
@@ -244,6 +248,7 @@ impl Catalog {
             .iter()
             .map(|link| link.to_item(&link.argument_for(query)))
             .collect();
+        let custom_layouts = crate::layout::custom_items();
 
         let mut pool: Vec<&Item> = Vec::new();
         pool.extend(self.apps.iter());
@@ -252,6 +257,7 @@ impl Catalog {
         pool.extend(installed.iter());
         pool.extend(windows.iter());
         pool.extend(qlinks.iter());
+        pool.extend(custom_layouts.iter());
 
         let mut ranked: Vec<(u32, &Item)> = Vec::new();
         for item in pool {
@@ -377,7 +383,27 @@ impl Catalog {
     }
 
     fn search_windows(&self, query: &str) -> Vec<Scored> {
-        self.score_windows(query)
+        let q = query.trim();
+        let mut results = Vec::new();
+        if let Some(name) =
+            crate::layout::parse_save_short(q).or_else(|| crate::layout::parse_save_query(q))
+        {
+            results.push(Scored::new(crate::layout::save_item(&name), 100_000));
+        }
+        let layouts = crate::layout::all_items();
+        if q.is_empty() {
+            for (i, item) in layouts.iter().enumerate() {
+                results.push(Scored::new(
+                    item.clone(),
+                    50_000u32.saturating_sub(i as u32),
+                ));
+            }
+            results.extend(self.score_windows(q));
+            return results;
+        }
+        results.extend(self.score_pool(&layouts, q, 24));
+        results.extend(self.score_windows(q));
+        finish(results)
     }
 
     fn score_pool(&self, items: &[Item], query: &str, limit: usize) -> Vec<Scored> {
@@ -1487,20 +1513,6 @@ fn system_commands() -> Vec<Item> {
             spawn("omarchy-system-lock"),
         ),
         cmd(
-            "shot",
-            "Screenshot",
-            "Capture the current screen",
-            "applets-screenshooter",
-            spawn("omarchy-capture-screenshot"),
-        ),
-        cmd(
-            "region",
-            "Capture region",
-            "Select an area to screenshot",
-            "applets-screenshooter",
-            spawn("omarchy-capture-region"),
-        ),
-        cmd(
             "sleep",
             "Sleep",
             "Suspend the machine",
@@ -1550,6 +1562,10 @@ fn system_commands() -> Vec<Item> {
         ),
     ];
 
+    items.extend(crate::layout::builtin_items());
+    items.extend(crate::capture::items(which));
+    items.extend(crate::quit::items());
+    items.extend(crate::hypr::resolution_items());
     items.retain(|item| match &item.action {
         Action::Spawn { program, .. } => program.contains('/') || which(program),
         _ => true,

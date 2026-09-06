@@ -68,7 +68,19 @@ pub fn run(action: &Action) {
         | Action::LaunchExtension { .. }
         | Action::Extension { .. }
         | Action::SaveQuicklink { .. }
+        | Action::SaveLayout { .. }
+        | Action::QuitAll
         | Action::Confetti => {}
+        Action::Layout { name, address } => crate::layout::apply(name, address.as_deref()),
+        Action::CloseWindow { address } => crate::quit::close_window(address),
+        Action::KillPid { pid } => crate::quit::kill_pid(*pid),
+        Action::QuitClass { class } => crate::quit::quit_class(class),
+        Action::ConfirmQuitAll => crate::quit::quit_all(),
+        Action::Uninstall { manager, package } => crate::pkg::uninstall(manager, package),
+        Action::Capture { kind } => crate::capture::run(kind),
+        Action::SetResolution { spec } => {
+            let _ = crate::hypr::keyword(&format!("monitor {spec}"));
+        }
     }
 }
 
