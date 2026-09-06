@@ -149,6 +149,8 @@ impl Catalog {
             Mode::Store => self.search_store(&rest),
             Mode::Quicklink => self.search_quicklinks(&rest),
             Mode::Calc => self.search_calc(&rest),
+            Mode::Emoji => self.search_emoji(&rest),
+            Mode::Content => self.search_content(&rest),
             Mode::Extension => self.search_root(&rest),
         };
         (mode, results)
@@ -178,6 +180,24 @@ impl Catalog {
         }
         for item in smart::instant_items(query) {
             results.push(Scored::new(item, 95_000));
+        }
+        if let Some(item) = crate::translate::item(query) {
+            results.push(Scored::new(item, 98_000));
+        }
+        for item in crate::tz::items(query) {
+            results.push(Scored::new(item, 96_000));
+        }
+        if query.chars().count() >= 2 {
+            let looks = crate::emoji::looks_like_query(query);
+            let n = if looks { 8 } else { 3 };
+            for (i, item) in crate::emoji::search(query, n).into_iter().enumerate() {
+                let score = if looks {
+                    92_000u32.saturating_sub(i as u32 * 10)
+                } else {
+                    3_000
+                };
+                results.push(Scored::new(item, score));
+            }
         }
 
         let lexicon: Vec<&str> = self.lexicon.iter().map(String::as_str).collect();
@@ -859,6 +879,33 @@ impl Catalog {
         finish(results)
     }
 
+    fn search_emoji(&self, query: &str) -> Vec<Scored> {
+        crate::emoji::search(query, 48)
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| Scored::new(item, 50_000u32.saturating_sub(i as u32)))
+            .collect()
+    }
+
+    fn search_content(&self, query: &str) -> Vec<Scored> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        vec![Scored::new(
+            Item {
+                id: format!("content:{q}"),
+                title: format!("Search contents for “{q}”"),
+                subtitle: "ripgrep · $HOME and extra folders · cancelled on the next key".into(),
+                keywords: q.to_string(),
+                kind: Kind::Command,
+                icon: Icon::Name("system-search".into()),
+                action: Action::Copy(q.to_string()),
+            },
+            1_000,
+        )]
+    }
+
     fn search_calc(&self, query: &str) -> Vec<Scored> {
         let q = query.trim();
         let mut results = Vec::new();
@@ -975,12 +1022,17 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
         | Mode::Store
         | Mode::Quicklink
         | Mode::Calc
+        | Mode::Emoji
+        | Mode::Content
         | Mode::Extension => false,
     }
 }
 
 pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
     let (_, rest) = Mode::parse(query);
+    if crate::content::term_from_query(query).is_some() {
+        return true;
+    }
     if mode == Mode::Root
         && intent::resolve(&rest)
             .intents
@@ -1020,6 +1072,19 @@ pub fn live_extras(
                 extra: snap.extra,
             },
         ));
+    }
+
+    if let Some(term) = crate::content::term_from_query(query) {
+        let items = crate::content::search(&term, &settings.files.search_roots, 40);
+        for item in items {
+            let snippet = item.subtitle.clone();
+            extras.files.push(Scored::with_live(
+                item,
+                50_000,
+                Live::Snippet { text: snippet },
+            ));
+        }
+        return extras;
     }
 
     let want_files = asked_for_files(&q, mode, settings.files.include_in_root);
@@ -1566,6 +1631,10 @@ fn system_commands() -> Vec<Item> {
     items.extend(crate::capture::items(which));
     items.extend(crate::quit::items());
     items.extend(crate::hypr::resolution_items());
+    items.extend(crate::ocr::items(which));
+    if let Some(picker) = smart::picker_item(which) {
+        items.push(picker);
+    }
     items.retain(|item| match &item.action {
         Action::Spawn { program, .. } => program.contains('/') || which(program),
         _ => true,
@@ -1659,6 +1728,10 @@ mod tests {
             "an app name must not schedule a worker"
         );
         assert!(
+            !super::live_needed("smile", crate::mode::Mode::Root, true),
+            "emoji keywords stay in-memory"
+        );
+        assert!(
             !super::live_needed("we", crate::mode::Mode::Windows, true),
             "window mode is in-memory now — no live pass"
         );
@@ -1680,6 +1753,70 @@ mod tests {
         if crate::weather::cached().is_none() {
             assert!(super::live_needed("we", crate::mode::Mode::Root, false));
         }
+        assert!(super::live_needed(
+            "content:needle",
+            crate::mode::Mode::Root,
+            false
+        ));
+        assert!(super::live_needed(
+            "in:secret",
+            crate::mode::Mode::Root,
+            false
+        ));
+        assert!(super::live_needed(
+            "file content invoices",
+            crate::mode::Mode::Files,
+            false
+        ));
+        assert!(!super::live_needed(
+            "contentment",
+            crate::mode::Mode::Root,
+            false
+        ));
+    }
+
+    #[test]
+    fn root_instant_answers_for_wave3() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let smile = catalog.search_fast("smile").1;
+        assert!(
+            smile.iter().any(|row| row.item.id.starts_with("emoji:")),
+            "smile should surface built-in emoji"
+        );
+        assert!(
+            smile
+                .iter()
+                .find(|row| row.item.id.starts_with("emoji:"))
+                .map(|row| row.score)
+                .unwrap_or(0)
+                > smile
+                    .iter()
+                    .find(|row| row.item.id == "cmd:emoji")
+                    .map(|row| row.score)
+                    .unwrap_or(0),
+            "built-in emoji must rank above omarchy-menu-emoji"
+        );
+        assert_eq!(
+            catalog.search_fast("emoji smile").0,
+            crate::mode::Mode::Emoji
+        );
+        let tokyo = catalog.search_fast("time in tokyo").1;
+        assert!(tokyo.iter().any(|row| row.item.id.starts_with("tz:")));
+        let tr = catalog.search_fast("tr fr hello").1;
+        assert!(
+            tr.iter()
+                .any(|row| matches!(row.item.action, crate::item::Action::AskAi { .. }))
+        );
+        let rgb = catalog.search_fast("rgb(255, 90, 31)").1;
+        assert!(rgb.iter().any(|row| row.item.title == "#ff5a1f"));
     }
 
     #[test]

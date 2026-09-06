@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — in-bar content tools (Wave 3)
+
+- Content search: explicit `content:` / `in:` (or Files mode `content <q>`). One cancellable `rg --max-count 1` over `$HOME` and `search_roots`, never `/`. Ordinary root typing stays in-memory
+- Built-in emoji table (~200) with keywords and `:shortcode:`; `emoji ` mode; Enter pastes. Ranks above `omarchy-menu-emoji` when the query looks like emoji
+- Timezones: static city table (`time in tokyo`, `nyc vs london`) with fixed UTC offsets. Subtitle says standard offset, not DST
+- Colors: hex still instant; `rgb()` converts to hex + HSL; **Pick color** only if `hyprpicker` or `wl-color-picker` is on PATH
+- Translate / define are Ask AI prompt templates (`tr fr hello`, `translate es …`, `en:de thanks`, `define widget`). No new HTTP. Currency skipped
+- OCR (`tesseract`) and QR (`zbarimg`) as argv, only if found: action panel on image files, plus clipboard PNG via `wl-paste` into a mode-600 temp file that is deleted after
+
 ## Unreleased — lightness (Wave 2.5)
 
 - User data (clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts, quit-keep) lives in one `~/.local/share/flint/flint.db` (mode 600) with incremental writes

@@ -61,6 +61,8 @@ with the release ID `dev.flint.launcher` so the centered floating rule still app
 | `store` | Store | `--store` |
 | `link` / `links` | Quicklinks | type `+name url` to save |
 | `calc` / `=` | Calculator + history | dates, percents, math |
+| `emoji` | Emoji | `:smile:` or a keyword; Enter pastes |
+| `content` / `content:` / `in:` | File contents | ripgrep; Files mode also accepts `content <q>` |
 
 Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to create one. Prefix `>` to run a command, `$` to run it in a terminal.
 
@@ -76,7 +78,11 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Thumbs reuse the Freedesktop cache (`~/.cache/thumbnails/large/`) when another app has already generated them.
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
-- Calculator, unit conversion (`10 km to mi`, `32f`), hex colors (`#ff5a1f`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
+- Calculator, unit conversion (`10 km to mi`, `32f`), hex and `rgb()` colors (`#ff5a1f`, `rgb(255, 90, 31)`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
+- Emoji by name or `:shortcode:` (`smile`, `:fire:`). Time in a city (`time in tokyo`) or a difference (`nyc vs london`) uses a static offset table, not DST.
+- `tr fr hello`, `translate es …`, `en:de thanks`, and `define widget` are Ask AI prompts (output only the translation or definition).
+- `content:needle` or `in:needle` searches file contents with ripgrep (`--max-count 1` over home and extra folders). Typing an app name never starts ripgrep or OCR.
+- Pick color if `hyprpicker` / `wl-color-picker` is installed. OCR and QR on an image (Ctrl+K) or a clipboard PNG if `tesseract` / `zbarimg` are on PATH.
 - Date and percent math too: `today + 7d`, `100 days from now`, `days until 2026-12-25`, `20% of 80`, `20% off 80`, `80 + 20%`. Type `calc` or `=` for recent answers (not dumped on an empty root query).
 - Ctrl+K opens an action panel on the selected result (pin favorite, set alias, copy path, paste, open with, window layouts, quit, uninstall). Ctrl+? still opens Ask AI. Ctrl+F files, Ctrl+N notes, Ctrl+, settings stay.
 - Window layouts: halves, quarters, maximize, center, almost-maximize, next/previous display. `layout +name` saves the current arrangement; apply a saved layout from root or the window switcher.

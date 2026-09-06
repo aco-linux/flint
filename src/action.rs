@@ -81,6 +81,8 @@ pub fn run(action: &Action) {
         Action::SetResolution { spec } => {
             let _ = crate::hypr::keyword(&format!("monitor {spec}"));
         }
+        Action::Ocr { path } => crate::ocr::run_ocr(path.as_deref()),
+        Action::Qr { path } => crate::ocr::run_qr(path.as_deref()),
     }
 }
 

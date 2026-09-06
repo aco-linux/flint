@@ -12,6 +12,8 @@ pub enum Mode {
     Store,
     Quicklink,
     Calc,
+    Emoji,
+    Content,
     /// A running extension owns the list. Never parsed from text.
     Extension,
 }
@@ -78,6 +80,12 @@ impl Mode {
         if let Some(rest) = strip_kw(q, &["calc "]) {
             return (Mode::Calc, rest);
         }
+        if let Some(rest) = strip_kw(q, &["emoji "]) {
+            return (Mode::Emoji, rest);
+        }
+        if let Some(rest) = strip_content(q) {
+            return (Mode::Content, rest);
+        }
         (Mode::Root, q.to_string())
     }
 
@@ -95,6 +103,8 @@ impl Mode {
             Mode::Store => Some("STORE"),
             Mode::Quicklink => Some("LINKS"),
             Mode::Calc => Some("CALC"),
+            Mode::Emoji => Some("EMOJI"),
+            Mode::Content => Some("CONTENT"),
             Mode::Extension => Some("EXT"),
         }
     }
@@ -113,6 +123,8 @@ impl Mode {
             Mode::Store => "Browse extensions, MCP servers, Script Commands",
             Mode::Quicklink => "Quicklinks — type +name url to create",
             Mode::Calc => "Calculation history — type math, dates, or percents",
+            Mode::Emoji => "Search emoji — smile, :smile:, or a keyword",
+            Mode::Content => "Search file contents — ripgrep, cancelled on the next key",
             Mode::Extension => "Search…",
         }
     }
@@ -131,6 +143,8 @@ impl Mode {
             Mode::Store => "Store is empty.",
             Mode::Quicklink => "No quicklinks yet.",
             Mode::Calc => "No calculations yet.",
+            Mode::Emoji => "No matching emoji.",
+            Mode::Content => "No matching file contents.",
             Mode::Extension => "Nothing to show.",
         }
     }
@@ -149,6 +163,8 @@ impl Mode {
             Mode::Store => "Vicinae extensions, MCP servers, or Raycast Script Commands.",
             Mode::Quicklink => "Type +gh https://github.com/search?q={argument} to save a link.",
             Mode::Calc => "Try 20% of 80, today + 7d, or 2+2. History stays on this machine.",
+            Mode::Emoji => "Type smile or :fire:. Enter pastes the glyph.",
+            Mode::Content => "Type a phrase. Flint runs rg over $HOME, never /.",
             Mode::Extension => "Esc goes back.",
         }
     }
@@ -167,9 +183,25 @@ impl Mode {
             Mode::Store => "store ",
             Mode::Quicklink => "link ",
             Mode::Calc => "calc ",
+            Mode::Emoji => "emoji ",
+            Mode::Content => "content ",
             Mode::Extension => "",
         }
     }
+}
+
+fn strip_content(query: &str) -> Option<String> {
+    let lower = query.to_ascii_lowercase();
+    if lower == "content" {
+        return Some(String::new());
+    }
+    if lower.starts_with("content:") {
+        return Some(query["content:".len()..].trim_start().to_string());
+    }
+    if lower.starts_with("content ") {
+        return Some(query["content ".len()..].trim_start().to_string());
+    }
+    None
 }
 
 fn strip_kw(query: &str, prefixes: &[&str]) -> Option<String> {
@@ -219,5 +251,21 @@ mod tests {
         assert_eq!(Mode::parse("="), (Mode::Calc, "".into()));
         assert_eq!(Mode::parse("= 20% of 80"), (Mode::Calc, "20% of 80".into()));
         assert_eq!(Mode::parse("calculator").0, Mode::Root);
+        assert_eq!(Mode::parse("emoji smile"), (Mode::Emoji, "smile".into()));
+        assert_eq!(Mode::parse("emoji"), (Mode::Emoji, "".into()));
+        assert_eq!(Mode::parse("emojis").0, Mode::Root);
+        assert_eq!(
+            Mode::parse("content invoices"),
+            (Mode::Content, "invoices".into())
+        );
+        assert_eq!(
+            Mode::parse("content:api_key"),
+            (Mode::Content, "api_key".into())
+        );
+        assert_eq!(Mode::parse("contentment").0, Mode::Root);
+        assert_eq!(Mode::parse("tr fr hello").0, Mode::Root);
+        assert_eq!(Mode::parse("translate es hola").0, Mode::Root);
+        assert_eq!(Mode::parse("try firefox").0, Mode::Root);
+        assert_eq!(Mode::parse("in:secret").0, Mode::Root);
     }
 }

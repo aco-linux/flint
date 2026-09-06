@@ -150,6 +150,13 @@ pub enum Action {
     SetResolution {
         spec: String,
     },
+    /// `None` reads a PNG from the clipboard into a temp file first.
+    Ocr {
+        path: Option<PathBuf>,
+    },
+    Qr {
+        path: Option<PathBuf>,
+    },
 }
 
 /// Callback identity for an action rendered by a running extension.

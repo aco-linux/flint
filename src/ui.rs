@@ -3122,6 +3122,13 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
 }
 
 fn file_actions(out: &mut Vec<PanelAction>, path: &Path, include_open: bool) {
+    for (title, action) in crate::ocr::actions_for_path(path) {
+        out.push(PanelAction {
+            title,
+            keywords: "ocr qr barcode tesseract".into(),
+            kind: PanelKind::Run(action),
+        });
+    }
     out.push(PanelAction {
         title: "Copy path".into(),
         keywords: "copy path".into(),
