@@ -7,26 +7,31 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use gtk4::gdk::{Key, ModifierType, Texture};
+use gtk4::gio::prelude::AppInfoExt;
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box, CssProvider, Entry, EventControllerKey,
-    GestureClick, HeaderBar, Image, Label, Orientation, Overflow, Overlay, PolicyType,
-    STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, WrapMode,
+    Align, Application, ApplicationWindow, Box, CssProvider, DrawingArea, Entry,
+    EventControllerKey, GestureClick, HeaderBar, Image, Label, Orientation, Overflow, Overlay,
+    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, WrapMode,
 };
 
 use crate::action;
 use crate::ai;
+use crate::alias;
 use crate::auth;
+use crate::calc;
 use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
 use crate::extension;
+use crate::favorites;
 use crate::files;
 use crate::hypr;
 use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
+use crate::quicklinks;
 use crate::snippets;
 use crate::store;
 use crate::usage;
@@ -49,6 +54,10 @@ pub struct Shell {
     status: Label,
     detail: ScrolledWindow,
     detail_view: TextView,
+    action_panel: Box,
+    action_list: Box,
+    confetti: DrawingArea,
+    confetti_bits: Rc<RefCell<Vec<Particle>>>,
     state: Rc<RefCell<State>>,
     live_jobs: Sender<LiveJob>,
     live_cancel: Arc<files::Cancel>,
@@ -64,7 +73,12 @@ struct State {
     mode: Mode,
     visible: bool,
     status: String,
-    editing_note: Option<String>,
+    editing: Option<Editing>,
+    actions_open: bool,
+    actions: Vec<PanelAction>,
+    action_selected: usize,
+    saved_query: String,
+    pending_alias: Option<String>,
     /// A running extension command. While set, the list belongs to it.
     extension: Option<extension::Session>,
     extension_gen: u64,
@@ -78,6 +92,54 @@ struct State {
 struct CachedThumb {
     mtime: u64,
     texture: Texture,
+}
+
+#[derive(Clone)]
+enum Editing {
+    Note(String),
+    ClipRename(String),
+    ClipEdit(String),
+}
+
+#[derive(Clone)]
+struct PanelAction {
+    title: String,
+    keywords: String,
+    kind: PanelKind,
+}
+
+#[derive(Clone)]
+enum PanelKind {
+    ToggleFavorite,
+    SetAlias,
+    Copy(String),
+    CopyPath(PathBuf),
+    Open,
+    OpenWith {
+        app: gtk4::gio::AppInfo,
+        path: PathBuf,
+    },
+    ShowInFiles(PathBuf),
+    Paste(String),
+    ClipPin(String),
+    ClipUnpin(String),
+    ClipRename(String),
+    ClipEdit(String),
+    Launch,
+    SnippetPaste(String),
+    SnippetCopy(String),
+}
+
+struct Particle {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    life: f64,
+    size: f64,
+    r: f64,
+    g: f64,
+    b: f64,
 }
 
 struct LiveJob {
@@ -247,6 +309,46 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     panel.append(&footer());
 
     overlay.add_overlay(&panel);
+
+    let action_panel = Box::new(Orientation::Vertical, 2);
+    action_panel.add_css_class("action-panel");
+    action_panel.set_halign(Align::End);
+    action_panel.set_valign(Align::End);
+    action_panel.set_hexpand(false);
+    action_panel.set_vexpand(false);
+    action_panel.set_visible(false);
+    let action_heading = Label::new(Some("ACTIONS"));
+    action_heading.add_css_class("action-panel-title");
+    action_heading.set_xalign(0.0);
+    action_panel.append(&action_heading);
+    let action_list = Box::new(Orientation::Vertical, 2);
+    action_panel.append(&action_list);
+    overlay.add_overlay(&action_panel);
+
+    let confetti_bits = Rc::new(RefCell::new(Vec::<Particle>::new()));
+    let confetti = DrawingArea::new();
+    confetti.add_css_class("confetti");
+    confetti.set_hexpand(true);
+    confetti.set_vexpand(true);
+    confetti.set_halign(Align::Fill);
+    confetti.set_valign(Align::Fill);
+    confetti.set_can_target(false);
+    confetti.set_visible(false);
+    confetti.set_draw_func({
+        let bits = confetti_bits.clone();
+        move |_, cr, _w, _h| {
+            for p in bits.borrow().iter() {
+                if p.life <= 0.0 {
+                    continue;
+                }
+                cr.set_source_rgba(p.r, p.g, p.b, p.life.clamp(0.0, 1.0));
+                cr.rectangle(p.x, p.y, p.size, p.size);
+                let _ = cr.fill();
+            }
+        }
+    });
+    overlay.add_overlay(&confetti);
+
     window.set_child(Some(&overlay));
 
     let (live_tx, live_rx) = mpsc::channel();
@@ -269,6 +371,10 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         status: status.clone(),
         detail: detail.clone(),
         detail_view: detail_view.clone(),
+        action_panel: action_panel.clone(),
+        action_list: action_list.clone(),
+        confetti: confetti.clone(),
+        confetti_bits: confetti_bits.clone(),
         state: Rc::new(RefCell::new(State {
             catalog,
             results: Vec::new(),
@@ -277,7 +383,12 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             mode: Mode::Root,
             visible: false,
             status: String::new(),
-            editing_note: None,
+            editing: None,
+            actions_open: false,
+            actions: Vec::new(),
+            action_selected: 0,
+            saved_query: String::new(),
+            pending_alias: None,
             extension: None,
             extension_gen: 0,
             voice: VoiceSession::new(),
@@ -327,9 +438,14 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     {
         let shell = shell.clone();
         entry.connect_changed(move |_| {
-            if shell.state.borrow().editing_note.is_none() {
-                shell.refresh();
+            if shell.state.borrow().editing.is_some() {
+                return;
             }
+            if shell.state.borrow().actions_open {
+                shell.refresh_actions();
+                return;
+            }
+            shell.refresh();
         });
     }
 
@@ -370,6 +486,10 @@ impl Clone for Shell {
             status: self.status.clone(),
             detail: self.detail.clone(),
             detail_view: self.detail_view.clone(),
+            action_panel: self.action_panel.clone(),
+            action_list: self.action_list.clone(),
+            confetti: self.confetti.clone(),
+            confetti_bits: self.confetti_bits.clone(),
             state: self.state.clone(),
             live_jobs: self.live_jobs.clone(),
             live_cancel: self.live_cancel.clone(),
@@ -418,7 +538,8 @@ impl Shell {
     }
 
     pub fn hide(&self) {
-        self.commit_note();
+        self.commit_editing();
+        self.close_actions_inner(false);
         if self.state.borrow().voice.state() != voice::State::Idle {
             self.state.borrow().voice.cancel();
         }
@@ -430,7 +551,7 @@ impl Shell {
         let query = self.entry.text().to_string();
         let (generation, include_in_root) = {
             let mut st = self.state.borrow_mut();
-            if st.editing_note.is_some() {
+            if st.editing.is_some() || st.actions_open {
                 return;
             }
             if st.extension.is_some() {
@@ -439,7 +560,31 @@ impl Shell {
                 return;
             }
             st.search_gen = st.search_gen.saturating_add(1);
-            let (mode, results) = st.catalog.search_fast(&query);
+            let (mode, mut results) = st.catalog.search_fast(&query);
+            if let Some(item_id) = st.pending_alias.clone()
+                && let Some(name) = alias_typed(&query)
+            {
+                let title = st
+                    .catalog
+                    .lookup_item(&item_id)
+                    .map(|item| item.title)
+                    .unwrap_or_else(|| item_id.clone());
+                results.insert(
+                    0,
+                    Scored::new(
+                        Item {
+                            id: "cmd:apply-alias".into(),
+                            title: format!("Set alias “{name}”"),
+                            subtitle: format!("Nickname for {title}"),
+                            keywords: name,
+                            kind: Kind::Command,
+                            icon: Icon::Name("insert-text".into()),
+                            action: Action::Copy(item_id),
+                        },
+                        200_000,
+                    ),
+                );
+            }
             st.mode = mode;
             st.results = results;
             st.selected = 0;
@@ -508,7 +653,7 @@ impl Shell {
         let query = self.entry.text().to_string();
         let visible = {
             let st = self.state.borrow();
-            st.visible && st.editing_note.is_none()
+            st.visible && st.editing.is_none() && !st.actions_open
         };
         self.state.borrow().catalog.adopt_windows(windows);
         if !visible {
@@ -654,7 +799,7 @@ impl Shell {
     }
 
     fn update_preview(&self) {
-        if self.state.borrow().editing_note.is_some() {
+        if self.state.borrow().editing.is_some() {
             self.preview.set_visible(false);
             return;
         }
@@ -717,7 +862,7 @@ impl Shell {
             self.status.set_text(&st.status);
             self.status.set_visible(true);
         }
-        let editing = st.editing_note.is_some();
+        let editing = matches!(st.editing, Some(Editing::Note(_) | Editing::ClipEdit(_)));
         self.detail.set_visible(editing);
         if editing {
             self.preview.set_visible(false);
@@ -738,27 +883,45 @@ impl Shell {
     fn on_key(&self, key: Key, mods: ModifierType) -> Propagation {
         let ctrl = mods.contains(ModifierType::CONTROL_MASK);
         if ctrl && matches!(key, Key::comma) {
+            self.close_actions();
             self.enter_mode(Mode::Settings);
             Propagation::Stop
         } else if ctrl && matches!(key, Key::n) {
+            self.close_actions();
             self.enter_mode(Mode::Notes);
             Propagation::Stop
         } else if ctrl && matches!(key, Key::f) {
+            self.close_actions();
             self.enter_mode(Mode::Files);
             Propagation::Stop
-        } else if ctrl && matches!(key, Key::k | Key::question) {
+        } else if ctrl && matches!(key, Key::k) {
+            self.toggle_actions();
+            Propagation::Stop
+        } else if ctrl && matches!(key, Key::question) {
+            self.close_actions();
             self.enter_mode(Mode::Ask);
             Propagation::Stop
-        } else if ctrl && matches!(key, Key::s) && self.state.borrow().editing_note.is_some() {
-            self.commit_note();
-            self.set_status("Note saved");
+        } else if ctrl && matches!(key, Key::s) && self.state.borrow().editing.is_some() {
+            self.commit_editing();
+            self.set_status("Saved");
             Propagation::Stop
         } else {
             match key {
                 Key::Escape => {
-                    if self.state.borrow().editing_note.is_some() {
-                        self.commit_note();
-                        self.enter_mode(Mode::Notes);
+                    if self.state.borrow().actions_open {
+                        self.close_actions();
+                    } else if self.state.borrow().editing.is_some() {
+                        let back = match self.state.borrow().editing {
+                            Some(Editing::Note(_)) => Some(Mode::Notes),
+                            Some(Editing::ClipRename(_) | Editing::ClipEdit(_)) => {
+                                Some(Mode::Clipboard)
+                            }
+                            None => None,
+                        };
+                        self.commit_editing();
+                        if let Some(mode) = back {
+                            self.enter_mode(mode);
+                        }
                     } else if self.state.borrow().voice.state() == voice::State::Listening {
                         self.state.borrow().voice.cancel();
                         self.set_status("Dictation cancelled");
@@ -771,24 +934,24 @@ impl Shell {
                     }
                     Propagation::Stop
                 }
-                Key::Down | Key::Tab if self.state.borrow().editing_note.is_none() => {
+                Key::Down | Key::Tab if self.state.borrow().editing.is_none() => {
                     self.move_selection(1);
                     Propagation::Stop
                 }
-                Key::Page_Down if self.state.borrow().editing_note.is_none() => {
+                Key::Page_Down if self.state.borrow().editing.is_none() => {
                     self.move_selection(8);
                     Propagation::Stop
                 }
-                Key::Up | Key::ISO_Left_Tab if self.state.borrow().editing_note.is_none() => {
+                Key::Up | Key::ISO_Left_Tab if self.state.borrow().editing.is_none() => {
                     self.move_selection(-1);
                     Propagation::Stop
                 }
-                Key::Page_Up if self.state.borrow().editing_note.is_none() => {
+                Key::Page_Up if self.state.borrow().editing.is_none() => {
                     self.move_selection(-8);
                     Propagation::Stop
                 }
                 Key::space | Key::KP_Space => {
-                    if self.state.borrow().editing_note.is_some() {
+                    if self.state.borrow().editing.is_some() || self.state.borrow().actions_open {
                         Propagation::Proceed
                     } else {
                         let item = {
@@ -809,6 +972,7 @@ impl Shell {
                 }
                 Key::Return | Key::KP_Enter
                     if mods.contains(ModifierType::SHIFT_MASK)
+                        && !self.state.borrow().actions_open
                         && self.state.borrow().extension.is_some() =>
                 {
                     let actions = {
@@ -826,8 +990,11 @@ impl Shell {
                     Propagation::Stop
                 }
                 Key::Return | Key::KP_Enter => {
-                    if self.state.borrow().editing_note.is_some() {
+                    if self.state.borrow().editing.is_some() {
                         Propagation::Proceed
+                    } else if self.state.borrow().actions_open {
+                        self.run_selected_action();
+                        Propagation::Stop
                     } else if self.state.borrow().voice.state() != voice::State::Idle {
                         self.toggle_voice();
                         Propagation::Stop
@@ -850,6 +1017,10 @@ impl Shell {
     }
 
     fn move_selection(&self, delta: i32) {
+        if self.state.borrow().actions_open {
+            self.move_action(delta);
+            return;
+        }
         let mut st = self.state.borrow_mut();
         if st.results.is_empty() {
             return;
@@ -876,6 +1047,14 @@ impl Shell {
             scored.item.clone()
         };
         usage::bump(&item.id);
+        if item.id == "cmd:apply-alias" {
+            if let Action::Copy(id) = &item.action
+                && let Some(name) = alias_typed(&self.entry.text())
+            {
+                self.apply_alias(id, &name);
+            }
+            return;
+        }
         match item.action {
             Action::EnterMode(mode) => self.enter_mode(mode),
             Action::SaveSnippet { keyword } => {
@@ -933,6 +1112,40 @@ impl Shell {
             Action::RefreshModels => self.refresh_models(),
             Action::LaunchExtension { dir, command } => self.launch_extension(dir, command),
             Action::Extension { actions, .. } => self.run_extension_action(&actions, 0),
+            Action::SaveQuicklink { name, target } => {
+                match quicklinks::create(&name, &target) {
+                    Ok(link) => {
+                        quicklinks::upsert(link);
+                        self.set_status(format!("Saved quicklink {name}"));
+                    }
+                    Err(_) => {
+                        self.set_status("Quicklink target must be a path or an http(s)/file URI")
+                    }
+                }
+                self.enter_mode(Mode::Quicklink);
+            }
+            Action::Confetti => self.throw_confetti(),
+            Action::Paste(text) => {
+                let paste = if item.kind == Kind::Snippet {
+                    let keyword = item.id.strip_prefix("snip:").unwrap_or("");
+                    snippets::expand_keyword(
+                        keyword,
+                        &clipboard::current_text().unwrap_or_default(),
+                    )
+                    .unwrap_or(text)
+                } else {
+                    text
+                };
+                self.hide();
+                action::run(&Action::Paste(paste));
+            }
+            Action::Copy(text) => {
+                if item.kind == Kind::Calc {
+                    calc::record(calc_expr(&item.subtitle), &text);
+                }
+                self.hide();
+                action::run(&Action::Copy(text));
+            }
             Action::RunScript { path } => {
                 let allowed = self
                     .state
@@ -959,11 +1172,13 @@ impl Shell {
     }
 
     fn enter_mode(&self, mode: Mode) {
-        self.commit_note();
+        self.commit_editing();
+        self.close_actions_inner(false);
         if mode != Mode::Extension {
             self.end_extension();
         }
-        self.state.borrow_mut().editing_note = None;
+        self.state.borrow_mut().editing = None;
+        self.state.borrow_mut().pending_alias = None;
         self.state.borrow_mut().status.clear();
         self.entry.set_text(mode.prefix());
         self.entry.set_position(-1);
@@ -975,7 +1190,7 @@ impl Shell {
         let Some(note) = notes::get(id) else {
             return;
         };
-        self.state.borrow_mut().editing_note = Some(note.id.clone());
+        self.state.borrow_mut().editing = Some(Editing::Note(note.id.clone()));
         self.state.borrow_mut().mode = Mode::Notes;
         self.entry.set_text(&note.title);
         self.entry.set_position(-1);
@@ -985,19 +1200,365 @@ impl Shell {
         self.detail_view.grab_focus();
     }
 
-    fn commit_note(&self) {
-        let id = self.state.borrow().editing_note.clone();
-        let Some(id) = id else {
+    fn commit_editing(&self) {
+        let editing = self.state.borrow().editing.clone();
+        let Some(editing) = editing else {
             return;
         };
-        let title = self.entry.text().to_string();
-        let buffer = self.detail_view.buffer();
-        let start = buffer.start_iter();
-        let end = buffer.end_iter();
-        let body = buffer.text(&start, &end, false).to_string();
-        notes::save_body(&id, &title, &body);
-        self.state.borrow_mut().editing_note = None;
+        match editing {
+            Editing::Note(id) => {
+                let title = self.entry.text().to_string();
+                let body = buffer_text(&self.detail_view);
+                notes::save_body(&id, &title, &body);
+            }
+            Editing::ClipRename(id) => {
+                let label = self.entry.text().to_string();
+                let clips = self.clip_store();
+                let mut store = clips.borrow_mut();
+                if store.rename(&id, &label) {
+                    store.persist();
+                }
+            }
+            Editing::ClipEdit(id) => {
+                let text = buffer_text(&self.detail_view);
+                let clips = self.clip_store();
+                let mut store = clips.borrow_mut();
+                if store.edit(&id, &text) {
+                    store.persist();
+                } else {
+                    drop(store);
+                    self.set_status("Clipboard edit rejected (empty or looks like a secret)");
+                }
+            }
+        }
+        self.state.borrow_mut().editing = None;
         self.detail.set_visible(false);
+    }
+
+    fn clip_store(&self) -> Rc<RefCell<clipboard::Store>> {
+        self.state.borrow().catalog.clips.clone()
+    }
+
+    fn apply_alias(&self, id: &str, name: &str) {
+        let mut store = alias::Store::load();
+        store.set(id, name);
+        store.persist();
+        self.state.borrow_mut().pending_alias = None;
+        self.set_status(format!("Alias “{name}” set"));
+        self.refresh();
+    }
+
+    fn toggle_actions(&self) {
+        if self.state.borrow().actions_open {
+            self.close_actions();
+            return;
+        }
+        if self.state.borrow().editing.is_some() {
+            return;
+        }
+        let item = {
+            let st = self.state.borrow();
+            st.results.get(st.selected).map(|row| row.item.clone())
+        };
+        let Some(item) = item else {
+            self.set_status("Nothing selected");
+            return;
+        };
+        let saved = self.entry.text().to_string();
+        {
+            let mut st = self.state.borrow_mut();
+            st.saved_query = saved;
+            st.actions_open = true;
+            st.action_selected = 0;
+        }
+        let actions = {
+            let st = self.state.borrow();
+            panel_actions(&item, &st)
+        };
+        self.state.borrow_mut().actions = actions;
+        self.entry.set_placeholder_text(Some("Filter actions…"));
+        self.entry.set_text("");
+        self.entry.grab_focus();
+        self.paint_actions();
+        self.action_panel.set_visible(true);
+    }
+
+    fn close_actions(&self) {
+        self.close_actions_inner(true);
+    }
+
+    fn close_actions_inner(&self, restore: bool) {
+        let saved = {
+            let mut st = self.state.borrow_mut();
+            if !st.actions_open {
+                return;
+            }
+            st.actions_open = false;
+            st.actions.clear();
+            st.action_selected = 0;
+            std::mem::take(&mut st.saved_query)
+        };
+        self.action_panel.set_visible(false);
+        while let Some(child) = self.action_list.last_child() {
+            self.action_list.remove(&child);
+        }
+        if restore {
+            self.entry.set_text(&saved);
+            self.entry.set_position(-1);
+            self.entry.grab_focus();
+            self.refresh();
+        }
+    }
+
+    fn refresh_actions(&self) {
+        let filter = self.entry.text().to_string();
+        let item = {
+            let st = self.state.borrow();
+            st.results.get(st.selected).map(|row| row.item.clone())
+        };
+        let Some(item) = item else {
+            return;
+        };
+        let mut actions = {
+            let st = self.state.borrow();
+            panel_actions(&item, &st)
+        };
+        let f = filter.trim().to_ascii_lowercase();
+        if !f.is_empty() {
+            actions.retain(|action| {
+                action.title.to_ascii_lowercase().contains(&f)
+                    || action.keywords.to_ascii_lowercase().contains(&f)
+            });
+        }
+        {
+            let mut st = self.state.borrow_mut();
+            st.actions = actions;
+            st.action_selected = 0;
+        }
+        self.paint_actions();
+    }
+
+    fn paint_actions(&self) {
+        while let Some(child) = self.action_list.last_child() {
+            self.action_list.remove(&child);
+        }
+        let (actions, selected) = {
+            let st = self.state.borrow();
+            (st.actions.clone(), st.action_selected)
+        };
+        if actions.is_empty() {
+            let empty = Label::new(Some("No actions"));
+            empty.add_css_class("hint");
+            empty.set_xalign(0.0);
+            self.action_list.append(&empty);
+            self.action_panel.set_visible(true);
+            return;
+        }
+        for (idx, action) in actions.iter().enumerate() {
+            let row = Box::new(Orientation::Horizontal, 8);
+            row.add_css_class("action-row");
+            if idx == selected {
+                row.add_css_class("selected");
+            }
+            let title = Label::new(Some(&action.title));
+            title.add_css_class("action-row-title");
+            title.set_xalign(0.0);
+            title.set_hexpand(true);
+            row.append(&title);
+            self.action_list.append(&row);
+        }
+        self.action_panel.set_visible(true);
+    }
+
+    fn move_action(&self, delta: i32) {
+        {
+            let mut st = self.state.borrow_mut();
+            if st.actions.is_empty() {
+                return;
+            }
+            let len = st.actions.len() as i32;
+            st.action_selected = ((st.action_selected as i32 + delta).rem_euclid(len)) as usize;
+        }
+        self.paint_actions();
+    }
+
+    fn run_selected_action(&self) {
+        let action = {
+            let st = self.state.borrow();
+            st.actions.get(st.action_selected).cloned()
+        };
+        let Some(action) = action else {
+            return;
+        };
+        let item = {
+            let st = self.state.borrow();
+            st.results.get(st.selected).map(|row| row.item.clone())
+        };
+        let Some(item) = item else {
+            return;
+        };
+        let filter = self.entry.text().to_string();
+        match action.kind {
+            PanelKind::ToggleFavorite => {
+                let mut store = favorites::Store::load();
+                let pinned = store.toggle(&item.id);
+                store.persist();
+                self.close_actions();
+                self.set_status(if pinned {
+                    format!("Pinned {}", item.title)
+                } else {
+                    format!("Unpinned {}", item.title)
+                });
+                self.refresh();
+            }
+            PanelKind::SetAlias => {
+                let typed = filter.trim();
+                if !typed.is_empty() && !typed.eq_ignore_ascii_case("set alias") {
+                    self.close_actions();
+                    self.apply_alias(&item.id, typed);
+                } else {
+                    self.state.borrow_mut().pending_alias = Some(item.id.clone());
+                    self.close_actions();
+                    self.entry.set_text("alias:");
+                    self.entry.set_position(-1);
+                    self.set_status(format!("Type an alias for {}", item.title));
+                }
+            }
+            PanelKind::Copy(text) => {
+                action::copy_text(&text);
+                self.close_actions();
+                self.set_status("Copied");
+            }
+            PanelKind::CopyPath(path) => {
+                action::copy_text(&path.display().to_string());
+                self.close_actions();
+                self.set_status("Copied path");
+            }
+            PanelKind::Open => {
+                self.close_actions();
+                self.hide();
+                action::run(&item.action);
+            }
+            PanelKind::OpenWith { app, path } => {
+                self.close_actions();
+                self.hide();
+                let file = gtk4::gio::File::for_path(path);
+                let _ = app.launch(&[file], gtk4::gio::AppLaunchContext::NONE);
+            }
+            PanelKind::ShowInFiles(path) => {
+                self.close_actions();
+                self.hide();
+                action::run(&Action::OpenPath(path));
+            }
+            PanelKind::Paste(text) => {
+                self.close_actions();
+                self.hide();
+                action::run(&Action::Paste(text));
+            }
+            PanelKind::ClipPin(id) => {
+                {
+                    let clips = self.clip_store();
+                    let mut store = clips.borrow_mut();
+                    store.pin(&id);
+                    store.persist();
+                }
+                self.close_actions();
+                self.set_status("Pinned clipboard entry");
+                self.refresh();
+            }
+            PanelKind::ClipUnpin(id) => {
+                {
+                    let clips = self.clip_store();
+                    let mut store = clips.borrow_mut();
+                    store.unpin(&id);
+                    store.persist();
+                }
+                self.close_actions();
+                self.set_status("Unpinned clipboard entry");
+                self.refresh();
+            }
+            PanelKind::ClipRename(id) => {
+                self.close_actions();
+                self.begin_clip_rename(&id);
+            }
+            PanelKind::ClipEdit(id) => {
+                self.close_actions();
+                self.begin_clip_edit(&id);
+            }
+            PanelKind::Launch => {
+                self.close_actions();
+                self.hide();
+                action::run(&item.action);
+            }
+            PanelKind::SnippetPaste(keyword) => {
+                let clip = clipboard::current_text().unwrap_or_default();
+                let text = snippets::expand_keyword(&keyword, &clip).unwrap_or_default();
+                self.close_actions();
+                self.hide();
+                action::run(&Action::Paste(text));
+            }
+            PanelKind::SnippetCopy(keyword) => {
+                let clip = clipboard::current_text().unwrap_or_default();
+                let text = snippets::expand_keyword(&keyword, &clip).unwrap_or_default();
+                action::copy_text(&text);
+                self.close_actions();
+                self.set_status("Copied expanded snippet");
+            }
+        }
+    }
+
+    fn begin_clip_rename(&self, id: &str) {
+        let Some(entry) = self.clip_store().borrow().get(id).cloned() else {
+            return;
+        };
+        self.state.borrow_mut().editing = Some(Editing::ClipRename(entry.id.clone()));
+        self.state.borrow_mut().mode = Mode::Clipboard;
+        self.entry.set_text(&entry.label);
+        self.entry.set_position(-1);
+        self.detail.set_visible(false);
+        self.set_status("Editing clipboard · Ctrl+S saves");
+        self.sync_chrome();
+        self.entry.grab_focus();
+    }
+
+    fn begin_clip_edit(&self, id: &str) {
+        let Some(entry) = self.clip_store().borrow().get(id).cloned() else {
+            return;
+        };
+        self.state.borrow_mut().editing = Some(Editing::ClipEdit(entry.id.clone()));
+        self.state.borrow_mut().mode = Mode::Clipboard;
+        self.entry.set_text(&entry.display_title());
+        self.detail_view.buffer().set_text(&entry.text);
+        self.set_status("Editing clipboard · Ctrl+S saves");
+        self.sync_chrome();
+        self.detail_view.grab_focus();
+    }
+
+    fn throw_confetti(&self) {
+        let width = self.window.width().max(1) as f64;
+        let height = self.window.height().max(1) as f64;
+        *self.confetti_bits.borrow_mut() = spawn_particles(width, height);
+        self.confetti.set_visible(true);
+        self.confetti.queue_draw();
+        let bits = self.confetti_bits.clone();
+        let area = self.confetti.clone();
+        let frames = Rc::new(RefCell::new(0u32));
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            let n = {
+                let mut n = frames.borrow_mut();
+                *n += 1;
+                *n
+            };
+            tick_particles(&mut bits.borrow_mut());
+            area.queue_draw();
+            if n >= 75 {
+                area.set_visible(false);
+                bits.borrow_mut().clear();
+                gtk4::glib::ControlFlow::Break
+            } else {
+                gtk4::glib::ControlFlow::Continue
+            }
+        });
     }
 
     fn run_ask(&self, prompt: &str) {
@@ -1489,7 +2050,7 @@ fn rebuild_rows(shell: &Shell) {
     {
         let mut st = shell.state.borrow_mut();
         st.rows.clear();
-        if st.editing_note.is_some() {
+        if st.editing.is_some() {
             return;
         }
         if st.results.is_empty() {
@@ -1567,7 +2128,7 @@ impl Shell {
         let generation = {
             let mut st = self.state.borrow_mut();
             st.extension_gen = st.extension_gen.wrapping_add(1);
-            st.editing_note = None;
+            st.editing = None;
             st.status.clear();
             st.mode = Mode::Extension;
             st.results.clear();
@@ -2177,7 +2738,9 @@ fn empty_state() -> (Box, Label, Label) {
 
     let chips = Box::new(Orientation::Horizontal, 8);
     chips.set_margin_top(8);
-    for hint in ["file", "?ask", "note", "win", "clip", "store", "set"] {
+    for hint in [
+        "file", "?ask", "note", "win", "clip", "link", "calc", "store", "set",
+    ] {
         let chip = Label::new(Some(hint));
         chip.add_css_class("chip");
         chips.append(&chip);
@@ -2207,7 +2770,7 @@ fn footer() -> Box {
     bar.append(&hint_pair("↑↓", "move"));
     bar.append(&hint_pair("pg", "jump"));
     bar.append(&hint_pair("↵", "open"));
-    bar.append(&hint_pair("⌘,", "settings"));
+    bar.append(&hint_pair("ctrl+k", "actions"));
     bar.append(&hint_pair("esc", "back"));
     bar
 }
@@ -2244,6 +2807,289 @@ fn kind_icon(kind: Kind) -> &'static str {
         Kind::Script => "utilities-terminal",
         Kind::Weather => "weather-few-clouds",
         Kind::Media => "audio-x-generic",
+    }
+}
+
+fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
+    let mut out = Vec::new();
+    let favs = favorites::Store::load();
+    let pinned = favs.is_pinned(&item.id);
+    out.push(PanelAction {
+        title: if pinned {
+            "Unpin favorite".into()
+        } else {
+            "Pin favorite".into()
+        },
+        keywords: "pin favorite star".into(),
+        kind: PanelKind::ToggleFavorite,
+    });
+    out.push(PanelAction {
+        title: "Set alias".into(),
+        keywords: "alias nickname".into(),
+        kind: PanelKind::SetAlias,
+    });
+    out.push(PanelAction {
+        title: "Copy title".into(),
+        keywords: "copy name".into(),
+        kind: PanelKind::Copy(item.title.clone()),
+    });
+
+    match item.kind {
+        Kind::File | Kind::Media => {
+            if let Some(path) = item_path(item) {
+                file_actions(&mut out, &path, true);
+            }
+        }
+        Kind::App => {
+            if let Action::LaunchDesktop { path } = &item.action {
+                out.push(PanelAction {
+                    title: "Launch".into(),
+                    keywords: "open start".into(),
+                    kind: PanelKind::Launch,
+                });
+                out.push(PanelAction {
+                    title: "Copy .desktop path".into(),
+                    keywords: "copy path desktop".into(),
+                    kind: PanelKind::CopyPath(path.clone()),
+                });
+                if let Some(parent) = path.parent() {
+                    out.push(PanelAction {
+                        title: "Show in files".into(),
+                        keywords: "folder reveal".into(),
+                        kind: PanelKind::ShowInFiles(parent.to_path_buf()),
+                    });
+                }
+            }
+        }
+        Kind::Clipboard => {
+            let id = clipboard::strip_prefix(&item.id).to_string();
+            let pinned_clip = st.catalog.clips.borrow().get(&id).is_some_and(|e| e.pinned);
+            let text = match &item.action {
+                Action::Paste(text) => text.clone(),
+                _ => String::new(),
+            };
+            out.push(PanelAction {
+                title: "Paste".into(),
+                keywords: "paste".into(),
+                kind: PanelKind::Paste(text.clone()),
+            });
+            out.push(PanelAction {
+                title: "Paste as plain text".into(),
+                keywords: "paste plain".into(),
+                kind: PanelKind::Paste(text.clone()),
+            });
+            if pinned_clip {
+                out.push(PanelAction {
+                    title: "Unpin clipboard entry".into(),
+                    keywords: "unpin clip".into(),
+                    kind: PanelKind::ClipUnpin(id.clone()),
+                });
+            } else {
+                out.push(PanelAction {
+                    title: "Pin clipboard entry".into(),
+                    keywords: "pin clip".into(),
+                    kind: PanelKind::ClipPin(id.clone()),
+                });
+            }
+            out.push(PanelAction {
+                title: "Rename".into(),
+                keywords: "rename label".into(),
+                kind: PanelKind::ClipRename(id.clone()),
+            });
+            out.push(PanelAction {
+                title: "Edit".into(),
+                keywords: "edit body".into(),
+                kind: PanelKind::ClipEdit(id),
+            });
+            out.push(PanelAction {
+                title: "Copy".into(),
+                keywords: "copy".into(),
+                kind: PanelKind::Copy(text),
+            });
+        }
+        Kind::Snippet => {
+            let keyword = item.id.strip_prefix("snip:").unwrap_or("").to_string();
+            out.push(PanelAction {
+                title: "Paste expanded".into(),
+                keywords: "paste snippet".into(),
+                kind: PanelKind::SnippetPaste(keyword.clone()),
+            });
+            out.push(PanelAction {
+                title: "Copy expanded".into(),
+                keywords: "copy snippet".into(),
+                kind: PanelKind::SnippetCopy(keyword),
+            });
+        }
+        Kind::Calc => {
+            if let Action::Copy(text) = &item.action {
+                out.push(PanelAction {
+                    title: "Copy result".into(),
+                    keywords: "copy calc".into(),
+                    kind: PanelKind::Copy(text.clone()),
+                });
+            }
+        }
+        Kind::Web => {
+            out.push(PanelAction {
+                title: "Open".into(),
+                keywords: "open url".into(),
+                kind: PanelKind::Open,
+            });
+        }
+        Kind::Command | Kind::Shell => {
+            out.push(PanelAction {
+                title: "Run".into(),
+                keywords: "launch open".into(),
+                kind: PanelKind::Launch,
+            });
+        }
+        Kind::Window => {
+            out.push(PanelAction {
+                title: "Focus".into(),
+                keywords: "open focus".into(),
+                kind: PanelKind::Open,
+            });
+        }
+        _ => {
+            if let Some(path) = item_path(item) {
+                file_actions(&mut out, &path, false);
+            }
+        }
+    }
+    out
+}
+
+fn file_actions(out: &mut Vec<PanelAction>, path: &Path, include_open: bool) {
+    out.push(PanelAction {
+        title: "Copy path".into(),
+        keywords: "copy path".into(),
+        kind: PanelKind::CopyPath(path.to_path_buf()),
+    });
+    if include_open {
+        out.push(PanelAction {
+            title: "Open".into(),
+            keywords: "open".into(),
+            kind: PanelKind::Open,
+        });
+    }
+    for app in recommended_apps(path) {
+        let name = app.name().to_string();
+        out.push(PanelAction {
+            title: format!("Open with {name}"),
+            keywords: format!("open with {name}"),
+            kind: PanelKind::OpenWith {
+                app,
+                path: path.to_path_buf(),
+            },
+        });
+    }
+    let reveal = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    out.push(PanelAction {
+        title: "Show in files".into(),
+        keywords: "folder reveal files".into(),
+        kind: PanelKind::ShowInFiles(reveal),
+    });
+}
+
+fn recommended_apps(path: &Path) -> Vec<gtk4::gio::AppInfo> {
+    let (ctype, _) = gtk4::gio::content_type_guess(Some(path), None);
+    gtk4::gio::AppInfo::recommended_for_type(ctype.as_str())
+        .into_iter()
+        .take(4)
+        .collect()
+}
+
+fn item_path(item: &Item) -> Option<PathBuf> {
+    match &item.action {
+        Action::OpenPath(path)
+        | Action::PlayMedia { path }
+        | Action::LaunchDesktop { path }
+        | Action::RunScript { path } => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn alias_typed(query: &str) -> Option<String> {
+    let q = query.trim();
+    let rest = q
+        .strip_prefix("alias:")
+        .or_else(|| {
+            let lower = q.to_ascii_lowercase();
+            if lower.starts_with("alias ") {
+                Some(&q[6..])
+            } else {
+                None
+            }
+        })?
+        .trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+fn calc_expr(subtitle: &str) -> &str {
+    subtitle
+        .split("  ·  ")
+        .next()
+        .unwrap_or(subtitle)
+        .split("  →  ")
+        .next()
+        .unwrap_or(subtitle)
+        .trim()
+}
+
+fn buffer_text(view: &TextView) -> String {
+    let buffer = view.buffer();
+    let start = buffer.start_iter();
+    let end = buffer.end_iter();
+    buffer.text(&start, &end, false).to_string()
+}
+
+fn spawn_particles(width: f64, height: f64) -> Vec<Particle> {
+    let mut seed = width.to_bits() ^ height.to_bits() ^ 0xC0FFEE;
+    let mut out = Vec::with_capacity(80);
+    let colors = [
+        (1.0, 0.353, 0.122),
+        (0.965, 0.945, 0.918),
+        (1.0, 0.824, 0.690),
+        (1.0, 0.706, 0.541),
+    ];
+    for i in 0..80 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let rnd = |s: &mut u64| {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (*s >> 33) as f64 / (u32::MAX as f64)
+        };
+        let color = colors[i % colors.len()];
+        out.push(Particle {
+            x: width * 0.5 + (rnd(&mut seed) - 0.5) * width * 0.4,
+            y: height * 0.28 + rnd(&mut seed) * 24.0,
+            vx: (rnd(&mut seed) - 0.5) * 14.0,
+            vy: rnd(&mut seed) * -7.0 - 2.0,
+            life: 1.0,
+            size: 3.0 + rnd(&mut seed) * 5.0,
+            r: color.0,
+            g: color.1,
+            b: color.2,
+        });
+    }
+    out
+}
+
+fn tick_particles(bits: &mut [Particle]) {
+    for p in bits.iter_mut() {
+        p.vy += 0.28;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 0.014;
     }
 }
 

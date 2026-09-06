@@ -59,6 +59,8 @@ with the release ID `dev.flint.launcher` so the centered floating rule still app
 | `voice` | Dictation | `--voice` |
 | `set` | Settings | `--settings` |
 | `store` | Store | `--store` |
+| `link` / `links` | Quicklinks | type `+name url` to save |
+| `calc` / `=` | Calculator + history | dates, percents, math |
 
 Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to create one. Prefix `>` to run a command, `$` to run it in a terminal.
 
@@ -75,13 +77,19 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
 - Calculator, unit conversion (`10 km to mi`, `32f`), hex colors (`#ff5a1f`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
+- Date and percent math too: `today + 7d`, `100 days from now`, `days until 2026-12-25`, `20% of 80`, `20% off 80`, `80 + 20%`. Type `calc` or `=` for recent answers (not dumped on an empty root query).
+- Ctrl+K opens an action panel on the selected result (pin favorite, set alias, copy path, paste, open with). Ctrl+? still opens Ask AI. Ctrl+F files, Ctrl+N notes, Ctrl+, settings stay.
+- Snippets expand `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, and strip `{cursor}` on paste.
+- Quicklinks (`link`) open URLs, folders, or files. `{argument}` / `{Query}` is the rest of the query after the keyword. `+gh https://github.com/search?q={argument}` saves one. Defaults: Downloads, Documents, GitHub search.
+- Aliases: in the action panel, type a nickname then run **Set alias**. If the filter is empty, Flint puts `alias:` in the search box — finish the name and Enter. Aliases boost root ranking and match in the haystack.
+- Pin favorites from the action panel; they float to the top of an empty root list.
 - Result caps live in Settings (`max-results`) and `~/.config/flint/config.json` under `general.max_results` and `files.max_results`. Extra folders go in `files.search_roots`.
 
 ## Honest status
 
 | Works | Not 1.0 |
 | --- | --- |
-| Daemon hide/toggle, apps, calc, clipboard, notes, snippets, settings, store browse | Extensions: `List`, `Detail`, actions, navigation, toasts, storage — no `Form`, `Grid` layout, menu-bar, or extension OAuth yet |
+| Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, settings, store browse | Extensions: `List`, `Detail`, actions, navigation, toasts, storage — no `Form`, `Grid` layout, menu-bar, or extension OAuth yet |
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
@@ -149,8 +157,12 @@ See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
 - Auth metadata or credential fallback: `~/.config/flint/auth.json`
 - API-key fallback (when no Secret Service is available): `~/.config/flint/api-keys.json`
 - Snippets: `~/.config/flint/snippets.json`
+- Aliases: `~/.config/flint/aliases.json`
+- Quicklinks: `~/.config/flint/quicklinks.json`
 - Notes: `~/.local/share/flint/notes.json`
 - Clipboard: `~/.local/share/flint/clipboard.json`
+- Favorites: `~/.local/share/flint/favorites.json`
+- Calc history: `~/.local/share/flint/calc-history.json`
 - Extension runtime: `~/.local/share/flint/runtime/` · installed extensions: `~/.local/share/flint/store/vicinae/<name>/` · their storage: `~/.local/share/flint/extensions/<name>/`
 
 Existing Rayblast files are copied over on first launch. Stale Rayblast defaults (OpenAI provider + Ollama endpoint, “You are Rayblast”, `voice.engine: voxtype`) are rewritten to Flint defaults.

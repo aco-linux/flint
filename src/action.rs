@@ -66,7 +66,9 @@ pub fn run(action: &Action) {
         | Action::SignOut
         | Action::RefreshModels
         | Action::LaunchExtension { .. }
-        | Action::Extension { .. } => {}
+        | Action::Extension { .. }
+        | Action::SaveQuicklink { .. }
+        | Action::Confetti => {}
     }
 }
 
@@ -214,7 +216,7 @@ fn which(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_safe_uri(uri: &str) -> bool {
+pub(crate) fn is_safe_uri(uri: &str) -> bool {
     let uri = uri.trim();
     if uri.is_empty() || uri.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return false;

@@ -117,6 +117,11 @@ pub enum Action {
         actions: Vec<ExtAction>,
         detail: String,
     },
+    Confetti,
+    SaveQuicklink {
+        name: String,
+        target: String,
+    },
 }
 
 /// Callback identity for an action rendered by a running extension.

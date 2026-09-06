@@ -10,6 +10,8 @@ pub enum Mode {
     Voice,
     Settings,
     Store,
+    Quicklink,
+    Calc,
     /// A running extension owns the list. Never parsed from text.
     Extension,
 }
@@ -64,6 +66,18 @@ impl Mode {
         if let Some(rest) = strip_kw(q, &["store ", "extensions ", "ext "]) {
             return (Mode::Store, rest);
         }
+        if let Some(rest) = strip_kw(q, &["link ", "links "]) {
+            return (Mode::Quicklink, rest);
+        }
+        if q == "=" {
+            return (Mode::Calc, String::new());
+        }
+        if let Some(rest) = q.strip_prefix('=') {
+            return (Mode::Calc, rest.trim_start().to_string());
+        }
+        if let Some(rest) = strip_kw(q, &["calc "]) {
+            return (Mode::Calc, rest);
+        }
         (Mode::Root, q.to_string())
     }
 
@@ -79,6 +93,8 @@ impl Mode {
             Mode::Voice => Some("VOICE"),
             Mode::Settings => Some("SETTINGS"),
             Mode::Store => Some("STORE"),
+            Mode::Quicklink => Some("LINKS"),
+            Mode::Calc => Some("CALC"),
             Mode::Extension => Some("EXT"),
         }
     }
@@ -95,6 +111,8 @@ impl Mode {
             Mode::Voice => "Enter starts dictation. Speak, then Enter again.",
             Mode::Settings => "Search settings…",
             Mode::Store => "Browse extensions, MCP servers, Script Commands",
+            Mode::Quicklink => "Quicklinks — type +name url to create",
+            Mode::Calc => "Calculation history — type math, dates, or percents",
             Mode::Extension => "Search…",
         }
     }
@@ -111,6 +129,8 @@ impl Mode {
             Mode::Voice => "Ready when you are.",
             Mode::Settings => "No matching setting.",
             Mode::Store => "Store is empty.",
+            Mode::Quicklink => "No quicklinks yet.",
+            Mode::Calc => "No calculations yet.",
             Mode::Extension => "Nothing to show.",
         }
     }
@@ -127,6 +147,8 @@ impl Mode {
             Mode::Voice => "Enter starts. Speak. Enter again fills the search box.",
             Mode::Settings => "OAuth, local models, MCP servers, autostart.",
             Mode::Store => "Vicinae extensions, MCP servers, or Raycast Script Commands.",
+            Mode::Quicklink => "Type +gh https://github.com/search?q={argument} to save a link.",
+            Mode::Calc => "Try 20% of 80, today + 7d, or 2+2. History stays on this machine.",
             Mode::Extension => "Esc goes back.",
         }
     }
@@ -143,6 +165,8 @@ impl Mode {
             Mode::Voice => "voice ",
             Mode::Settings => "set ",
             Mode::Store => "store ",
+            Mode::Quicklink => "link ",
+            Mode::Calc => "calc ",
             Mode::Extension => "",
         }
     }
@@ -187,5 +211,13 @@ mod tests {
         assert_eq!(Mode::parse("f invoices").0, Mode::Files);
         assert_eq!(Mode::parse("firefox").0, Mode::Root);
         assert_eq!(Mode::parse("find notes.md").0, Mode::Files);
+        assert_eq!(Mode::parse("link gh"), (Mode::Quicklink, "gh".into()));
+        assert_eq!(Mode::parse("links"), (Mode::Quicklink, "".into()));
+        assert_eq!(Mode::parse("linkedin").0, Mode::Root);
+        assert_eq!(Mode::parse("calc"), (Mode::Calc, "".into()));
+        assert_eq!(Mode::parse("calc 2+2"), (Mode::Calc, "2+2".into()));
+        assert_eq!(Mode::parse("="), (Mode::Calc, "".into()));
+        assert_eq!(Mode::parse("= 20% of 80"), (Mode::Calc, "20% of 80".into()));
+        assert_eq!(Mode::parse("calculator").0, Mode::Root);
     }
 }

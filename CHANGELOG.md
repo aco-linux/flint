@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — command-bar parity (Wave 1)
+
+- Clipboard entries can be pinned, renamed, and edited; pinned clips survive the 80-item trim; paste-as-plain is in the action panel
+- Aliases (nicknames) for any result: Ctrl+K → Set alias uses the action-filter text, or prompts with `alias:`
+- Favorites pin to the top of an empty root list and get a ranking boost
+- Snippet placeholders: `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, `{cursor}`
+- Date and percent answers next to the existing calculator (`today + 7d`, `days until YYYY-MM-DD`, `20% of 80`, `20% off 80`, `80 + 20%`)
+- Calculation history (`calc` / `=`) stored privately; empty root does not dump it
+- Quicklinks (`link`): URL, folder, or file targets with `{argument}` / `{Query}`; `+name url` creates; javascript: rejected
+- Ctrl+K action panel (copy path, open with, show in files, pin, paste, set alias). Ctrl+? is Ask AI
+- Throw confetti command (accent + cream overlay, ~1.2s)
+
 ## Unreleased — launcher map
 
 - Stop the open animation that tiles Flint large then shrinks it: Hyprland now floats, sizes, and centers on the first frame (`no_anim`), and Flint no longer re-dispatches float/resize after map

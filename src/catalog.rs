@@ -5,10 +5,13 @@ use std::rc::Rc;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+use crate::alias;
 use crate::auth;
+use crate::calc;
 use crate::clipboard::{self, Store as ClipStore};
 use crate::config::Settings;
 use crate::desktop;
+use crate::favorites;
 use crate::files;
 use crate::hypr;
 use crate::intent::{self, IntentKind};
@@ -16,6 +19,7 @@ use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
+use crate::quicklinks;
 use crate::smart;
 use crate::snippets;
 use crate::store;
@@ -32,7 +36,7 @@ pub struct Catalog {
     windows: RefCell<Vec<Item>>,
     matcher: RefCell<Matcher>,
     pub(crate) usage: usage::Map,
-    clips: Rc<RefCell<ClipStore>>,
+    pub(crate) clips: Rc<RefCell<ClipStore>>,
     pub settings: Rc<RefCell<Settings>>,
 }
 
@@ -143,6 +147,8 @@ impl Catalog {
             Mode::Voice => self.search_voice(&rest),
             Mode::Settings => self.search_settings(&rest),
             Mode::Store => self.search_store(&rest),
+            Mode::Quicklink => self.search_quicklinks(&rest),
+            Mode::Calc => self.search_calc(&rest),
             Mode::Extension => self.search_root(&rest),
         };
         (mode, results)
@@ -161,7 +167,7 @@ impl Catalog {
             return self.empty_state();
         }
 
-        if let Some(item) = calculator_item(query) {
+        if let Some(item) = calc::answer_item(query) {
             results.push(Scored::new(item, 100_000));
         }
         for item in smart::instant_items(query) {
@@ -226,6 +232,12 @@ impl Catalog {
         let installed = self.installed.borrow();
         let mut matcher = self.matcher.borrow_mut();
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let aliases = alias::Store::load();
+        let favs = favorites::Store::load();
+        let qlinks: Vec<Item> = quicklinks::load()
+            .iter()
+            .map(|link| link.to_item(&link.argument_for(query)))
+            .collect();
 
         let mut pool: Vec<&Item> = Vec::new();
         pool.extend(self.apps.iter());
@@ -233,16 +245,16 @@ impl Catalog {
         pool.extend(self.extensions.iter());
         pool.extend(installed.iter());
         pool.extend(windows.iter());
+        pool.extend(qlinks.iter());
 
         let mut ranked: Vec<(u32, &Item)> = Vec::new();
         for item in pool {
-            let glued;
-            let haystack = if let Some(cached) = hay.get(&item.id) {
-                cached.as_str()
-            } else {
-                glued = item.haystack();
-                glued.as_str()
-            };
+            let glued = hay_with_alias(
+                item,
+                hay.get(&item.id).map(String::as_str),
+                aliases.get(&item.id),
+            );
+            let haystack = glued.as_str();
             let input = RankInput {
                 query,
                 item,
@@ -250,6 +262,8 @@ impl Catalog {
                 usage: &self.usage,
                 now,
                 file_heavy,
+                alias: aliases.get(&item.id),
+                favorite: favs.is_pinned(&item.id),
             };
             if let Some(score) = rank(&mut matcher, &pattern, input) {
                 ranked.push((score, item));
@@ -263,6 +277,8 @@ impl Catalog {
                     usage: &self.usage,
                     now,
                     file_heavy,
+                    alias: aliases.get(&item.id),
+                    favorite: favs.is_pinned(&item.id),
                 },
             ) {
                 ranked.push((score, item));
@@ -284,6 +300,8 @@ impl Catalog {
                         usage: &self.usage,
                         now,
                         file_heavy,
+                        alias: aliases.get(&item.id),
+                        favorite: favs.is_pinned(&item.id),
                     },
                 )
                 .unwrap_or(8_000);
@@ -767,9 +785,102 @@ impl Catalog {
         self.score_pool(&items, query, 36)
     }
 
+    fn search_quicklinks(&self, query: &str) -> Vec<Scored> {
+        let q = query.trim();
+        let mut results = Vec::new();
+        if let Some((name, target)) = quicklinks::parse_create(q) {
+            let ok = quicklinks::is_safe_target(&target);
+            results.push(Scored::new(
+                Item {
+                    id: format!("link-save:{name}"),
+                    title: format!("Save quicklink “{name}”"),
+                    subtitle: if ok {
+                        target.clone()
+                    } else {
+                        "Rejected — http, https, file, or a filesystem path only".into()
+                    },
+                    keywords: name.clone(),
+                    kind: Kind::Web,
+                    icon: Icon::Name("document-save".into()),
+                    action: Action::SaveQuicklink { name, target },
+                },
+                100_000,
+            ));
+        }
+        let items: Vec<Item> = quicklinks::load()
+            .iter()
+            .map(|link| {
+                let rest = q.strip_prefix('+').unwrap_or(q).trim();
+                link.to_item(&link.argument_for(rest))
+            })
+            .collect();
+        let rest = q.strip_prefix('+').unwrap_or(q).trim();
+        results.extend(self.score_pool(&items, rest, 24));
+        finish(results)
+    }
+
+    fn search_calc(&self, query: &str) -> Vec<Scored> {
+        let q = query.trim();
+        let mut results = Vec::new();
+        if !q.is_empty() {
+            if let Some(item) = calc::answer_item(q) {
+                results.push(Scored::new(item, 100_000));
+            }
+            for item in smart::instant_items(q) {
+                results.push(Scored::new(item, 95_000));
+            }
+        }
+        let history = calc::History::load().items();
+        results.extend(self.score_pool(&history, q, 24));
+        finish(results)
+    }
+
+    pub(crate) fn lookup_item(&self, id: &str) -> Option<Item> {
+        if let Some(item) = self
+            .apps
+            .iter()
+            .chain(self.commands.iter())
+            .chain(self.extensions.iter())
+            .find(|item| item.id == id)
+        {
+            return Some(item.clone());
+        }
+        if let Some(item) = self.installed.borrow().iter().find(|item| item.id == id) {
+            return Some(item.clone());
+        }
+        if let Some(item) = self.windows.borrow().iter().find(|item| item.id == id) {
+            return Some(item.clone());
+        }
+        if let Some(clip) = id.strip_prefix("clip:") {
+            return self.clips.borrow().get(clip).map(|e| e.to_item());
+        }
+        if let Some(keyword) = id.strip_prefix("snip:") {
+            return snippets::load()
+                .into_iter()
+                .find(|s| s.keyword == keyword)
+                .map(|s| s.to_item());
+        }
+        if let Some(name) = id.strip_prefix("link:") {
+            return quicklinks::load()
+                .into_iter()
+                .find(|link| link.name == name)
+                .map(|link| link.to_item(""));
+        }
+        if let Some(note_id) = id.strip_prefix("note:") {
+            return notes::get(note_id).map(|n| n.to_item());
+        }
+        None
+    }
+
     fn empty_state(&self) -> Vec<Scored> {
         let mut out = Vec::new();
         let now = usage::now_secs();
+        let favs = favorites::Store::load();
+        for id in favs.all() {
+            if let Some(item) = self.lookup_item(id) {
+                out.push(Scored::new(item, 32_000));
+            }
+        }
 
         for item in &self.extensions {
             out.push(Scored::new(item.clone(), 20_000));
@@ -821,6 +932,8 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
         | Mode::Voice
         | Mode::Settings
         | Mode::Store
+        | Mode::Quicklink
+        | Mode::Calc
         | Mode::Extension => false,
     }
 }
@@ -994,6 +1107,24 @@ fn extension_items() -> Vec<Item> {
             icon: Icon::Name("preferences-system".into()),
             action: Action::EnterMode(Mode::Settings),
         },
+        Item {
+            id: "ext:links".into(),
+            title: "Quicklinks".into(),
+            subtitle: "URLs, folders, and {argument} shortcuts · type +name to save".into(),
+            keywords: "link links quicklink bookmark".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("web-browser".into()),
+            action: Action::EnterMode(Mode::Quicklink),
+        },
+        Item {
+            id: "ext:calc".into(),
+            title: "Calculator".into(),
+            subtitle: "Math, dates, percents, and recent answers".into(),
+            keywords: "calc calculator math percent date history".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("accessories-calculator".into()),
+            action: Action::EnterMode(Mode::Calc),
+        },
     ]
 }
 
@@ -1052,11 +1183,21 @@ fn score_pool(
     haystacks: &HashMap<String, String>,
 ) -> Vec<Scored> {
     let query = query.trim();
+    let aliases = alias::Store::load();
+    let favs = favorites::Store::load();
     if query.is_empty() {
         return items
             .iter()
             .enumerate()
-            .map(|(i, item)| Scored::new(item.clone(), 10_000u32.saturating_sub((i as u32) * 10)))
+            .map(|(i, item)| {
+                let boost = if favs.is_pinned(&item.id) { 8_000 } else { 0 };
+                Scored::new(
+                    item.clone(),
+                    10_000u32
+                        .saturating_sub((i as u32) * 10)
+                        .saturating_add(boost),
+                )
+            })
             .take(limit)
             .collect();
     }
@@ -1066,7 +1207,11 @@ fn score_pool(
     let now = usage::now_secs();
     let mut ranked: Vec<(u32, &Item)> = Vec::new();
     for item in items {
-        let owned = cached_or_glue(item, haystacks);
+        let owned = hay_with_alias(
+            item,
+            haystacks.get(&item.id).map(String::as_str),
+            aliases.get(&item.id),
+        );
         let input = RankInput {
             query,
             item,
@@ -1074,6 +1219,8 @@ fn score_pool(
             usage: usage_map,
             now,
             file_heavy: false,
+            alias: aliases.get(&item.id),
+            favorite: favs.is_pinned(&item.id),
         };
         if let Some(score) = rank(matcher, &pattern, input) {
             ranked.push((score, item));
@@ -1109,13 +1256,6 @@ fn finish_limited(mut results: Vec<Scored>, limit: usize) -> Vec<Scored> {
     results
 }
 
-fn cached_or_glue(item: &Item, cache: &HashMap<String, String>) -> String {
-    cache
-        .get(&item.id)
-        .cloned()
-        .unwrap_or_else(|| item.haystack())
-}
-
 #[derive(Clone, Copy)]
 struct RankInput<'a> {
     query: &'a str,
@@ -1124,6 +1264,8 @@ struct RankInput<'a> {
     usage: &'a usage::Map,
     now: u64,
     file_heavy: bool,
+    alias: Option<&'a str>,
+    favorite: bool,
 }
 
 fn rank_expansions(
@@ -1149,8 +1291,14 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
     buf.clear();
     let hay_score = pattern.score(Utf32Str::new(input.haystack, &mut buf), matcher);
     let typo = typo_score(input.query, input.item);
+    let q_lower = input.query.to_ascii_lowercase();
+    let alias_hit = input.alias.is_some_and(|alias| {
+        let a = alias.to_ascii_lowercase();
+        !q_lower.is_empty() && (a == q_lower || a.starts_with(&q_lower))
+    });
     let mut score = match hay_score {
         Some(value) => value,
+        None if alias_hit => 1,
         None => typo?,
     };
     if hay_score.is_some()
@@ -1182,6 +1330,17 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
         Kind::File => 30,
         Kind::Calc | Kind::Web | Kind::Shell => 10,
     });
+    if let Some(alias) = input.alias {
+        let a = alias.to_ascii_lowercase();
+        if !q_lower.is_empty() && a == q_lower {
+            score = score.saturating_add(50_000);
+        } else if !q_lower.is_empty() && a.starts_with(&q_lower) {
+            score = score.saturating_add(40_000);
+        }
+    }
+    if input.favorite {
+        score = score.saturating_add(8_000);
+    }
     Some(score)
 }
 
@@ -1224,6 +1383,8 @@ fn rank_file(
             usage: usage_map,
             now,
             file_heavy: true,
+            alias: None,
+            favorite: false,
         },
     )
     .unwrap_or(800);
@@ -1245,37 +1406,15 @@ fn rank_file(
     score
 }
 
-fn calculator_item(query: &str) -> Option<Item> {
-    let trimmed = query.trim();
-    let expr = trimmed.strip_prefix('=').unwrap_or(trimmed).trim();
-    if expr.is_empty() || expr.len() > 200 {
-        return None;
+fn hay_with_alias(item: &Item, cached: Option<&str>, alias: Option<&str>) -> String {
+    let mut hay = cached
+        .map(str::to_string)
+        .unwrap_or_else(|| item.haystack());
+    if let Some(alias) = alias.filter(|a| !a.is_empty()) {
+        hay.push(' ');
+        hay.push_str(alias);
     }
-    let forced = trimmed.starts_with('=');
-    if !forced && !looks_like_math(expr) {
-        return None;
-    }
-    let value = evalexpr::eval(expr).ok()?;
-    let rendered = value.to_string();
-    Some(Item {
-        id: format!("calc:{expr}"),
-        title: rendered.clone(),
-        subtitle: format!("{expr}  →  copy result"),
-        keywords: "calculator math".into(),
-        kind: Kind::Calc,
-        icon: Icon::Name("accessories-calculator".into()),
-        action: Action::Copy(rendered),
-    })
-}
-
-fn looks_like_math(expr: &str) -> bool {
-    let has_digit = expr.chars().any(|c| c.is_ascii_digit());
-    let has_op = expr.chars().any(|c| "+-*/%^()".contains(c))
-        || expr.contains("sqrt")
-        || expr.contains("sin")
-        || expr.contains("cos")
-        || expr.contains("pi");
-    has_digit && has_op
+    hay
 }
 
 fn looks_like_uri(query: &str) -> bool {
@@ -1400,6 +1539,15 @@ fn system_commands() -> Vec<Item> {
         Action::Spawn { program, .. } => program.contains('/') || which(program),
         _ => true,
     });
+    let mut confetti = cmd(
+        "confetti",
+        "Throw confetti",
+        "Celebrate a small win",
+        "face-smile",
+        Action::Confetti,
+    );
+    confetti.keywords = "party celebrate confetti".into();
+    items.push(confetti);
     items
 }
 
@@ -1430,14 +1578,14 @@ fn which(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_math, looks_like_uri};
+    use super::looks_like_uri;
     use crate::mode::Mode;
 
     #[test]
     fn math_detection() {
-        assert!(looks_like_math("2+2"));
-        assert!(looks_like_math("sqrt(9)"));
-        assert!(!looks_like_math("firefox"));
+        assert!(crate::calc::looks_like_math("2+2"));
+        assert!(crate::calc::looks_like_math("sqrt(9)"));
+        assert!(!crate::calc::looks_like_math("firefox"));
     }
 
     #[test]
@@ -1560,6 +1708,8 @@ mod tests {
                 usage: &usage,
                 now,
                 file_heavy: false,
+                alias: None,
+                favorite: false,
             },
         )
         .unwrap();
@@ -1573,6 +1723,8 @@ mod tests {
                 usage: &usage,
                 now,
                 file_heavy: false,
+                alias: None,
+                favorite: false,
             },
         )
         .unwrap();
@@ -1613,6 +1765,8 @@ mod tests {
                 usage: &usage,
                 now: 1_800_000_000,
                 file_heavy: false,
+                alias: None,
+                favorite: false,
             },
         );
         assert!(
