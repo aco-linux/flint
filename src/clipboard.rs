@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::item::{Action, Icon, Item, Kind};
 use crate::paths;
 
-const MAX_ENTRIES: usize = 80;
+pub(crate) const MAX_ENTRIES: usize = 80;
 const MAX_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,11 +254,17 @@ pub fn looks_secret(text: &str) -> bool {
         "akia",
         "asana_pat",
         "password=",
+        "password:",
         "passwd=",
         "secret=",
+        "secret:",
         "api_key=",
         "apikey=",
         "authorization: bearer ",
+        "bearer ",
+        "token:",
+        "\"token\":",
+        "'token':",
         "aws_secret_access_key",
         "private_key",
         "otpauth://",
@@ -266,31 +272,36 @@ pub fn looks_secret(text: &str) -> bool {
     if MARKERS.iter().any(|m| lower.contains(m)) {
         return true;
     }
-    if looks_openai_key(&lower) {
-        return true;
-    }
-    if trimmed.chars().any(char::is_whitespace) {
+    lower
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '{' | '}' | '[' | ']' | ':')
+        })
+        .any(|tok| {
+            looks_openai_key(tok)
+                || is_high_entropy_token(tok)
+                || (tok.starts_with("eyj") && tok.len() >= 16)
+        })
+}
+
+fn is_high_entropy_token(tok: &str) -> bool {
+    if tok.len() < 32 {
         return false;
     }
-    // High-entropy single tokens (API keys, JWTs, hex blobs).
-    if trimmed.len() >= 32
-        && trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '/' | '='))
+    if !tok
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '/' | '='))
     {
-        let classes = [
-            trimmed.chars().any(|c| c.is_ascii_lowercase()),
-            trimmed.chars().any(|c| c.is_ascii_uppercase()),
-            trimmed.chars().any(|c| c.is_ascii_digit()),
-        ]
-        .into_iter()
-        .filter(|b| *b)
-        .count();
-        if classes >= 2 {
-            return true;
-        }
+        return false;
     }
-    false
+    let classes = [
+        tok.chars().any(|c| c.is_ascii_lowercase()),
+        tok.chars().any(|c| c.is_ascii_uppercase()),
+        tok.chars().any(|c| c.is_ascii_digit()),
+    ]
+    .into_iter()
+    .filter(|b| *b)
+    .count();
+    classes >= 2
 }
 
 fn looks_openai_key(lower: &str) -> bool {
@@ -386,6 +397,9 @@ mod tests {
         assert!(!store.ingest("Authorization: Bearer abcdefghijklmnopqrstuvwxyz".into()));
         assert!(store.ingest("please ask-me later".into()));
         assert!(store.ingest("buy milk".into()));
+        assert!(!store.ingest("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaa.bbbb".into()));
+        assert!(!store.ingest("password: hunter2hunter2hunter2".into()));
+        assert!(!store.ingest(r#"{"token":"eyJhbGciOiJIUzI1NiJ9"}"#.into()));
         assert_eq!(store.entries.len(), 2);
     }
 

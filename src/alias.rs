@@ -59,6 +59,7 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     pub fn all(&self) -> &HashMap<String, String> {
         &self.map
     }

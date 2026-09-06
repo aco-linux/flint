@@ -133,9 +133,28 @@ pub fn create(name: &str, target: &str) -> Result<Link, &'static str> {
 }
 
 pub fn substitute(target: &str, argument: &str) -> String {
-    let mut out = target.replace("{argument}", argument);
+    let argument = if looks_like_uri(target) {
+        urlencoding_lite(argument)
+    } else {
+        argument.to_string()
+    };
+    let mut out = target.replace("{argument}", &argument);
     for needle in ["{Query}", "{query}", "{QUERY}"] {
-        out = out.replace(needle, argument);
+        out = out.replace(needle, &argument);
+    }
+    out
+}
+
+fn urlencoding_lite(input: &str) -> String {
+    let mut out = String::new();
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
     }
     out
 }
@@ -173,11 +192,12 @@ fn looks_like_uri(target: &str) -> bool {
 
 fn item_action(target: &str) -> (Kind, &'static str, Action) {
     if looks_like_uri(target) {
-        (
-            Kind::Web,
-            "web-browser",
-            Action::OpenUri(target.to_string()),
-        )
+        let action = if action::is_safe_uri(target) {
+            Action::OpenUri(target.to_string())
+        } else {
+            Action::Copy(target.to_string())
+        };
+        (Kind::Web, "web-browser", action)
     } else {
         (
             Kind::File,
@@ -238,10 +258,9 @@ mod tests {
     #[test]
     fn argument_substitution() {
         let gh = link("gh", "https://github.com/search?q={argument}");
-        assert_eq!(
-            substitute(&gh.target, "rust gtk"),
-            "https://github.com/search?q=rust gtk"
-        );
+        let resolved = substitute(&gh.target, "rust gtk");
+        assert_eq!(resolved, "https://github.com/search?q=rust+gtk");
+        assert!(crate::action::is_safe_uri(&resolved));
         assert_eq!(gh.argument_for("gh rust"), "rust");
         assert_eq!(gh.argument_for("gh"), "");
         let q = link("q", "https://example.com?q={Query}");

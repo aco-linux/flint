@@ -167,6 +167,12 @@ impl Catalog {
             return self.empty_state();
         }
 
+        if let Some(id) = alias::Store::load().lookup(query)
+            && let Some(item) = self.lookup_item(id)
+        {
+            results.push(Scored::new(item, 120_000));
+        }
+
         if let Some(item) = calc::answer_item(query) {
             results.push(Scored::new(item, 100_000));
         }
@@ -393,7 +399,11 @@ impl Catalog {
             .iter()
             .map(|e| e.to_item())
             .collect();
-        self.score_pool(&items, query, 18)
+        let limit = clipboard::MAX_ENTRIES.max(items.len());
+        if query.trim().is_empty() {
+            return items.into_iter().map(|item| Scored::new(item, 1)).collect();
+        }
+        self.score_pool(&items, query, limit)
     }
 
     fn search_snippets(&self, query: &str) -> Vec<Scored> {
@@ -403,9 +413,13 @@ impl Catalog {
         if let Some(keyword) = q.strip_prefix('+').map(str::trim)
             && !keyword.is_empty()
         {
-            let preview = clipboard::current_text()
-                .map(|t| t.chars().take(64).collect::<String>())
-                .unwrap_or_else(|| "clipboard is empty".into());
+            let preview = match clipboard::current_text() {
+                Some(text) if clipboard::looks_secret(&text) => {
+                    "clipboard looks like a secret — will not save".into()
+                }
+                Some(text) => text.chars().take(64).collect::<String>(),
+                None => "clipboard is empty".into(),
+            };
             results.push(Scored::new(
                 Item {
                     id: format!("snip-save:{keyword}"),
@@ -911,7 +925,8 @@ impl Catalog {
         }
 
         out.sort_by_key(|item| std::cmp::Reverse(item.score));
-        out.truncate(16);
+        let keep = favs.all().len().max(16);
+        out.truncate(keep);
         out
     }
 }

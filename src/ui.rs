@@ -39,6 +39,36 @@ use crate::voice::{self, Session as VoiceSession};
 
 const CSS: &str = include_str!("theme.css");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shortcut {
+    Settings,
+    Notes,
+    Files,
+    Actions,
+    Ask,
+    Save,
+}
+
+fn shortcut(key: Key, mods: ModifierType) -> Option<Shortcut> {
+    let key = key.to_lower();
+    let ctrl = mods.contains(ModifierType::CONTROL_MASK);
+    let shift = mods.contains(ModifierType::SHIFT_MASK);
+    let alt = mods.contains(ModifierType::ALT_MASK);
+    if !ctrl || alt {
+        return None;
+    }
+    match key {
+        Key::k if !shift => Some(Shortcut::Actions),
+        Key::comma if !shift => Some(Shortcut::Settings),
+        Key::n if !shift => Some(Shortcut::Notes),
+        Key::f if !shift => Some(Shortcut::Files),
+        Key::s if !shift => Some(Shortcut::Save),
+        Key::question => Some(Shortcut::Ask),
+        Key::slash if shift => Some(Shortcut::Ask),
+        _ => None,
+    }
+}
+
 pub struct Shell {
     window: ApplicationWindow,
     entry: Entry,
@@ -881,32 +911,42 @@ impl Shell {
     }
 
     fn on_key(&self, key: Key, mods: ModifierType) -> Propagation {
-        let ctrl = mods.contains(ModifierType::CONTROL_MASK);
-        if ctrl && matches!(key, Key::comma) {
-            self.close_actions();
-            self.enter_mode(Mode::Settings);
-            Propagation::Stop
-        } else if ctrl && matches!(key, Key::n) {
-            self.close_actions();
-            self.enter_mode(Mode::Notes);
-            Propagation::Stop
-        } else if ctrl && matches!(key, Key::f) {
-            self.close_actions();
-            self.enter_mode(Mode::Files);
-            Propagation::Stop
-        } else if ctrl && matches!(key, Key::k) {
-            self.toggle_actions();
-            Propagation::Stop
-        } else if ctrl && matches!(key, Key::question) {
-            self.close_actions();
-            self.enter_mode(Mode::Ask);
-            Propagation::Stop
-        } else if ctrl && matches!(key, Key::s) && self.state.borrow().editing.is_some() {
-            self.commit_editing();
-            self.set_status("Saved");
-            Propagation::Stop
-        } else {
-            match key {
+        match shortcut(key, mods) {
+            Some(Shortcut::Settings) => {
+                self.close_actions();
+                self.enter_mode(Mode::Settings);
+                Propagation::Stop
+            }
+            Some(Shortcut::Notes) => {
+                self.close_actions();
+                self.enter_mode(Mode::Notes);
+                Propagation::Stop
+            }
+            Some(Shortcut::Files) => {
+                self.close_actions();
+                self.enter_mode(Mode::Files);
+                Propagation::Stop
+            }
+            Some(Shortcut::Actions) => {
+                if self.state.borrow().editing.is_some() {
+                    Propagation::Proceed
+                } else {
+                    self.toggle_actions();
+                    Propagation::Stop
+                }
+            }
+            Some(Shortcut::Ask) => {
+                self.close_actions();
+                self.enter_mode(Mode::Ask);
+                Propagation::Stop
+            }
+            Some(Shortcut::Save) if self.state.borrow().editing.is_some() => {
+                self.commit_editing();
+                self.set_status("Saved");
+                Propagation::Stop
+            }
+            Some(Shortcut::Save) => Propagation::Proceed,
+            None => match key {
                 Key::Escape => {
                     if self.state.borrow().actions_open {
                         self.close_actions();
@@ -1003,7 +1043,7 @@ impl Shell {
                         Propagation::Stop
                     }
                 }
-                Key::BackSpace if ctrl => {
+                Key::BackSpace if mods.contains(ModifierType::CONTROL_MASK) => {
                     if self.state.borrow().mode != Mode::Root {
                         self.enter_mode(Mode::Root);
                         Propagation::Stop
@@ -1012,7 +1052,7 @@ impl Shell {
                     }
                 }
                 _ => Propagation::Proceed,
-            }
+            },
         }
     }
 
@@ -1058,9 +1098,15 @@ impl Shell {
         match item.action {
             Action::EnterMode(mode) => self.enter_mode(mode),
             Action::SaveSnippet { keyword } => {
-                if let Some(text) = clipboard::current_text() {
-                    snippets::upsert(&keyword, &text);
-                    self.set_status(format!("Saved snippet {keyword}"));
+                match clipboard::current_text() {
+                    Some(text) if clipboard::looks_secret(&text) => {
+                        self.set_status("Clipboard looks like a secret — not saved");
+                    }
+                    Some(text) => {
+                        snippets::upsert(&keyword, &text);
+                        self.set_status(format!("Saved snippet {keyword}"));
+                    }
+                    None => self.set_status("Clipboard is empty"),
                 }
                 self.enter_mode(Mode::Snippets);
             }
@@ -3107,9 +3153,29 @@ fn load_css() {
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_live_thumb, thumb_rows_in_view, unique_thumb_paths};
+    use super::{Shortcut, for_each_live_thumb, shortcut, thumb_rows_in_view, unique_thumb_paths};
     use crate::files::Cancel;
+    use gtk4::gdk::{Key, ModifierType};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn ctrl_k_is_actions_even_with_caps() {
+        let ctrl = ModifierType::CONTROL_MASK;
+        assert_eq!(shortcut(Key::k, ctrl), Some(Shortcut::Actions));
+        assert_eq!(shortcut(Key::K, ctrl), Some(Shortcut::Actions));
+        assert_eq!(shortcut(Key::k, ctrl | ModifierType::SHIFT_MASK), None);
+        assert_eq!(shortcut(Key::question, ctrl), Some(Shortcut::Ask));
+        assert_eq!(
+            shortcut(Key::slash, ctrl | ModifierType::SHIFT_MASK),
+            Some(Shortcut::Ask)
+        );
+        assert_eq!(
+            shortcut(Key::comma, ctrl | ModifierType::SHIFT_MASK),
+            None,
+            "AZERTY Ctrl+Shift+comma must not steal Settings"
+        );
+        assert_eq!(shortcut(Key::comma, ctrl), Some(Shortcut::Settings));
+    }
 
     #[test]
     fn visible_thumbs_are_viewport_plus_selected_not_the_full_list() {
