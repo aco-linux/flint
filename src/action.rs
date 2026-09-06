@@ -64,7 +64,9 @@ pub fn run(action: &Action) {
         | Action::UseModel { .. }
         | Action::SignIn { .. }
         | Action::SignOut
-        | Action::RefreshModels => {}
+        | Action::RefreshModels
+        | Action::LaunchExtension { .. }
+        | Action::Extension { .. } => {}
     }
 }
 

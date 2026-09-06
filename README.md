@@ -9,9 +9,10 @@ Flint 0.4 is a public, local-first release. It includes the launcher and product
 Flint stays resident: the first launch keeps a daemon so clipboard history, notes, dictation, and Ask AI stay warm.
 
 Flint opens as a normal desktop window. Under Hyprland it floats centered at
-980×720, still resizable, with a title bar; closing the window hides it while
-the resident process remains warm. Copy [`share/hyprland.conf`](share/hyprland.conf)
-for the compositor rules, or let Flint dispatch float/center/size at map time.
+980×720 on the first frame (`no_anim` so it does not tile large then shrink),
+still resizable, with a title bar; closing the window hides it while the
+resident process remains warm. Copy [`share/hyprland.conf`](share/hyprland.conf)
+for the compositor rules, or let Flint install the same float rule at daemon start.
 
 ## Install
 
@@ -80,7 +81,8 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
 | Works | Not 1.0 |
 | --- | --- |
-| Daemon hide/toggle, apps, calc, clipboard, notes, snippets, settings, store browse | No JS extension host |
+| Daemon hide/toggle, apps, calc, clipboard, notes, snippets, settings, store browse | Extensions: `List`, `Detail`, actions, navigation, toasts, storage — no `Form`, `Grid` layout, menu-bar, or extension OAuth yet |
+| Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
 | PKCE OAuth + loopback `127.0.0.1` + refresh tokens | MCP is a prompt primer; the model cannot run tools. MCP spawn is **off by default** |
@@ -113,9 +115,20 @@ Enter starts an in-app recording (`pw-record`). Enter again transcribes with vox
 
 Raycast’s App Store is proprietary and is not connected. Flint’s store:
 
-- Vicinae extensions from [`vicinaehq/extensions`](https://github.com/vicinaehq/extensions) (cloned onto disk; they do not run inside Flint)
+- Vicinae extensions from [`vicinaehq/extensions`](https://github.com/vicinaehq/extensions) — installed commands show up in root search and run in Flint when you opt in
 - MCP servers (filesystem, git, fetch, memory) — listed for the model as a primer, only if you enable MCP in Settings
 - Sync of the public [`raycast/script-commands`](https://github.com/raycast/script-commands) repo — running them requires the Settings toggle
+
+## Extensions
+
+Flint runs Vicinae and Raycast-style extensions as one Node process per command. The host (`share/runtime/flint-host.js`) loads real `react` 19 and `@vicinae/api`, drives them with a small `react-reconciler`, and streams the host-element tree to Flint as JSON. Flint paints that in its normal result list.
+
+- Install from the Store, then enable **Run installed extensions** in Settings. Commands appear in root search under the extension's name.
+- First launch runs `npm install` once into `~/.local/share/flint/runtime/` (pinned `react`, `react-reconciler`, `@vicinae/api`, `esbuild`) and bundles the command with `esbuild` when sources change. `node` and `npm` must be on `PATH`.
+- Enter runs the item's first action, Shift+Enter the second. Esc pops a pushed view, then leaves the extension. Hiding the window keeps a running view-command alive.
+- Supported: `List` (sections, accessories, keywords, icons), `Detail`, `ActionPanel`, `useNavigation`, `showToast`, `showHUD`, `Clipboard`, `LocalStorage`, `Cache`, `getPreferenceValues` (manifest defaults), `open`, `runInTerminal`, `closeMainWindow`, `popToRoot`, no-view commands. `@raycast/api` imports are aliased to `@vicinae/api`.
+- Not yet: `Form`, `Grid` layout (grids render as lists), `MenuBarExtra`, search-bar dropdowns, extension OAuth, `getSelectedText`, command arguments, editing preferences in Settings, `confirmAlert` (cancels), file-search RPC.
+- Extension `console.log` output goes to Flint's stderr, tagged with the extension name. `LocalStorage` lives in `~/.local/share/flint/extensions/<name>/`.
 
 ## Privacy and safety
 
@@ -123,7 +136,7 @@ Raycast’s App Store is proprietary and is not connected. Flint’s store:
 - Clipboard history skips common secret patterns (API keys, tokens, PEM blocks)
 - Attaching clipboard to Ask AI redacts the same patterns
 - HTTPS AI / OAuth calls keep bearer tokens out of `ps` (curl `-K` config file, then deleted)
-- Unsigned script-commands and MCP process spawn are off until you turn them on
+- Unsigned script-commands, MCP process spawn, and installed extensions are off until you turn them on; extensions run as Node with your user's privileges
 - OAuth callback accepts only the expected HTTP/1.1 `GET /callback`, exact loopback Host/port, and constant-time state match
 - OAuth tokens are bound to the selected provider and API origin and are refreshed without putting secrets on process arguments
 
@@ -138,6 +151,7 @@ See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
 - Snippets: `~/.config/flint/snippets.json`
 - Notes: `~/.local/share/flint/notes.json`
 - Clipboard: `~/.local/share/flint/clipboard.json`
+- Extension runtime: `~/.local/share/flint/runtime/` · installed extensions: `~/.local/share/flint/store/vicinae/<name>/` · their storage: `~/.local/share/flint/extensions/<name>/`
 
 Existing Rayblast files are copied over on first launch. Stale Rayblast defaults (OpenAI provider + Ollama endpoint, “You are Rayblast”, `voice.engine: voxtype`) are rewritten to Flint defaults.
 

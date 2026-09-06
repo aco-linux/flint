@@ -10,6 +10,8 @@ pub enum Mode {
     Voice,
     Settings,
     Store,
+    /// A running extension owns the list. Never parsed from text.
+    Extension,
 }
 
 impl Mode {
@@ -77,6 +79,7 @@ impl Mode {
             Mode::Voice => Some("VOICE"),
             Mode::Settings => Some("SETTINGS"),
             Mode::Store => Some("STORE"),
+            Mode::Extension => Some("EXT"),
         }
     }
 
@@ -92,6 +95,7 @@ impl Mode {
             Mode::Voice => "Enter starts dictation. Speak, then Enter again.",
             Mode::Settings => "Search settings…",
             Mode::Store => "Browse extensions, MCP servers, Script Commands",
+            Mode::Extension => "Search…",
         }
     }
 
@@ -107,6 +111,7 @@ impl Mode {
             Mode::Voice => "Ready when you are.",
             Mode::Settings => "No matching setting.",
             Mode::Store => "Store is empty.",
+            Mode::Extension => "Nothing to show.",
         }
     }
 
@@ -122,6 +127,7 @@ impl Mode {
             Mode::Voice => "Enter starts. Speak. Enter again fills the search box.",
             Mode::Settings => "OAuth, local models, MCP servers, autostart.",
             Mode::Store => "Vicinae extensions, MCP servers, or Raycast Script Commands.",
+            Mode::Extension => "Esc goes back.",
         }
     }
 
@@ -137,6 +143,7 @@ impl Mode {
             Mode::Voice => "voice ",
             Mode::Settings => "set ",
             Mode::Store => "store ",
+            Mode::Extension => "",
         }
     }
 }

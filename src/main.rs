@@ -5,6 +5,7 @@ mod catalog;
 mod clipboard;
 mod config;
 mod desktop;
+mod extension;
 mod files;
 mod hypr;
 mod intent;

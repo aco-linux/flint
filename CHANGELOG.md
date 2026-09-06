@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## Unreleased — launcher map
+
+- Stop the open animation that tiles Flint large then shrinks it: Hyprland now floats, sizes, and centers on the first frame (`no_anim`), and Flint no longer re-dispatches float/resize after map
+
+- Opt-in Node host for installed Vicinae / Raycast-style extensions (`general.allow_extensions`, off by default). Each command is one Node process with real `react` 19 and `@vicinae/api`; List/Detail rows render in Flint's result list
+- Enter runs the first action, Shift+Enter the second; Esc pops a pushed view then leaves. Clipboard, open, terminal, LocalStorage, toasts, and no-view commands work. Confirm dialogs cancel until Flint has a real prompt
+- Runtime (`~/.local/share/flint/runtime/`) is installed with pinned `npm` packages on first launch; command sources are bundled with `esbuild`. Config is sent on stdin, not argv
+- Not yet: `Form`, Grid layout, menu-bar, extension OAuth, preference editing, selected-text, or file-search RPC
 
 ## 0.4.0 — floating window and media thumbs
 

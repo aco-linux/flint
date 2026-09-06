@@ -31,6 +31,10 @@ pub struct General {
     /// Off until the user opts in.
     #[serde(default)]
     pub allow_mcp: bool,
+    /// Installed Vicinae / Raycast extensions run as Node processes with your
+    /// user's privileges and no signature. Off until the user opts in.
+    #[serde(default)]
+    pub allow_extensions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +112,7 @@ impl Default for General {
             max_results: 48,
             allow_script_commands: false,
             allow_mcp: false,
+            allow_extensions: false,
         }
     }
 }
@@ -254,6 +259,15 @@ impl Settings {
                     "Unsigned script-commands ON — they run as sh/python3/node with no signature"
                 } else {
                     "Unsigned script-commands off"
+                }
+                .into()
+            }
+            "set:extensions" => {
+                self.general.allow_extensions = !self.general.allow_extensions;
+                if self.general.allow_extensions {
+                    "Extensions ON — installed Vicinae/Raycast extensions run as Node with no signature"
+                } else {
+                    "Extensions off"
                 }
                 .into()
             }
@@ -502,6 +516,7 @@ mod tests {
         assert!(s.general.autostart);
         assert!(!s.general.allow_script_commands);
         assert!(!s.general.allow_mcp);
+        assert!(!s.general.allow_extensions);
         assert_eq!(s.voice.engine, "in-app");
         assert!(s.files.include_in_root);
         assert!(s.files.system_wide);

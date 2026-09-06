@@ -20,6 +20,7 @@ use crate::ai;
 use crate::auth;
 use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
+use crate::extension;
 use crate::files;
 use crate::hypr;
 use crate::item::{Action, Icon, Item, Kind, Live};
@@ -64,6 +65,9 @@ struct State {
     visible: bool,
     status: String,
     editing_note: Option<String>,
+    /// A running extension command. While set, the list belongs to it.
+    extension: Option<extension::Session>,
+    extension_gen: u64,
     voice: VoiceSession,
     search_gen: u64,
     thumbs: HashMap<PathBuf, CachedThumb>,
@@ -274,6 +278,8 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             visible: false,
             status: String::new(),
             editing_note: None,
+            extension: None,
+            extension_gen: 0,
             voice: VoiceSession::new(),
             search_gen: 0,
             thumbs: HashMap::new(),
@@ -377,6 +383,8 @@ impl Shell {
     pub fn toggle(&self) {
         if self.state.borrow().visible {
             self.hide();
+        } else if self.state.borrow().extension.is_some() {
+            self.restore();
         } else {
             self.open(Mode::Root);
         }
@@ -384,19 +392,29 @@ impl Shell {
 
     pub fn open(&self, mode: Mode) {
         self.state.borrow_mut().visible = true;
-        self.window.present();
-        hypr::float_launcher();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), || {
-            hypr::float_launcher();
-            gtk4::glib::ControlFlow::Break
-        });
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(160), || {
-            hypr::float_launcher();
-            gtk4::glib::ControlFlow::Break
-        });
+        self.show_launcher();
         self.enter_mode(mode);
         self.entry.grab_focus();
         self.refresh();
+    }
+
+    fn restore(&self) {
+        self.state.borrow_mut().visible = true;
+        self.show_launcher();
+        self.entry.grab_focus();
+        if self.state.borrow().extension.is_some() {
+            self.refresh_extension();
+        } else {
+            self.refresh();
+        }
+    }
+
+    fn show_launcher(&self) {
+        hypr::float_launcher();
+        self.window
+            .set_default_size(crate::WINDOW_WIDTH, crate::WINDOW_HEIGHT);
+        self.window.unmaximize();
+        self.window.present();
     }
 
     pub fn hide(&self) {
@@ -413,6 +431,11 @@ impl Shell {
         let (generation, include_in_root) = {
             let mut st = self.state.borrow_mut();
             if st.editing_note.is_some() {
+                return;
+            }
+            if st.extension.is_some() {
+                drop(st);
+                self.refresh_extension();
                 return;
             }
             st.search_gen = st.search_gen.saturating_add(1);
@@ -739,6 +762,8 @@ impl Shell {
                     } else if self.state.borrow().voice.state() == voice::State::Listening {
                         self.state.borrow().voice.cancel();
                         self.set_status("Dictation cancelled");
+                    } else if self.state.borrow().extension.is_some() {
+                        self.extension_back();
                     } else if self.state.borrow().mode != Mode::Root {
                         self.enter_mode(Mode::Root);
                     } else {
@@ -781,6 +806,24 @@ impl Shell {
                             Propagation::Proceed
                         }
                     }
+                }
+                Key::Return | Key::KP_Enter
+                    if mods.contains(ModifierType::SHIFT_MASK)
+                        && self.state.borrow().extension.is_some() =>
+                {
+                    let actions = {
+                        let st = self.state.borrow();
+                        st.results
+                            .get(st.selected)
+                            .and_then(|row| match &row.item.action {
+                                Action::Extension { actions, .. } => Some(actions.clone()),
+                                _ => None,
+                            })
+                    };
+                    if let Some(actions) = actions {
+                        self.run_extension_action(&actions, 1);
+                    }
+                    Propagation::Stop
                 }
                 Key::Return | Key::KP_Enter => {
                     if self.state.borrow().editing_note.is_some() {
@@ -888,6 +931,8 @@ impl Shell {
                 self.refresh();
             }
             Action::RefreshModels => self.refresh_models(),
+            Action::LaunchExtension { dir, command } => self.launch_extension(dir, command),
+            Action::Extension { actions, .. } => self.run_extension_action(&actions, 0),
             Action::RunScript { path } => {
                 let allowed = self
                     .state
@@ -915,6 +960,9 @@ impl Shell {
 
     fn enter_mode(&self, mode: Mode) {
         self.commit_note();
+        if mode != Mode::Extension {
+            self.end_extension();
+        }
         self.state.borrow_mut().editing_note = None;
         self.state.borrow_mut().status.clear();
         self.entry.set_text(mode.prefix());
@@ -1179,6 +1227,7 @@ impl Shell {
             }
         };
         self.set_status(msg);
+        self.state.borrow().catalog.reload_installed();
         self.refresh();
     }
 
@@ -1492,8 +1541,469 @@ fn rebuild_rows(shell: &Shell) {
     }
 }
 
+impl Shell {
+    fn launch_extension(&self, dir: PathBuf, command: String) {
+        let allowed = self
+            .state
+            .borrow()
+            .catalog
+            .settings
+            .borrow()
+            .general
+            .allow_extensions;
+        if !allowed {
+            self.set_status(
+                "Extensions are off. Enable “Run installed extensions” in Settings first.",
+            );
+            return;
+        }
+        self.end_extension();
+        let launch = extension::Launch {
+            dir,
+            command,
+            arguments: HashMap::new(),
+        };
+        let session = extension::Session::start(launch);
+        let generation = {
+            let mut st = self.state.borrow_mut();
+            st.extension_gen = st.extension_gen.wrapping_add(1);
+            st.editing_note = None;
+            st.status.clear();
+            st.mode = Mode::Extension;
+            st.results.clear();
+            st.selected = 0;
+            st.extension = Some(session);
+            st.extension_gen
+        };
+        self.entry.set_text("");
+        self.entry.grab_focus();
+        self.set_status("Starting extension…");
+        self.sync_chrome();
+        rebuild_rows(self);
+        self.update_preview();
+
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(30), move || {
+            shell.pump_extension(generation)
+        });
+    }
+
+    fn pump_extension(&self, generation: u64) -> gtk4::glib::ControlFlow {
+        loop {
+            let msg = {
+                let st = self.state.borrow();
+                if st.extension_gen != generation {
+                    return gtk4::glib::ControlFlow::Break;
+                }
+                let Some(session) = &st.extension else {
+                    return gtk4::glib::ControlFlow::Break;
+                };
+                session.try_recv()
+            };
+            let Some(msg) = msg else {
+                return gtk4::glib::ControlFlow::Continue;
+            };
+            match msg {
+                extension::Msg::Status(text) => self.set_status(text),
+                extension::Msg::Ready => {
+                    let no_view = self
+                        .state
+                        .borrow()
+                        .extension
+                        .as_ref()
+                        .is_some_and(|s| s.no_view);
+                    if !no_view {
+                        self.set_status("");
+                    }
+                }
+                extension::Msg::Render(view) => {
+                    let new_list = {
+                        let mut st = self.state.borrow_mut();
+                        let Some(session) = st.extension.as_mut() else {
+                            return gtk4::glib::ControlFlow::Break;
+                        };
+                        let previous = session
+                            .view
+                            .as_ref()
+                            .and_then(|v| v.search_callback.clone());
+                        let changed = previous != view.search_callback;
+                        session.depth = view.depth;
+                        session.view = Some(view);
+                        if changed {
+                            session.last_search = None;
+                        }
+                        changed
+                    };
+                    if new_list && !self.entry.text().is_empty() {
+                        self.entry.set_text("");
+                    } else {
+                        self.refresh_extension();
+                    }
+                }
+                extension::Msg::Toast {
+                    title,
+                    message,
+                    style,
+                } => {
+                    let prefix = match style.as_str() {
+                        "Error" => "✕ ",
+                        "Dynamic" => "… ",
+                        _ => "✓ ",
+                    };
+                    let text = if message.is_empty() {
+                        format!("{prefix}{title}")
+                    } else {
+                        format!("{prefix}{title} — {message}")
+                    };
+                    self.set_status(text);
+                }
+                extension::Msg::Hud(title) => {
+                    self.set_status(title.clone());
+                    if !self.state.borrow().visible {
+                        let _ = std::process::Command::new("notify-send")
+                            .args(["Flint", &title])
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                    }
+                }
+                extension::Msg::SetSearchText(text) => {
+                    self.entry.set_text(&text);
+                    self.entry.set_position(-1);
+                }
+                extension::Msg::CloseWindow => {
+                    self.hide();
+                }
+                extension::Msg::PopToRoot => {
+                    self.enter_mode(Mode::Root);
+                    return gtk4::glib::ControlFlow::Break;
+                }
+                extension::Msg::Request { id, method, params } => {
+                    let result = self.serve_extension_request(&method, &params);
+                    if let Some(session) = &self.state.borrow().extension {
+                        session.respond(id, result);
+                    }
+                }
+                extension::Msg::Done => {
+                    let shell = self.clone();
+                    gtk4::glib::timeout_add_local(
+                        std::time::Duration::from_millis(900),
+                        move || {
+                            if shell.state.borrow().extension_gen == generation {
+                                shell.hide();
+                                shell.end_extension();
+                            }
+                            gtk4::glib::ControlFlow::Break
+                        },
+                    );
+                }
+                extension::Msg::Error(err) => {
+                    let has_view = self
+                        .state
+                        .borrow()
+                        .extension
+                        .as_ref()
+                        .is_some_and(|s| s.view.is_some());
+                    self.set_status(format!("Extension error: {err}"));
+                    if !has_view {
+                        self.state.borrow_mut().mode = Mode::Extension;
+                        self.sync_chrome();
+                    }
+                }
+                extension::Msg::Exited => {
+                    let (had_view, status) = {
+                        let st = self.state.borrow();
+                        (
+                            st.extension.as_ref().is_some_and(|s| s.view.is_some()),
+                            st.status.clone(),
+                        )
+                    };
+                    if !had_view && status.is_empty() {
+                        self.set_status("Extension exited");
+                    }
+                    if !had_view {
+                        self.state.borrow_mut().extension = None;
+                        self.state.borrow_mut().mode = Mode::Root;
+                        let keep = self.state.borrow().status.clone();
+                        self.refresh();
+                        self.set_status(keep);
+                    }
+                    return gtk4::glib::ControlFlow::Break;
+                }
+            }
+        }
+    }
+
+    fn refresh_extension(&self) {
+        let query = self.entry.text().to_string();
+        let previous_id = {
+            let st = self.state.borrow();
+            st.results.get(st.selected).map(|row| row.item.id.clone())
+        };
+        let view = {
+            let mut st = self.state.borrow_mut();
+            let Some(session) = st.extension.as_mut() else {
+                return;
+            };
+            session.search(&query);
+            session.view.clone()
+        };
+        let mut rows: Vec<Scored> = Vec::new();
+        if let Some(view) = &view {
+            let needle = query.trim().to_lowercase();
+            for (index, row) in view.rows.iter().enumerate() {
+                if view.local_filter && !needle.is_empty() {
+                    let hay = format!(
+                        "{} {} {} {}",
+                        row.title, row.subtitle, row.keywords, row.section
+                    )
+                    .to_lowercase();
+                    if !needle.split_whitespace().all(|w| hay.contains(w)) {
+                        continue;
+                    }
+                }
+                let subtitle = if row.section.is_empty() || row.subtitle.contains(&row.section) {
+                    row.subtitle.clone()
+                } else if row.subtitle.is_empty() {
+                    row.section.clone()
+                } else {
+                    format!("{}  ·  {}", row.section, row.subtitle)
+                };
+                let item = Item {
+                    id: row.id.clone(),
+                    title: row.title.clone(),
+                    subtitle,
+                    keywords: row.keywords.clone(),
+                    kind: Kind::Extension,
+                    icon: row.icon.clone(),
+                    action: Action::Extension {
+                        actions: row.actions.clone(),
+                        detail: row.detail.clone(),
+                    },
+                };
+                rows.push(Scored::new(item, 100_000u32.saturating_sub(index as u32)));
+            }
+        }
+        {
+            let mut st = self.state.borrow_mut();
+            st.mode = Mode::Extension;
+            st.selected = previous_id
+                .and_then(|id| rows.iter().position(|r| r.item.id == id))
+                .unwrap_or(0);
+            st.results = rows;
+        }
+        if let Some(notice) = view.as_ref().and_then(|v| v.notice.clone()) {
+            self.set_status(notice);
+        }
+        self.sync_chrome();
+        if let Some(view) = &view {
+            if !view.placeholder.is_empty() {
+                self.entry.set_placeholder_text(Some(&view.placeholder));
+            }
+            if !view.empty_title.is_empty() {
+                self.empty_title.set_text(&view.empty_title);
+                self.empty_sub.set_text(&view.empty_description);
+            }
+        }
+        rebuild_rows(self);
+        let row = {
+            let st = self.state.borrow();
+            st.rows.get(st.selected).cloned()
+        };
+        if let Some(row) = row {
+            scroll_row_into_view(&self.results_scroll, &self.results_host, &row);
+        }
+        self.update_preview();
+        self.request_visible_thumbs();
+    }
+
+    fn run_extension_action(&self, actions: &[crate::item::ExtAction], index: usize) {
+        let Some(action) = actions.get(index) else {
+            if index == 0 {
+                self.set_status("This item has no action");
+            }
+            return;
+        };
+        if let Some(session) = &self.state.borrow().extension {
+            session.invoke(action.node, "onAction", Vec::new());
+        }
+    }
+
+    fn extension_back(&self) {
+        let depth = self
+            .state
+            .borrow()
+            .extension
+            .as_ref()
+            .map(|s| s.depth)
+            .unwrap_or(1);
+        if depth > 1 {
+            if let Some(session) = &self.state.borrow().extension {
+                session.pop();
+            }
+        } else {
+            self.enter_mode(Mode::Root);
+        }
+    }
+
+    fn end_extension(&self) {
+        let session = self.state.borrow_mut().extension.take();
+        if session.is_some() {
+            let mut st = self.state.borrow_mut();
+            st.extension_gen = st.extension_gen.wrapping_add(1);
+            if st.mode == Mode::Extension {
+                st.mode = Mode::Root;
+            }
+        }
+        drop(session);
+    }
+
+    fn serve_extension_request(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use serde_json::{Value, json};
+        let text_of = |content: &Value| -> String {
+            content
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    content.get("urls").and_then(Value::as_array).map(|u| {
+                        u.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                })
+                .unwrap_or_default()
+        };
+        match method {
+            "clipboard.copy" => {
+                let text = text_of(params.get("content").unwrap_or(&Value::Null));
+                action::copy_text(&text);
+                if !text.is_empty() {
+                    self.set_status("Copied");
+                }
+                Ok(json!({}))
+            }
+            "clipboard.paste" => {
+                let text = text_of(params.get("content").unwrap_or(&Value::Null));
+                self.hide();
+                action::run(&Action::Paste(text));
+                Ok(json!({}))
+            }
+            "clipboard.read" => Ok(json!({"text": clipboard::current_text().unwrap_or_default()})),
+            "app.open" => {
+                let target = params
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if target.is_empty() {
+                    return Err("nothing to open".into());
+                }
+                let path = std::path::Path::new(&target);
+                if path.is_absolute() && path.exists() {
+                    action::run(&Action::OpenPath(path.to_path_buf()));
+                } else {
+                    action::run(&Action::OpenUri(target));
+                }
+                Ok(json!({}))
+            }
+            "app.runInTerminal" => {
+                let parts: Vec<String> = params
+                    .get("cmdline")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if parts.is_empty() {
+                    return Err("empty command".into());
+                }
+                let command = parts
+                    .iter()
+                    .map(|p| shell_quote(p))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.hide();
+                action::run(&Action::Shell {
+                    command,
+                    terminal: true,
+                });
+                Ok(json!({}))
+            }
+            "ui.confirmAlert" => {
+                self.set_status("Confirm dialogs are not supported yet — cancelled");
+                Ok(json!({"confirmed": false}))
+            }
+            other => Err(format!("{other} is not supported by Flint")),
+        }
+    }
+}
+
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@' | '%' | '+')
+        })
+    {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+fn extension_hint(state: &State) -> Option<String> {
+    let session = state.extension.as_ref()?;
+    let mut parts: Vec<String> = Vec::new();
+    let title = session
+        .view
+        .as_ref()
+        .filter(|v| !v.title.is_empty())
+        .map(|v| v.title.clone())
+        .unwrap_or_else(|| session.title.clone());
+    if !title.is_empty() {
+        parts.push(title);
+    }
+    if session.view.as_ref().is_some_and(|v| v.is_loading) {
+        parts.push("loading…".into());
+    }
+    if let Some(row) = state.results.get(state.selected)
+        && let Action::Extension { actions, .. } = &row.item.action
+    {
+        if let Some(primary) = actions.first() {
+            parts.push(format!("Enter · {}", primary.title));
+        }
+        if let Some(secondary) = actions.get(1) {
+            parts.push(format!("⇧Enter · {}", secondary.title));
+        }
+        if actions.len() > 2 {
+            parts.push(format!("+{} more", actions.len() - 2));
+        }
+    }
+    if session.depth > 1 {
+        parts.push("Esc · back".into());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("   "))
+    }
+}
+
 fn result_hint(state: &State) -> Option<String> {
     let n = state.results.len();
+    if state.mode == Mode::Extension {
+        return extension_hint(state);
+    }
     if n == 0 {
         return None;
     }

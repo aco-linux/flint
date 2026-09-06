@@ -125,6 +125,9 @@ pub fn for_item(item: &Item) -> Preview {
             }
         }
         _ => match &item.action {
+            Action::Extension { detail, .. } if !detail.is_empty() => {
+                Preview::Text(detail.chars().take(4000).collect())
+            }
             Action::OpenPath(path) | Action::PlayMedia { path } => for_path(path),
             Action::Copy(text) if text.chars().count() > 24 => {
                 Preview::Text(text.chars().take(800).collect())

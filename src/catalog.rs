@@ -26,6 +26,7 @@ pub struct Catalog {
     apps: Vec<Item>,
     commands: Vec<Item>,
     extensions: Vec<Item>,
+    installed: RefCell<Vec<Item>>,
     lexicon: Vec<String>,
     haystacks: RefCell<HashMap<String, String>>,
     windows: RefCell<Vec<Item>>,
@@ -64,9 +65,15 @@ impl Catalog {
         let apps = desktop::load_apps();
         let commands = system_commands();
         let extensions = extension_items();
+        let installed = crate::extension::command_items();
         let mut haystacks = HashMap::new();
         let mut lexicon = files::type_words();
-        for item in apps.iter().chain(commands.iter()).chain(extensions.iter()) {
+        for item in apps
+            .iter()
+            .chain(commands.iter())
+            .chain(extensions.iter())
+            .chain(installed.iter())
+        {
             haystacks.insert(item.id.clone(), item.haystack());
             lexicon.push(item.title.clone());
             for part in item
@@ -87,6 +94,7 @@ impl Catalog {
             apps,
             commands,
             extensions,
+            installed: RefCell::new(installed),
             lexicon,
             haystacks: RefCell::new(haystacks),
             windows: RefCell::new(windows),
@@ -95,6 +103,17 @@ impl Catalog {
             clips,
             settings,
         }
+    }
+
+    /// Re-scan installed extension commands after a store install.
+    pub fn reload_installed(&self) {
+        let installed = crate::extension::command_items();
+        let mut cache = self.haystacks.borrow_mut();
+        cache.retain(|id, _| !id.starts_with("vx:"));
+        for item in &installed {
+            cache.insert(item.id.clone(), item.haystack());
+        }
+        *self.installed.borrow_mut() = installed;
     }
 
     pub fn adopt_windows(&self, windows: Vec<Item>) {
@@ -124,6 +143,7 @@ impl Catalog {
             Mode::Voice => self.search_voice(&rest),
             Mode::Settings => self.search_settings(&rest),
             Mode::Store => self.search_store(&rest),
+            Mode::Extension => self.search_root(&rest),
         };
         (mode, results)
     }
@@ -203,6 +223,7 @@ impl Catalog {
         let now = usage::now_secs();
         let hay = self.haystacks.borrow();
         let windows = self.windows.borrow();
+        let installed = self.installed.borrow();
         let mut matcher = self.matcher.borrow_mut();
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
@@ -210,6 +231,7 @@ impl Catalog {
         pool.extend(self.apps.iter());
         pool.extend(self.commands.iter());
         pool.extend(self.extensions.iter());
+        pool.extend(installed.iter());
         pool.extend(windows.iter());
 
         let mut ranked: Vec<(u32, &Item)> = Vec::new();
@@ -522,6 +544,12 @@ impl Catalog {
                 "scripts raycast shell python",
             ),
             setting_toggle(
+                "extensions",
+                "Run installed extensions",
+                s.general.allow_extensions,
+                "extensions vicinae raycast node",
+            ),
+            setting_toggle(
                 "mcp",
                 "Allow MCP tool listing",
                 s.general.allow_mcp,
@@ -746,6 +774,9 @@ impl Catalog {
         for item in &self.extensions {
             out.push(Scored::new(item.clone(), 20_000));
         }
+        for item in self.installed.borrow().iter() {
+            out.push(Scored::new(item.clone(), 19_000));
+        }
 
         let mut apps: Vec<&Item> = self.apps.iter().collect();
         apps.sort_by(|a, b| {
@@ -789,7 +820,8 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
         | Mode::Ask
         | Mode::Voice
         | Mode::Settings
-        | Mode::Store => false,
+        | Mode::Store
+        | Mode::Extension => false,
     }
 }
 

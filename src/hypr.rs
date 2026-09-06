@@ -65,23 +65,11 @@ fn listen(on_change: impl Fn(Vec<Item>)) {
     }
 }
 
-/// Ask Hyprland to float, size, and center the launcher after it maps.
-/// Window rules in `share/hyprland.conf` do the same; this covers a live session
-/// that has not copied those rules yet.
+/// Ask Hyprland to treat the launcher as a floating window *before* it maps.
+/// Post-map float/resize dispatches are what make Flint appear tiled-large and
+/// then contract; the static rule has to win on the first frame instead.
 pub fn float_launcher() {
     install_float_rule();
-    let class = crate::APP_ID;
-    let width = crate::WINDOW_WIDTH;
-    let height = crate::WINDOW_HEIGHT;
-    lua_dispatch(&format!(
-        r#"hl.dsp.window.float({{ action = "set", window = "class:{class}" }})"#
-    ));
-    lua_dispatch(&format!(
-        r#"hl.dsp.window.resize({{ x = {width}, y = {height}, window = "class:{class}" }})"#
-    ));
-    lua_dispatch(&format!(
-        r#"hl.dsp.window.center({{ window = "class:{class}" }})"#
-    ));
 }
 
 pub fn install_float_rule() {
@@ -90,19 +78,17 @@ pub fn install_float_rule() {
         let class = crate::APP_ID;
         let width = crate::WINDOW_WIDTH;
         let height = crate::WINDOW_HEIGHT;
-        lua_eval(&format!(
-            r#"hl.window_rule({{ name = "flint-float", match = {{ class = "{class}" }}, float = true, center = true, size = {{{width}, {height}}} }})"#
-        ));
+        // Match both class and initial_class: GTK can set app_id after the
+        // first commit, and static float rules only apply at map time.
+        for (name, prop) in [
+            ("flint-float", "class"),
+            ("flint-float-initial", "initial_class"),
+        ] {
+            lua_eval(&format!(
+                r#"hl.window_rule({{ name = "{name}", match = {{ {prop} = "{class}" }}, float = true, center = true, size = {{{width}, {height}}}, no_anim = true }})"#
+            ));
+        }
     });
-}
-
-fn lua_dispatch(dsp: &str) {
-    if command_ok(&format!("dispatch {dsp}")) {
-        return;
-    }
-    let _ = std::process::Command::new("hyprctl")
-        .args(["dispatch", dsp])
-        .status();
 }
 
 fn lua_eval(code: &str) {
@@ -265,6 +251,11 @@ mod tests {
                 && conf.contains(&crate::WINDOW_HEIGHT.to_string()),
             "finite size, not a maximized tile"
         );
+        assert!(
+            conf.contains("no_anim") || conf.contains("noanim"),
+            "float must apply on the first frame, not animate tile→float"
+        );
+        assert!(conf.contains("initial_class") || conf.contains("initialClass"));
         assert!(conf.contains(crate::APP_ID));
     }
 

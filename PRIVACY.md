@@ -24,8 +24,10 @@ Flint sends data only when a feature requires it:
 - OAuth opens the provider's authorization page and exchanges the returned code
   with the configured token endpoint.
 - Store sync contacts the public repositories listed in the app.
-- MCP and unsigned script commands can start third-party programs only after the
-  user enables the corresponding setting.
+- MCP, unsigned script commands, and installed extensions can start third-party
+  programs only after the user enables the corresponding setting. Enabling
+  extensions also lets Flint run `npm install` for the pinned runtime packages
+  and for each extension's own dependencies.
 
 Those third parties apply their own privacy and retention terms. Flint does not
 proxy those requests and the maintainer does not receive their contents.

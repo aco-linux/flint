@@ -106,6 +106,24 @@ pub enum Action {
     },
     SignOut,
     RefreshModels,
+    /// Start an installed extension command in the Node host.
+    LaunchExtension {
+        dir: PathBuf,
+        command: String,
+    },
+    /// A row rendered by a running extension. Enter runs the first action,
+    /// Shift+Enter the second.
+    Extension {
+        actions: Vec<ExtAction>,
+        detail: String,
+    },
+}
+
+/// Callback identity for an action rendered by a running extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtAction {
+    pub title: String,
+    pub node: u64,
 }
 
 /// What a result *shows* — not what happens when you press Enter.
@@ -222,10 +240,11 @@ pub struct Item {
     pub action: Action,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Icon {
     Name(String),
     Path(PathBuf),
+    #[default]
     None,
 }
 
