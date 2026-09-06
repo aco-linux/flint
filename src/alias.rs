@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::fs;
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths;
+use crate::db;
 
 /// User nicknames for any result id (`app:…`, `cmd:…`, …).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -14,18 +13,12 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
-        let Ok(text) = fs::read_to_string(file()) else {
-            return Self::default();
-        };
-        serde_json::from_str(&text).unwrap_or_default()
-    }
-
-    pub fn persist(&self) {
-        paths::ensure();
-        if let Ok(text) = serde_json::to_string_pretty(&self.map) {
-            let _ = paths::write_private(&file(), text);
+        Self {
+            map: db::aliases_load().unwrap_or_default(),
         }
     }
+
+    pub fn persist(&self) {}
 
     /// Empty alias removes the nickname.
     pub fn set(&mut self, id: &str, alias: &str) {
@@ -36,8 +29,10 @@ impl Store {
         }
         if alias.is_empty() {
             self.map.remove(id);
+            let _ = db::alias_set(id, None);
         } else {
             self.map.insert(id.to_string(), alias.to_string());
+            let _ = db::alias_set(id, Some(alias));
         }
     }
 
@@ -63,10 +58,6 @@ impl Store {
     pub fn all(&self) -> &HashMap<String, String> {
         &self.map
     }
-}
-
-fn file() -> std::path::PathBuf {
-    paths::config_dir().join("aliases.json")
 }
 
 #[cfg(test)]

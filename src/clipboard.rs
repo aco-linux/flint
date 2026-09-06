@@ -1,17 +1,17 @@
 use std::cell::RefCell;
-use std::fs;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gtk4::gdk::prelude::DisplayExt;
 use gtk4::gio;
-use gtk4::glib;
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::item::{Action, Icon, Item, Kind};
-use crate::paths;
 
 pub(crate) const MAX_ENTRIES: usize = 80;
+pub(crate) const MAX_UNPINNED_BYTES: usize = 512 * 1024;
 const MAX_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,10 +76,13 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
-        let Ok(text) = fs::read_to_string(file()) else {
+        let Some(entries) = db::clips_load() else {
             return Self::default();
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        let mut store = Self { entries };
+        let dropped = store.sort_and_trim();
+        store.flush_dropped(dropped);
+        store
     }
 
     pub fn ingest(&mut self, text: String) -> bool {
@@ -93,27 +96,31 @@ impl Store {
         if self.entries.first().map(|e| e.text.as_str()) == Some(text.as_str()) {
             return false;
         }
+        let id;
         if let Some(idx) = self.entries.iter().position(|e| e.text == text) {
             if idx == 0 {
                 return false;
             }
             let mut entry = self.entries.remove(idx);
             entry.copied_at = now_secs();
+            id = entry.id.clone();
             self.entries.insert(0, entry);
-            self.sort_and_trim();
-            return true;
+        } else {
+            id = hash_text(&text);
+            self.entries.insert(
+                0,
+                Entry {
+                    id: id.clone(),
+                    text,
+                    copied_at: now_secs(),
+                    pinned: false,
+                    label: String::new(),
+                },
+            );
         }
-        self.entries.insert(
-            0,
-            Entry {
-                id: hash_text(&text),
-                text,
-                copied_at: now_secs(),
-                pinned: false,
-                label: String::new(),
-            },
-        );
-        self.sort_and_trim();
+        let dropped = self.sort_and_trim();
+        self.flush_entry(&id);
+        self.flush_dropped(dropped);
         true
     }
 
@@ -124,7 +131,9 @@ impl Store {
             };
             entry.pinned = true;
         }
-        self.sort_and_trim();
+        let dropped = self.sort_and_trim();
+        self.flush_entry(id);
+        self.flush_dropped(dropped);
         true
     }
 
@@ -135,15 +144,22 @@ impl Store {
             };
             entry.pinned = false;
         }
-        self.sort_and_trim();
+        let dropped = self.sort_and_trim();
+        self.flush_entry(id);
+        self.flush_dropped(dropped);
         true
     }
 
     pub fn rename(&mut self, id: &str, label: &str) -> bool {
-        let Some(entry) = self.find_mut(id) else {
-            return false;
-        };
-        entry.label = label.trim().to_string();
+        let flushed;
+        {
+            let Some(entry) = self.find_mut(id) else {
+                return false;
+            };
+            entry.label = label.trim().to_string();
+            flushed = entry.id.clone();
+        }
+        self.flush_entry(&flushed);
         true
     }
 
@@ -158,13 +174,20 @@ impl Store {
         let Some(pos) = self.find_index(id) else {
             return false;
         };
+        let old_id = self.entries[pos].id.clone();
         let new_id = hash_text(&text);
-        if new_id != id && self.entries.iter().any(|e| e.id == new_id) {
+        if new_id != old_id && self.entries.iter().any(|e| e.id == new_id) {
             return false;
         }
         let entry = &mut self.entries[pos];
         entry.text = text;
-        entry.id = new_id;
+        entry.id = new_id.clone();
+        if new_id != old_id {
+            let _ = db::clip_delete(&old_id);
+        }
+        let dropped = self.sort_and_trim();
+        self.flush_entry(&new_id);
+        self.flush_dropped(dropped);
         true
     }
 
@@ -183,25 +206,60 @@ impl Store {
         self.entries.iter().position(|e| e.id == id)
     }
 
-    fn sort_and_trim(&mut self) {
-        self.entries.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then_with(|| b.copied_at.cmp(&a.copied_at))
-        });
-        if self.entries.len() <= MAX_ENTRIES {
-            return;
-        }
-        let pinned = self.entries.iter().filter(|e| e.pinned).count();
-        self.entries.truncate(MAX_ENTRIES.max(pinned));
+    fn sort_and_trim(&mut self) -> Vec<String> {
+        sort_and_trim_entries(&mut self.entries)
     }
 
-    pub fn persist(&self) {
-        paths::ensure();
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = paths::write_private(&file(), text);
+    fn flush_entry(&self, id: &str) {
+        let id = strip_prefix(id);
+        if let Some(entry) = self.entries.iter().find(|e| e.id == id) {
+            let _ = db::clip_upsert(entry);
         }
     }
+
+    fn flush_dropped(&self, dropped: Vec<String>) {
+        for id in dropped {
+            let _ = db::clip_delete(&id);
+        }
+    }
+
+    /// Mutations write one row; kept so call sites still compile.
+    pub fn persist(&self) {}
+}
+
+/// Keep every pinned clip. Unpinned clips are kept newest-first until they
+/// exceed [`MAX_UNPINNED_BYTES`] of UTF-8 or [`MAX_ENTRIES`] rows.
+pub(crate) fn sort_and_trim_entries(entries: &mut Vec<Entry>) -> Vec<String> {
+    let before: HashSet<String> = entries.iter().map(|e| e.id.clone()).collect();
+    entries.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.copied_at.cmp(&a.copied_at))
+    });
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut unpinned_bytes = 0usize;
+    let mut unpinned_count = 0usize;
+    for entry in entries.drain(..) {
+        if entry.pinned {
+            kept.push(entry);
+            continue;
+        }
+        let bytes = entry.text.len();
+        if unpinned_count >= MAX_ENTRIES
+            || unpinned_bytes.saturating_add(bytes) > MAX_UNPINNED_BYTES
+        {
+            continue;
+        }
+        unpinned_bytes += bytes;
+        unpinned_count += 1;
+        kept.push(entry);
+    }
+    *entries = kept;
+    let after: HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+    before
+        .into_iter()
+        .filter(|id| !after.contains(id.as_str()))
+        .collect()
 }
 
 pub fn watch(store: Rc<RefCell<Store>>) {
@@ -213,15 +271,6 @@ pub fn watch(store: Rc<RefCell<Store>>) {
         });
         capture(&clipboard, store.clone());
     }
-    glib::timeout_add_seconds_local(1, move || {
-        if let Some(text) = current_text() {
-            let changed = store.borrow_mut().ingest(text);
-            if changed {
-                store.borrow().persist();
-            }
-        }
-        glib::ControlFlow::Continue
-    });
 }
 
 fn capture(clipboard: &gtk4::gdk::Clipboard, store: Rc<RefCell<Store>>) {
@@ -312,10 +361,6 @@ fn looks_openai_key(lower: &str) -> bool {
 
 pub fn strip_prefix(id: &str) -> &str {
     id.strip_prefix("clip:").unwrap_or(id)
-}
-
-fn file() -> std::path::PathBuf {
-    paths::data_dir().join("clipboard.json")
 }
 
 fn now_secs() -> u64 {
@@ -452,5 +497,28 @@ mod tests {
         assert!(!store.entries[0].pinned);
         assert!(store.entries[0].label.is_empty());
         assert_eq!(store.entries[0].text, "hello");
+    }
+
+    #[test]
+    fn size_cap_drops_unpinned_keeps_pinned() {
+        let mut store = Store::default();
+        let big = "word ".repeat(2_000);
+        assert!(store.ingest(format!("pin-me {big}")));
+        let pinned_id = store.entries[0].id.clone();
+        assert!(store.pin(&pinned_id));
+        for i in 0..80 {
+            assert!(store.ingest(format!("big {i} {big}")));
+        }
+        let pinned = store.get(&pinned_id).expect("pinned kept");
+        assert!(pinned.pinned);
+        let unpinned: Vec<_> = store.entries.iter().filter(|e| !e.pinned).collect();
+        let unpinned_bytes: usize = unpinned.iter().map(|e| e.text.len()).sum();
+        assert!(unpinned_bytes <= super::MAX_UNPINNED_BYTES);
+        assert!(unpinned.len() <= super::MAX_ENTRIES);
+        assert!(
+            unpinned.len() < 80,
+            "oversize unpinned clips must be dropped, kept {}",
+            unpinned.len()
+        );
     }
 }

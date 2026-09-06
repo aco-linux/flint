@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — lightness (Wave 2.5)
+
+- User data (clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts, quit-keep) lives in one `~/.local/share/flint/flint.db` (mode 600) with incremental writes
+- Existing JSON files are imported once and renamed to `*.json.bak`; config, auth, and API keys stay JSON / Secret Service
+- Snippets and quicklinks share one placeholder engine (`{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, `{cursor}`, `{argument}` / `{Query}`, `{selection}`)
+- Clipboard ingest is GDK `changed` only — the 1s `wl-paste` poll is gone
+- Unpinned clips are trimmed by size (512 KiB of UTF-8) and the existing row ceiling; pinned clips are kept
+
 ## Unreleased — windows and system (Wave 2)
 
 - Window layouts: left/right/top/bottom halves, four quarters, maximize, center, almost-maximize (48px inset), next/previous display

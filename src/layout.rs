@@ -1,7 +1,6 @@
-use std::fs;
-
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::hypr::{self, Client, Monitor};
 use crate::item::{Action, Icon, Item, Kind};
 use crate::paths;
@@ -223,33 +222,23 @@ fn strip_prefix_ci<'a>(query: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+#[allow(dead_code)]
 pub fn file() -> std::path::PathBuf {
     paths::config_dir().join("layouts.json")
 }
 
 pub fn load() -> Vec<NamedLayout> {
-    let Ok(text) = fs::read_to_string(file()) else {
-        return Vec::new();
-    };
-    serde_json::from_str(&text).unwrap_or_default()
+    db::layouts_load().unwrap_or_default()
 }
 
 pub fn save(layouts: &[NamedLayout]) {
-    paths::ensure();
-    if let Ok(text) = serde_json::to_string_pretty(layouts) {
-        let _ = paths::write_private(&file(), text);
+    for layout in layouts {
+        let _ = db::layout_upsert(layout);
     }
 }
 
 pub fn upsert(layout: NamedLayout) {
-    let mut layouts = load();
-    if let Some(existing) = layouts.iter_mut().find(|row| row.name == layout.name) {
-        *existing = layout;
-    } else {
-        layouts.push(layout);
-    }
-    layouts.sort_by(|a, b| a.name.cmp(&b.name));
-    save(&layouts);
+    save(&[layout]);
 }
 
 pub fn save_current(name: &str) -> Option<NamedLayout> {

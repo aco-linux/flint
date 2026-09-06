@@ -9,15 +9,29 @@ const LOGO_MARK: &[u8] = include_bytes!("../share/flint-mark.png");
 const LOGO_APP: &[u8] = include_bytes!("../share/flint.png");
 
 pub fn data_dir() -> PathBuf {
+    if let Some(dir) = env_dir("FLINT_DATA_DIR") {
+        return dir;
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(APP)
 }
 
 pub fn config_dir() -> PathBuf {
+    if let Some(dir) = env_dir("FLINT_CONFIG_DIR") {
+        return dir;
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(APP)
+}
+
+fn env_dir(key: &str) -> Option<PathBuf> {
+    let raw = std::env::var_os(key)?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -52,6 +66,8 @@ pub fn ensure() {
     tighten_private_file(&data_dir().join("usage.json"));
     tighten_private_file(&data_dir().join("favorites.json"));
     tighten_private_file(&data_dir().join("calc-history.json"));
+    let _ = crate::db::open();
+    tighten_private_file(&data_dir().join("flint.db"));
     let _ = write_private(&logo_mark(), LOGO_MARK);
     let _ = write_private(&logo_app(), LOGO_APP);
 }

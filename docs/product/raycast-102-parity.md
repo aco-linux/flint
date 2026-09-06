@@ -16,8 +16,20 @@ A Hyprland / Wayland user can complete the same *jobs* shown in that video from 
 - Raycast's App Store, Organization, iPhone sync, and `ray.so` SaaS are proprietary. Flint uses Vicinae extensions, Raycast *script-commands* (opt-in), and MCP primers.
 - Installed extensions, unsigned scripts, and MCP spawn stay **off by default**.
 - Do not vendor CleanShot, Raycast Focus, Raycast Notes cloud, or Raycast AI billing.
-- Prefer compositor / desktop tools already on Omarchy (Hyprland, grim, slurp, wf-recorder, playerctl, pacman, Flatpak) over new daemons.
+- Prefer compositor / desktop tools already on Omarchy (Hyprland, grim, slurp, wf-recorder, playerctl, pacman, Flatpak) over new daemons. Commands for optional binaries (tesseract, zbarimg, hyprpicker, satty, wf-recorder, grim) appear only if found.
 - Each capability is a user-visible job. Extensions may satisfy a job; core must still expose a command or store install path.
+
+## Performance invariants
+
+These are testable. Remaining waves must not violate them.
+
+- Hidden daemon: 0% CPU at idle. No periodic timers. Clipboard ingest is the GDK `changed` signal only — never a 1s `wl-paste` poll.
+- Root-search keystroke: results from in-memory catalogs within one frame. Anything slower (ripgrep, OCR, extension host, tesseract) is behind an explicit prefix and cancelled on the next keystroke.
+- No always-on indexers. No recoll. Content search is `content:` + `rg --max-count 1` over `$HOME` and `search_roots`, never `/`.
+- Extension host is lazy-spawned and must not change idle RSS when `allow_extensions` is off.
+- Confetti: fixed ≤1.5s, frame-capped cairo overlay, not a compositor-wide layer unless gtk4-layer-shell is already in the tree.
+- User data (clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts) lives in one SQLite file with incremental writes. Config and credentials stay JSON / Secret Service.
+- Snippets and quicklinks share one placeholder engine (`{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, `{cursor}`, `{argument}` / `{Query}`, `{selection}`).
 
 Status key:
 
@@ -162,7 +174,7 @@ Count after Wave 1: **~38 ships**, **~12 partial**, **~36 core**, **~12 ext**, *
 - Content search, OCR, and screenshot index never leave the machine unless the user sends them to Ask AI.
 - Dictation WAV is deleted after transcribe/cancel (already true).
 - Quit / uninstall always confirm when the target is not a user-owned window.
-- Quicklinks and snippets are private JSON (mode 600), same as today.
+- Quicklinks and snippets live in the user SQLite file (`flint.db`, mode 600), same as clips and notes. Config and credentials stay JSON / Secret Service.
 - Hyper key, display mode, and screen record are commands that *invoke* desktop tools; Flint does not become an input daemon.
 
 ### Non-goals
@@ -201,53 +213,58 @@ Jobs: 17–18, 49–51, 54–56, 59, 67, 86.
 - Screenshot / region / record / annotate as Flint commands wrapping grim, slurp, wf-recorder, satty.
 - Display resolution via `hyprctl` / `wlr-randr`.
 
+### Wave 2.5 — Lightness (before more stores)
+
+- One SQLite file (`~/.local/share/flint/flint.db`, mode 600) for clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts, quit-keep. Import existing JSON once.
+- Shared placeholder module used by snippets and quicklinks.
+- Drop the 1s clipboard poll; GDK `changed` only.
+- Size-based clipboard cap (not a raw 80-row cap). Keep secrets out.
+
 ### Wave 3 — In-bar content tools
 
-Jobs: 3, 9–12, 32 (currency), 39, 65–66, 68, 70–72, 76–78, 94–95.
+Jobs: 3, 10, 25, 39 (on demand), 65–66, 68, 76–78, 94–95.
 
-- Content search: `ripgrep` over an opt-in index (home, not `/`).
-- Built-in emoji list (no Omarchy dependency); GIF/Slack as extensions.
-- Timezones; color picker (hyprpicker) + format convert; translator (local model or configured API).
-- OCR (`tesseract`) and QR (`zbar`) on files and clipboard images.
-- Screenshot content search reuses OCR index.
+- Content search: explicit `content:` prefix, `rg --max-count 1`, cancel on next keystroke. No indexer.
+- Built-in emoji table (~200); GIF/Slack remain extensions.
+- Timezones as a static city table (no extra crate unless evalexpr is clearly insufficient).
+- Color picker only if `hyprpicker` / `wl-color-picker` exists; hex/rgb/hsl convert in-process.
+- Translate and dictionary are **Ask-AI prompt templates**, not a network module. Currency rates are opt-in and cached; skip until asked.
+- OCR (`tesseract`) and QR (`zbarimg`) only if on PATH. No sidecar index.
 
 ### Wave 4 — Dictation, notes, focus
 
-Jobs: 13–16, 28–29, 60–61.
+Jobs: 13–16, 28–29, 60–61, 84.
 
-- Global dictation into the focused app (not only the search box).
-- Dictation history; language/style as Ask-AI post-process.
-- Selected-text → note (wl-paste / portal).
-- Focus timer (pomodoro) with a Waybar-friendly status file.
+- Global dictation via `wtype` (Hyprland virtual-keyboard). Do not use ydotool.
+- Job 29 is **partial**: `wl-paste -p` primary selection, not a Wayland selected-text API.
+- Dictation history in SQLite.
+- Focus timer writes `~/.local/share/flint/status.json` for a Waybar custom module.
 
 ### Wave 5 — AI that can act
 
-Jobs: 27, 52–53, 57–58, 74, 90–93, 96–100.
+Jobs: 27, 52–53, 57–58, 70–71, 74, 90–93, 96–100.
 
-- Threaded Ask AI with history search.
-- Attachments (file, clipboard, region screenshot).
-- Grammar / Quick Fix as AI commands on selection.
-- Real MCP tool runner (still opt-in).
-- Memory (local, user-visible, editable).
-- Skills as markdown in `~/.config/flint/skills/`.
-- Screen / region share as an attachment, never a background spy.
+- Threaded Ask AI in SQLite; grammar/Quick Fix/translate are prompt templates on `{selection}` / primary paste.
+- Attachments (file, clipboard, region). MCP tools still opt-in.
+- Memory and skills local. Screen share is an attachment, never a spy.
 
 ### Wave 6 — Store and desktop glue
 
-Jobs: 19, 40–44, 62–64, 75, 84–85, 87–88.
+Jobs: 19, 36–38, 40–44, 62–64, 75, 85, 87.
 
-- Finish extension host: Form, Grid, confirm, selected-text, preferences.
+- Finish extension host: Form, Grid, confirm, preferences. Selected-text uses primary paste.
+- Hotkeys: write/source `~/.config/hypr/flint-binds.conf` (Hyprland hot-reloads). No helper daemon.
 - Calendar / meetings / Notion / OpenClaw / typing as store extensions.
-- Document keyd Hyper-key snippet; do not implement a key remapper in Flint.
-- App menu search via AT-SPI where the toolkit exposes it.
+- Hyper key: document keyd/kanata. Job 88 (app menu / AT-SPI) is **later / ext** — never poll the a11y bus.
 
 ## OPEN QUESTIONS
 
-1. **Hotkeys:** Does Flint write Hyprland binds, ship a tiny `flint-hotkey` helper, or only in-window aliases?
-2. **Content index:** Always-on `ripgrep` vs a user-built index vs `recoll`/`plocate` content? Default must stay fast on keystroke.
-3. **Global dictation:** Inject via `wtype`/`ydotool` into the focused app, or only fill Flint then paste?
-4. **Sync:** Stay local-forever, or later optional Syncthing/WebDAV of snippets + quicklinks (never clipboard secrets)?
-5. **Confetti:** GTK overlay in the Flint window, or a Hyprland layer that can play over any app?
+1. **Hotkeys:** **Decided.** Sourced `~/.config/hypr/flint-binds.conf`. No daemon.
+2. **Content index:** **Decided.** Explicit `content:` + bounded `rg`. No recoll.
+3. **Global dictation:** **Decided.** `wtype`. Job 29 = primary selection.
+4. **Sync:** Stay local-forever for now; later optional Syncthing of snippets + quicklinks (never clipboard secrets).
+5. **Confetti:** **Decided.** In-window cairo overlay, ≤1.5s, frame-capped.
+6. **Calculator crate:** Keep evalexpr + existing date/percent for now. Revisit numbat/fend only if those parsers fail users. Currency is opt-in later.
 
 ## HANDOFF
 

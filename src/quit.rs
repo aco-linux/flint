@@ -1,5 +1,4 @@
-use std::fs;
-
+use crate::db;
 use crate::hypr::{self, Client};
 use crate::item::{Action, Icon, Item, Kind};
 use crate::paths;
@@ -39,6 +38,7 @@ pub fn confirm_item() -> Item {
     }
 }
 
+#[allow(dead_code)]
 pub fn file() -> std::path::PathBuf {
     paths::config_dir().join("quit-keep.json")
 }
@@ -49,12 +49,7 @@ pub fn default_keep() -> Vec<String> {
 
 pub fn load_keep() -> Vec<String> {
     let mut keep = default_keep();
-    let Ok(text) = fs::read_to_string(file()) else {
-        return keep;
-    };
-    let Ok(extra) = serde_json::from_str::<Vec<String>>(&text) else {
-        return keep;
-    };
+    let extra = db::quit_keep_load().unwrap_or_default();
     for class in extra {
         let class = class.trim();
         if class.is_empty() {

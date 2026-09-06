@@ -1,11 +1,12 @@
-use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::action;
+use crate::db;
 use crate::item::{Action, Icon, Item, Kind};
 use crate::paths;
+use crate::placeholder;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Link {
@@ -74,34 +75,17 @@ impl Link {
 }
 
 pub fn load() -> Vec<Link> {
-    let path = file();
-    if !path.exists() {
-        let defaults = default_links();
-        save(&defaults);
-        return defaults;
-    }
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    serde_json::from_str(&text).unwrap_or_default()
+    db::quicklinks_load().unwrap_or_default()
 }
 
 pub fn save(links: &[Link]) {
-    paths::ensure();
-    if let Ok(text) = serde_json::to_string_pretty(links) {
-        let _ = paths::write_private(&file(), text);
+    for link in links {
+        let _ = db::quicklink_upsert(link);
     }
 }
 
 pub fn upsert(link: Link) {
-    let mut links = load();
-    if let Some(existing) = links.iter_mut().find(|row| row.name == link.name) {
-        *existing = link;
-    } else {
-        links.push(link);
-    }
-    links.sort_by(|a, b| a.name.cmp(&b.name));
-    save(&links);
+    save(&[link]);
 }
 
 pub fn parse_create(query: &str) -> Option<(String, String)> {
@@ -133,30 +117,7 @@ pub fn create(name: &str, target: &str) -> Result<Link, &'static str> {
 }
 
 pub fn substitute(target: &str, argument: &str) -> String {
-    let argument = if looks_like_uri(target) {
-        urlencoding_lite(argument)
-    } else {
-        argument.to_string()
-    };
-    let mut out = target.replace("{argument}", &argument);
-    for needle in ["{Query}", "{query}", "{QUERY}"] {
-        out = out.replace(needle, &argument);
-    }
-    out
-}
-
-fn urlencoding_lite(input: &str) -> String {
-    let mut out = String::new();
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    placeholder::expand_quicklink(target, argument)
 }
 
 pub fn expand_tilde(path: &str) -> String {
@@ -215,7 +176,7 @@ fn title_from_name(name: &str) -> String {
     }
 }
 
-fn default_links() -> Vec<Link> {
+pub(crate) fn default_links() -> Vec<Link> {
     vec![
         Link {
             name: "dl".into(),
@@ -238,7 +199,8 @@ fn default_links() -> Vec<Link> {
     ]
 }
 
-fn file() -> std::path::PathBuf {
+#[allow(dead_code)]
+pub fn file() -> std::path::PathBuf {
     paths::config_dir().join("quicklinks.json")
 }
 

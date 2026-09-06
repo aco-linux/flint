@@ -1,8 +1,6 @@
-use std::fs;
-
 use serde::{Deserialize, Serialize};
 
-use crate::paths;
+use crate::db;
 
 /// Pinned result ids, newest pin first.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -13,25 +11,12 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
-        let Ok(text) = fs::read_to_string(file()) else {
-            return Self::default();
-        };
-        if let Ok(store) = serde_json::from_str::<Store>(&text) {
-            return store;
+        Self {
+            ids: db::favorites_load().unwrap_or_default(),
         }
-        serde_json::from_str::<Vec<String>>(&text)
-            .map(|ids| Self {
-                ids: unique_front(ids),
-            })
-            .unwrap_or_default()
     }
 
-    pub fn persist(&self) {
-        paths::ensure();
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = paths::write_private(&file(), text);
-        }
-    }
+    pub fn persist(&self) {}
 
     /// Pin if missing (front), unpin if present. Returns whether it is pinned after.
     pub fn toggle(&mut self, id: &str) -> bool {
@@ -41,9 +26,11 @@ impl Store {
         }
         if let Some(idx) = self.ids.iter().position(|existing| existing == id) {
             self.ids.remove(idx);
+            let _ = db::favorite_remove(id);
             false
         } else {
             self.ids.insert(0, id.to_string());
+            let _ = db::favorite_add(id);
             true
         }
     }
@@ -55,20 +42,6 @@ impl Store {
     pub fn all(&self) -> &[String] {
         &self.ids
     }
-}
-
-fn unique_front(ids: Vec<String>) -> Vec<String> {
-    let mut out = Vec::new();
-    for id in ids {
-        if !id.is_empty() && !out.iter().any(|existing| existing == &id) {
-            out.push(id);
-        }
-    }
-    out
-}
-
-fn file() -> std::path::PathBuf {
-    paths::data_dir().join("favorites.json")
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ Please include:
 | Control | Behavior |
 | --- | --- |
 | Credential storage | Linux Secret Service first; explicit mode-`600` fallback when unavailable |
-| File modes | Config/auth/notes/clipboard/snippets/API-key fallback are `600`, dirs `700` |
+| File modes | Config/auth/API-key fallback and `flint.db` are `600`, dirs `700` |
 | Clipboard | Heuristic skip for common secrets; not a detector |
 | Ask AI | HTTPS via curl `-K` so tokens are not on `ps`; HTTP refuses `Authorization` / `x-api-key` |
 | OAuth | PKCE S256, 256-bit state, exact loopback Host/port, bounded HTTP parser, HTTPS authorize/token URLs, structured token parsing, refresh support |

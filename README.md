@@ -159,15 +159,7 @@ See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
 - Config: `~/.config/flint/config.json`
 - Auth metadata or credential fallback: `~/.config/flint/auth.json`
 - API-key fallback (when no Secret Service is available): `~/.config/flint/api-keys.json`
-- Snippets: `~/.config/flint/snippets.json`
-- Aliases: `~/.config/flint/aliases.json`
-- Quicklinks: `~/.config/flint/quicklinks.json`
-- Window layouts: `~/.config/flint/layouts.json`
-- Quit-all denylist: `~/.config/flint/quit-keep.json`
-- Notes: `~/.local/share/flint/notes.json`
-- Clipboard: `~/.local/share/flint/clipboard.json`
-- Favorites: `~/.local/share/flint/favorites.json`
-- Calc history: `~/.local/share/flint/calc-history.json`
+- User store: `~/.local/share/flint/flint.db` (clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts, quit-keep). Existing `*.json` files are imported once and renamed to `*.json.bak`
 - Extension runtime: `~/.local/share/flint/runtime/` · installed extensions: `~/.local/share/flint/store/vicinae/<name>/` · their storage: `~/.local/share/flint/extensions/<name>/`
 
 Existing Rayblast files are copied over on first launch. Stale Rayblast defaults (OpenAI provider + Ollama endpoint, “You are Rayblast”, `voice.engine: voxtype`) are rewritten to Flint defaults.

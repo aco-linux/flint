@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::db;
 
 /// One launch of something you used yesterday outranks 200 launches from years ago.
 const HOUR: u64 = 3600;
@@ -33,35 +33,14 @@ pub fn now_secs() -> u64 {
 }
 
 pub fn load() -> Map {
-    let Ok(text) = fs::read_to_string(path()) else {
-        return HashMap::new();
-    };
-    if let Ok(map) = serde_json::from_str::<Map>(&text) {
-        return map;
-    }
-    let Ok(old) = serde_json::from_str::<HashMap<String, u32>>(&text) else {
-        return HashMap::new();
-    };
-    old.into_iter()
-        .map(|(id, count)| (id, Record { count, last: 0 }))
-        .collect()
+    db::usage_load().unwrap_or_default()
 }
 
 pub fn bump(id: &str) {
-    let mut map = load();
-    let now = now_secs();
-    let record = map.entry(id.to_string()).or_insert(Record {
-        count: 0,
-        last: now,
-    });
-    record.count = record.count.saturating_add(1);
-    record.last = now;
-    if let Some(parent) = path().parent() {
-        let _ = fs::create_dir_all(parent);
+    if id.is_empty() {
+        return;
     }
-    if let Ok(text) = serde_json::to_string_pretty(&map) {
-        let _ = crate::paths::write_private(&path(), text);
-    }
+    let _ = db::usage_bump(id, now_secs());
 }
 
 pub fn score(record: Option<&Record>, now: u64) -> u32 {
@@ -81,10 +60,6 @@ pub fn score(record: Option<&Record>, now: u64) -> u32 {
         }
     };
     freq.saturating_add(recency)
-}
-
-fn path() -> PathBuf {
-    crate::paths::data_dir().join("usage.json")
 }
 
 #[cfg(test)]

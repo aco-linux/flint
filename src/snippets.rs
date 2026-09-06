@@ -1,9 +1,8 @@
-use std::fs;
-
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::item::{Action, Icon, Item, Kind};
-use crate::paths;
+use crate::placeholder::{self, Stamp};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snippet {
@@ -13,24 +12,6 @@ pub struct Snippet {
     pub text: String,
     #[serde(default)]
     pub increment: u32,
-}
-
-/// Clock fields used by `{date}` / `{time}` / `{day}` placeholders.
-#[derive(Debug, Clone)]
-pub struct Stamp {
-    pub date: String,
-    pub time: String,
-    pub day: String,
-}
-
-impl Stamp {
-    pub fn local() -> Self {
-        local_stamp().unwrap_or(Self {
-            date: "1970-01-01".into(),
-            time: "00:00".into(),
-            day: "Thursday".into(),
-        })
-    }
 }
 
 impl Snippet {
@@ -63,79 +44,27 @@ impl Snippet {
 /// Replace known placeholders. Unknown `{foo}` stays intact.
 /// `{increment}` uses the current counter and returns current+1 when present.
 pub fn expand(text: &str, clipboard: &str, now: &Stamp, increment: u32) -> (String, u32) {
-    let mut out = String::with_capacity(text.len());
-    let mut next = increment;
-    let mut i = 0;
-    while i < text.len() {
-        if text[i..].starts_with('{')
-            && let Some(rel) = text[i + 1..].find('}')
-        {
-            let key = &text[i + 1..i + 1 + rel];
-            let repl = match key {
-                "clipboard" => Some(clipboard),
-                "date" => Some(now.date.as_str()),
-                "time" => Some(now.time.as_str()),
-                "datetime" => None,
-                "day" => Some(now.day.as_str()),
-                "increment" => None,
-                "cursor" => Some(""),
-                _ => None,
-            };
-            let owned;
-            let piece = match key {
-                "datetime" => {
-                    owned = format!("{} {}", now.date, now.time);
-                    Some(owned.as_str())
-                }
-                "increment" => {
-                    owned = increment.to_string();
-                    next = increment.saturating_add(1);
-                    Some(owned.as_str())
-                }
-                _ => repl,
-            };
-            if let Some(piece) = piece {
-                out.push_str(piece);
-                i += key.len() + 2;
-                continue;
-            }
-        }
-        let ch = text[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    (out, next)
+    placeholder::expand_snippet(text, clipboard, now, increment)
 }
 
 pub fn expand_keyword(keyword: &str, clipboard: &str) -> Option<String> {
-    let mut snippets = load();
-    let snip = snippets.iter_mut().find(|s| s.keyword == keyword)?;
+    let mut snip = db::snippet_get(keyword)?;
     let now = Stamp::local();
     let (expanded, next) = expand(&snip.text, clipboard, &now, snip.increment);
     if next != snip.increment {
         snip.increment = next;
-        save(&snippets);
+        let _ = db::snippet_set_increment(keyword, next);
     }
     Some(expanded)
 }
 
 pub fn load() -> Vec<Snippet> {
-    let path = file();
-    if !path.exists() {
-        let defaults = default_snippets();
-        save(&defaults);
-        return defaults;
-    }
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    serde_json::from_str(&text).unwrap_or_default()
+    db::snippets_load().unwrap_or_default()
 }
 
 pub fn save(snippets: &[Snippet]) {
-    paths::ensure();
-    if let Ok(text) = serde_json::to_string_pretty(snippets) {
-        let _ = paths::write_private(&file(), text);
+    for snippet in snippets {
+        let _ = db::snippet_upsert(snippet);
     }
 }
 
@@ -144,60 +73,25 @@ pub fn upsert(keyword: &str, text: &str) {
     if keyword.is_empty() || text.is_empty() {
         return;
     }
-    let mut snippets = load();
-    if let Some(existing) = snippets.iter_mut().find(|s| s.keyword == keyword) {
+    if let Some(mut existing) = db::snippet_get(keyword) {
         existing.text = text.to_string();
-    } else {
-        snippets.push(Snippet {
-            keyword: keyword.to_string(),
-            title: keyword.to_string(),
-            text: text.to_string(),
-            increment: 0,
-        });
+        save(&[existing]);
+        return;
     }
-    snippets.sort_by(|a, b| a.keyword.cmp(&b.keyword));
-    save(&snippets);
+    save(&[Snippet {
+        keyword: keyword.to_string(),
+        title: keyword.to_string(),
+        text: text.to_string(),
+        increment: 0,
+    }]);
 }
 
+#[allow(dead_code)]
 pub fn file() -> std::path::PathBuf {
-    paths::config_dir().join("snippets.json")
+    crate::paths::config_dir().join("snippets.json")
 }
 
-fn local_stamp() -> Option<Stamp> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as libc::time_t;
-    const DAYS: [&str; 7] = [
-        "Sunday",
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-    ];
-    // SAFETY: `tm` is written by localtime_r before we read it.
-    unsafe {
-        let mut tm = std::mem::zeroed::<libc::tm>();
-        if libc::localtime_r(&ts, &mut tm).is_null() {
-            return None;
-        }
-        let wday = tm.tm_wday.clamp(0, 6) as usize;
-        Some(Stamp {
-            date: format!(
-                "{:04}-{:02}-{:02}",
-                tm.tm_year + 1900,
-                tm.tm_mon + 1,
-                tm.tm_mday
-            ),
-            time: format!("{:02}:{:02}", tm.tm_hour, tm.tm_min),
-            day: DAYS[wday].to_string(),
-        })
-    }
-}
-
-fn default_snippets() -> Vec<Snippet> {
+pub(crate) fn default_snippets() -> Vec<Snippet> {
     vec![
         Snippet {
             keyword: "shrug".into(),
@@ -222,7 +116,8 @@ fn default_snippets() -> Vec<Snippet> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Snippet, Stamp, expand};
+    use super::{Snippet, expand};
+    use crate::placeholder::Stamp;
 
     #[test]
     fn item_uses_keyword_when_title_blank() {

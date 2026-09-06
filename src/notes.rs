@@ -1,9 +1,8 @@
-use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::item::{Action, Icon, Item, Kind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,31 +46,15 @@ impl Note {
 }
 
 pub fn load() -> Vec<Note> {
-    let path = path();
-    let mut notes: Vec<Note> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    notes.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
-            .then_with(|| b.updated.cmp(&a.updated))
-    });
-    notes
+    db::notes_load().unwrap_or_default()
 }
 
 pub fn get(id: &str) -> Option<Note> {
-    load().into_iter().find(|n| n.id == id)
+    db::note_get(id)
 }
 
 pub fn upsert(note: Note) {
-    let mut notes = load();
-    if let Some(existing) = notes.iter_mut().find(|n| n.id == note.id) {
-        *existing = note;
-    } else {
-        notes.push(note);
-    }
-    save(&notes);
+    let _ = db::note_upsert(&note);
 }
 
 pub fn create(title: &str) -> Note {
@@ -92,29 +75,16 @@ pub fn create(title: &str) -> Note {
 }
 
 pub fn save_body(id: &str, title: &str, body: &str) -> Option<Note> {
-    let mut notes = load();
-    let note = notes.iter_mut().find(|n| n.id == id)?;
+    let mut note = get(id)?;
     note.title = if title.trim().is_empty() {
-        note.title.clone()
+        note.title
     } else {
         title.trim().to_string()
     };
     note.body = body.to_string();
     note.updated = now();
-    let out = note.clone();
-    save(&notes);
-    Some(out)
-}
-
-fn save(notes: &[Note]) {
-    crate::paths::ensure();
-    if let Ok(raw) = serde_json::to_string_pretty(notes) {
-        let _ = crate::paths::write_private(&path(), raw);
-    }
-}
-
-fn path() -> PathBuf {
-    crate::paths::data_dir().join("notes.json")
+    let _ = db::note_upsert(&note);
+    Some(note)
 }
 
 fn now() -> u64 {

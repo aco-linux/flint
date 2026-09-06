@@ -1,12 +1,11 @@
-use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::item::{Action, Icon, Item, Kind};
-use crate::paths;
 
-const MAX_HISTORY: usize = 50;
+pub(crate) const MAX_HISTORY: usize = 50;
 
 /// Local civil date (proleptic Gregorian). No chrono.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,18 +64,13 @@ pub struct History {
 
 impl History {
     pub fn load() -> Self {
-        let Ok(text) = fs::read_to_string(file()) else {
-            return Self::default();
-        };
-        serde_json::from_str(&text).unwrap_or_default()
-    }
-
-    pub fn persist(&self) {
-        paths::ensure();
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = paths::write_private(&file(), text);
+        Self {
+            entries: db::calc_load().unwrap_or_default(),
         }
     }
+
+    #[allow(dead_code)]
+    pub fn persist(&self) {}
 
     pub fn push(&mut self, expr: &str, result: &str) {
         let expr = expr.trim();
@@ -103,9 +97,11 @@ impl History {
 }
 
 pub fn record(expr: &str, result: &str) {
-    let mut history = History::load();
+    let mut history = History::default();
     history.push(expr, result);
-    history.persist();
+    if let Some(entry) = history.entries.first() {
+        let _ = db::calc_push(&entry.expr, &entry.result);
+    }
 }
 
 /// Instant calc answers: percent, date, then evalexpr math.
@@ -350,10 +346,6 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn file() -> std::path::PathBuf {
-    paths::data_dir().join("calc-history.json")
-}
-
 /// Howard Hinnant civil <-> days (unix epoch day 0 = 1970-01-01).
 fn days_from_civil(mut y: i32, m: u32, d: u32) -> i64 {
     y -= i32::from(m <= 2);
@@ -438,6 +430,7 @@ mod tests {
         let back: History = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(back.entries[0].result, "4");
         assert_eq!(back.entries[1].expr, "20% of 80");
+        history.persist();
     }
 
     #[test]
