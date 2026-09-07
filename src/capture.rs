@@ -119,6 +119,33 @@ pub fn run(kind: &str) {
     thread::spawn(move || run_sync(&kind));
 }
 
+/// Capture once after the caller hides Flint. Never a spy or idle timer.
+pub fn shot_to_path(region: bool) -> Option<PathBuf> {
+    if !which("grim") {
+        return None;
+    }
+    let geom = if region { slurp()? } else { String::new() };
+    let path = screenshot_dir().join(screenshot_filename_now());
+    let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+    let mut cmd = Command::new("grim");
+    if region {
+        cmd.args(["-g", &geom]);
+    }
+    let ok = cmd
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .is_some_and(|s| s.success());
+    if ok && path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn run_sync(kind: &str) {
     match kind {
         "screenshot" => {
@@ -322,6 +349,10 @@ mod tests {
         let grim_only = items(|bin| bin == "grim");
         let ids: Vec<&str> = grim_only.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["cmd:shot"]);
+        assert!(
+            !ids.iter().any(|id| id.contains("share")),
+            "screen share with AI is an explicit Ask command, not capture idle"
+        );
         assert!(
             grim_only
                 .iter()

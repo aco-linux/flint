@@ -12,9 +12,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::ai::{ChatMessage, Thread};
 use crate::calc;
 use crate::clipboard::{self, Entry as Clip};
 use crate::layout::{NamedLayout, Slot};
+use crate::memory::Fact;
 use crate::notes::Note;
 use crate::paths;
 use crate::quicklinks::Link;
@@ -85,9 +87,28 @@ CREATE TABLE IF NOT EXISTS dictation (
     text TEXT NOT NULL,
     at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_threads (
+    id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_messages (
+    id TEXT PRIMARY KEY NOT NULL,
+    thread_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory (
+    id TEXT PRIMARY KEY NOT NULL,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
 ";
 
 const MAX_DICTATION: i64 = 100;
+const MAX_MEMORY: i64 = 50;
 
 struct Db {
     conn: Connection,
@@ -895,6 +916,200 @@ pub fn dictation_get(id: i64) -> Option<Dictation> {
     .flatten()
 }
 
+fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
+    Ok(Thread {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        created: row.get::<_, i64>(2)? as u64,
+        updated: row.get::<_, i64>(3)? as u64,
+    })
+}
+
+pub fn ai_thread_insert(thread: &Thread) -> Option<()> {
+    with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO ai_threads (id, title, created, updated) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                thread.id,
+                thread.title,
+                thread.created as i64,
+                thread.updated as i64
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn ai_thread_touch(id: &str, title: Option<&str>, updated: u64) -> Option<()> {
+    with_conn(|conn| {
+        if let Some(title) = title.filter(|t| !t.is_empty()) {
+            conn.execute(
+                "UPDATE ai_threads SET title = ?1, updated = ?2 WHERE id = ?3",
+                params![title, updated as i64, id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE ai_threads SET updated = ?1 WHERE id = ?2",
+                params![updated as i64, id],
+            )?;
+        }
+        Ok(())
+    })
+}
+
+pub fn ai_thread_get(id: &str) -> Option<Thread> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT id, title, created, updated FROM ai_threads WHERE id = ?1",
+            params![id],
+            thread_from_row,
+        )
+        .optional()
+    })
+    .flatten()
+}
+
+pub fn ai_threads_search(query: &str) -> Option<Vec<Thread>> {
+    with_conn(|conn| {
+        let q = query.trim();
+        if q.is_empty() {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, created, updated FROM ai_threads
+                 ORDER BY updated DESC LIMIT 20",
+            )?;
+            let rows = stmt.query_map([], thread_from_row)?;
+            rows.collect()
+        } else {
+            let pat = format!("%{q}%");
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT t.id, t.title, t.created, t.updated
+                 FROM ai_threads t
+                 LEFT JOIN ai_messages m ON m.thread_id = t.id
+                 WHERE t.title LIKE ?1 OR m.text LIKE ?1
+                 ORDER BY t.updated DESC LIMIT 20",
+            )?;
+            let rows = stmt.query_map(params![pat], thread_from_row)?;
+            rows.collect()
+        }
+    })
+}
+
+pub fn ai_message_insert(msg: &ChatMessage) -> Option<()> {
+    with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO ai_messages (id, thread_id, role, text, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![msg.id, msg.thread_id, msg.role, msg.text, msg.at as i64],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn ai_messages(thread_id: &str) -> Option<Vec<ChatMessage>> {
+    with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, thread_id, role, text, at FROM ai_messages
+             WHERE thread_id = ?1 ORDER BY at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![thread_id], |row| {
+            Ok(ChatMessage {
+                id: row.get(0)?,
+                thread_id: row.get(1)?,
+                role: row.get(2)?,
+                text: row.get(3)?,
+                at: row.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        rows.collect()
+    })
+}
+
+pub fn memory_remember(text: &str) -> Option<Fact> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    with_conn(|conn| {
+        if let Some(existing) = conn
+            .query_row(
+                "SELECT id, text, at FROM memory WHERE text = ?1",
+                params![text],
+                |row| {
+                    Ok(Fact {
+                        id: row.get(0)?,
+                        text: row.get(1)?,
+                        at: row.get::<_, i64>(2)? as u64,
+                    })
+                },
+            )
+            .optional()?
+        {
+            let now = now_secs();
+            conn.execute(
+                "UPDATE memory SET at = ?1 WHERE id = ?2",
+                params![now as i64, existing.id],
+            )?;
+            return Ok(Fact {
+                at: now,
+                ..existing
+            });
+        }
+        let now = now_secs();
+        let ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let fact = Fact {
+            id: format!("{ns:x}"),
+            text: text.to_string(),
+            at: now,
+        };
+        conn.execute(
+            "INSERT INTO memory (id, text, at) VALUES (?1, ?2, ?3)",
+            params![fact.id, fact.text, fact.at as i64],
+        )?;
+        let extra: i64 = conn.query_row("SELECT COUNT(*) FROM memory", [], |row| row.get(0))?;
+        if extra > MAX_MEMORY {
+            conn.execute(
+                "DELETE FROM memory WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id FROM memory ORDER BY at ASC, id ASC LIMIT ?1
+                    )
+                )",
+                params![extra - MAX_MEMORY],
+            )?;
+        }
+        Ok(fact)
+    })
+}
+
+pub fn memory_forget(query: &str) -> Option<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Some(0);
+    }
+    with_conn(|conn| {
+        let pat = format!("%{query}%");
+        let n = conn.execute("DELETE FROM memory WHERE text LIKE ?1", params![pat])?;
+        Ok(n)
+    })
+}
+
+pub fn memory_load() -> Option<Vec<Fact>> {
+    with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT id, text, at FROM memory ORDER BY at DESC, id DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![MAX_MEMORY], |row| {
+            Ok(Fact {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                at: row.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        rows.collect()
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn reset() {
     mutate_state(|state| *state = None);
@@ -999,7 +1214,36 @@ mod tests {
             assert_eq!(got.text, "utterance 104");
             crate::notes::create("still v1");
             assert_eq!(super::notes_load().expect("notes").len(), 1);
+            crate::memory::remember("wave5 fact").expect("memory");
+            assert_eq!(super::memory_load().expect("mem").len(), 1);
+            let thread = crate::ai::Thread {
+                id: "t1".into(),
+                title: "hello".into(),
+                created: 1,
+                updated: 2,
+            };
+            super::ai_thread_insert(&thread).expect("thread");
+            super::ai_message_insert(&crate::ai::ChatMessage {
+                id: "m1".into(),
+                thread_id: "t1".into(),
+                role: "user".into(),
+                text: "hi".into(),
+                at: 3,
+            })
+            .expect("msg");
+            let found = super::ai_threads_search("hi").expect("search");
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].title, "hello");
+            assert_eq!(
+                meta_get_for_test().as_deref(),
+                Some("1"),
+                "wave 5 tables must not bump schema_version"
+            );
         });
+    }
+
+    fn meta_get_for_test() -> Option<String> {
+        super::with_conn(|conn| super::meta_get(conn, "schema_version")).flatten()
     }
 
     #[test]

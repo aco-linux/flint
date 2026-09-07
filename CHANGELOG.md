@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — AI threads, memory, skills (Wave 5)
+
+- Threaded Ask AI in SQLite (`ai_threads` / `ai_messages`). First Ask creates a chat; follow-ups append user+assistant. Empty Ask lists recent chats (LIKE search on title/text). Enter resumes. Esc or **New chat** starts another
+- Attachments: clipboard text (secrets skipped), selected file (Ctrl+K or a copied path), share screen / region — hide, capture once with grim/slurp, attach a local path plus optional tesseract OCR. Images are never uploaded
+- Prompt templates on `{selection}` (primary, then clipboard): **Fix grammar**, **Quick Fix**, **Translate selection**, **Explain selection**
+- Memory: **Remember …** / **Show memory** / **Forget …** as user-visible SQLite rows, injected into the system prompt (cap 2 KiB)
+- Skills: `~/.config/flint/skills/*.md` appended to the system prompt (cap 12 KiB). Missing directory is fine
+- MCP stays a prompt primer behind `allow_mcp`. Flint does not run model-chosen tools
+- **Open OpenClaw** only if `openclaw` / `open-claw` is on PATH. The default local model name still mentions Hermes; that is not an agent runtime
+
 ## Unreleased — dictation, notes, focus (Wave 4)
 
 - **Dictate to focused app:** hide Flint, record, transcribe; `wtype --` types the text as argv (never ydotool). Missing wtype copies and the status says to install it. In-bar dictation is unchanged; Ctrl+K **Paste with wtype** on a transcript

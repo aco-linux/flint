@@ -59,6 +59,17 @@ pub fn run(action: &Action) {
         | Action::CreateNote { .. }
         | Action::OpenNote { .. }
         | Action::AskAi { .. }
+        | Action::AskSelection { .. }
+        | Action::ResumeThread { .. }
+        | Action::NewChat
+        | Action::Remember { .. }
+        | Action::ForgetMemory { .. }
+        | Action::ShowMemory
+        | Action::AttachClipboard
+        | Action::AttachSelected
+        | Action::AttachPath { .. }
+        | Action::ShareRegion
+        | Action::ShareScreen
         | Action::ToggleVoice
         | Action::DictateFocused
         | Action::NoteFromSelection

@@ -191,6 +191,9 @@ impl Catalog {
         if let Some(item) = crate::translate::item(query) {
             results.push(Scored::new(item, 98_000));
         }
+        for (i, item) in crate::memory::items(query).into_iter().enumerate() {
+            results.push(Scored::new(item, 99_000u32.saturating_sub(i as u32)));
+        }
         for item in crate::tz::items(query) {
             results.push(Scored::new(item, 96_000));
         }
@@ -531,12 +534,21 @@ impl Catalog {
         let q = query.trim();
         let settings = self.settings.borrow();
         let mut results = Vec::new();
+        let follow = crate::ai::current_thread();
         if !q.is_empty() {
+            let subtitle = if let Some(thread) = &follow {
+                format!(
+                    "Follow-up · {} · {} · {}",
+                    thread.title, settings.ai.provider, settings.ai.model
+                )
+            } else {
+                format!("{} · {}", settings.ai.provider, settings.ai.model)
+            };
             results.push(Scored::new(
                 Item {
                     id: format!("ask:{q}"),
                     title: format!("Ask “{q}”"),
-                    subtitle: format!("{} · {}", settings.ai.provider, settings.ai.model),
+                    subtitle,
                     keywords: q.to_string(),
                     kind: Kind::Ai,
                     icon: Icon::Name("help-faq".into()),
@@ -546,6 +558,14 @@ impl Catalog {
                 },
                 100_000,
             ));
+        }
+        results.push(Scored::new(
+            crate::ai::new_chat_item(),
+            if follow.is_some() { 80_000 } else { 8_000 },
+        ));
+        let threads = crate::ai::thread_items(q);
+        for (i, item) in threads.into_iter().enumerate() {
+            results.push(Scored::new(item, 50_000u32.saturating_sub(i as u32)));
         }
         results.push(Scored::new(
             Item {
@@ -1683,6 +1703,8 @@ fn system_commands() -> Vec<Item> {
     items.extend(crate::voice::command_items());
     items.push(notes::from_selection_item());
     items.extend(crate::focus::items());
+    items.extend(crate::ai::command_items(which));
+    items.extend(crate::memory::command_items());
     if let Some(picker) = smart::picker_item(which) {
         items.push(picker);
     }
@@ -1864,6 +1886,58 @@ mod tests {
         assert!(voice.iter().any(|row| row.item.id == "voice:toggle"));
         assert!(voice.iter().any(|row| row.item.id == "cmd:dictate-app"));
         assert!(crate::focus::live_item().is_none());
+    }
+
+    #[test]
+    fn wave5_ask_threads_memory_and_selection_prompts() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        crate::db::with_temp(|dir| {
+            crate::db::open_path(&dir.join("flint.db")).expect("open");
+            crate::ai::reset();
+            let thread = crate::ai::ensure_thread("Weather in Tokyo");
+            crate::ai::append_turn(&thread.id, "user", "Weather in Tokyo");
+            crate::ai::append_turn(&thread.id, "assistant", "Sunny.");
+            crate::memory::remember("I use Hyprland").expect("mem");
+            let catalog = super::Catalog::load(
+                Rc::new(RefCell::new(Store::load())),
+                Rc::new(RefCell::new(Settings::default())),
+            );
+            let empty = catalog.search_fast("?").1;
+            assert!(empty.iter().any(|row| row.item.id == "ask:new"));
+            assert!(
+                empty
+                    .iter()
+                    .any(|row| row.item.title.contains("Weather in Tokyo")),
+                "empty Ask query must list recent threads"
+            );
+            let follow = catalog.search_fast("? and tomorrow").1;
+            assert!(follow.iter().any(|row| {
+                matches!(row.item.action, crate::item::Action::AskAi { .. })
+                    && row.item.subtitle.contains("Follow-up")
+            }));
+            let search = catalog.search_fast("? Sunny").1;
+            assert!(search.iter().any(|row| row.item.title.contains("Weather")));
+            let grammar = catalog.search_fast("fix grammar").1;
+            assert!(
+                grammar
+                    .iter()
+                    .any(|row| matches!(row.item.action, crate::item::Action::AskSelection { .. }))
+            );
+            let rem = catalog.search_fast("remember I ship from Omarchy").1;
+            assert!(rem.iter().any(|row| matches!(
+                &row.item.action,
+                crate::item::Action::Remember { text } if text == "I ship from Omarchy"
+            )));
+            let mem = catalog.search_fast("show memory").1;
+            assert!(
+                mem.iter()
+                    .any(|row| matches!(row.item.action, crate::item::Action::ShowMemory))
+            );
+        });
     }
 
     #[test]

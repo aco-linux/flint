@@ -986,6 +986,14 @@ impl Shell {
                         self.set_status("Dictation cancelled");
                     } else if self.state.borrow().extension.is_some() {
                         self.extension_back();
+                    } else if self.state.borrow().mode == Mode::Ask
+                        && crate::ai::current_id().is_some()
+                    {
+                        crate::ai::new_chat();
+                        self.set_status("New chat");
+                        self.entry.set_text("? ");
+                        self.entry.set_position(-1);
+                        self.refresh();
                     } else if self.state.borrow().mode != Mode::Root {
                         self.enter_mode(Mode::Root);
                     } else {
@@ -1696,7 +1704,8 @@ impl Shell {
 
     fn run_ask(&self, prompt: &str) {
         let settings = self.state.borrow().catalog.settings.borrow().clone();
-        let mut prompt = prompt.to_string();
+        let typed = prompt.to_string();
+        let mut prompt = typed.clone();
         if settings.general.attach_clipboard_to_ai
             && let Some(clip) = clipboard::current_text()
         {
@@ -1706,15 +1715,30 @@ impl Shell {
                 prompt = format!("{prompt}\n\nClipboard:\n{clip}");
             }
         }
+        let extras = ai::peek_attachments();
+        if !extras.is_empty() {
+            prompt = ai::compose_user(&prompt, &extras);
+        }
+        let chat = ai::ensure_thread(&typed);
+        let history = ai::history(&chat.id);
         self.set_status(format!("Thinking with {}…", settings.ai.model));
         let (tx, rx) = std::sync::mpsc::channel();
+        let send_prompt = prompt.clone();
         thread::spawn(move || {
-            let _ = tx.send(ai::ask(&prompt, &settings));
+            let _ = tx.send(if history.is_empty() {
+                ai::ask(&send_prompt, &settings)
+            } else {
+                ai::chat(&settings, &history, &send_prompt)
+            });
         });
         let shell = self.clone();
+        let thread_id = chat.id;
         gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
             match rx.try_recv() {
                 Ok(Ok(reply)) => {
+                    let _ = ai::take_attachments();
+                    ai::append_turn(&thread_id, "user", &prompt);
+                    ai::append_turn(&thread_id, "assistant", &reply.text);
                     shell.set_status(reply.source.clone());
                     shell.show_ai_reply(reply.text, reply.source);
                     gtk4::glib::ControlFlow::Break
@@ -1782,8 +1806,135 @@ impl Shell {
                 self.paste_with_wtype(text);
                 true
             }
+            Action::AskSelection { template } => {
+                match ai::expand_selection_template(template) {
+                    Some(prompt) => self.run_ask(&prompt),
+                    None => self.set_status("No selected text (primary selection is empty)"),
+                }
+                true
+            }
+            Action::ResumeThread { id } => {
+                match ai::resume(id) {
+                    Some(thread) => {
+                        self.enter_mode(Mode::Ask);
+                        self.set_status(format!("Resumed “{}”. Type a follow-up.", thread.title));
+                    }
+                    None => self.set_status("That chat is gone"),
+                }
+                true
+            }
+            Action::NewChat => {
+                ai::new_chat();
+                self.enter_mode(Mode::Ask);
+                self.set_status("New chat");
+                true
+            }
+            Action::Remember { text } => {
+                match crate::memory::remember(text) {
+                    Some(_) => self.set_status("Remembered"),
+                    None => self.set_status("Nothing to remember"),
+                }
+                self.refresh();
+                true
+            }
+            Action::ForgetMemory { query } => {
+                let n = crate::memory::forget(query);
+                if n == 0 {
+                    self.set_status("Nothing matched");
+                } else {
+                    self.set_status(format!("Forgot {n}"));
+                }
+                self.refresh();
+                true
+            }
+            Action::ShowMemory => {
+                let items = crate::memory::list_items();
+                if items.is_empty() {
+                    self.set_status("No memories yet. Type remember …");
+                } else {
+                    {
+                        let mut st = self.state.borrow_mut();
+                        st.results = items
+                            .into_iter()
+                            .map(|item| Scored::new(item, 50_000))
+                            .collect();
+                        st.selected = 0;
+                    }
+                    self.set_status("Memory · Enter copies · Forget … to delete");
+                    self.sync_chrome();
+                    rebuild_rows(self);
+                }
+                true
+            }
+            Action::AttachClipboard => {
+                self.after_attach(ai::attach_clipboard());
+                true
+            }
+            Action::AttachSelected => {
+                let selected = {
+                    let st = self.state.borrow();
+                    st.results.get(st.selected).map(|row| row.item.clone())
+                };
+                if let Some(item) = selected.as_ref()
+                    && let Some(path) = item_path(item)
+                    && item.id != "cmd:attach-file"
+                {
+                    self.after_attach(ai::attach_path(&path));
+                } else if let Some(path) = path_from_clipboard() {
+                    self.after_attach(ai::attach_path(&path));
+                } else {
+                    self.set_status("Select a file (Ctrl+K → Attach) or copy a path");
+                }
+                true
+            }
+            Action::AttachPath { path } => {
+                self.after_attach(ai::attach_path(path));
+                true
+            }
+            Action::ShareRegion => {
+                self.share_capture(true);
+                true
+            }
+            Action::ShareScreen => {
+                self.share_capture(false);
+                true
+            }
             _ => false,
         }
+    }
+
+    fn after_attach(&self, result: Result<String, String>) {
+        match result {
+            Ok(msg) => {
+                if self.state.borrow().mode != Mode::Ask {
+                    self.enter_mode(Mode::Ask);
+                }
+                self.set_status(msg);
+            }
+            Err(err) => self.set_status(err),
+        }
+    }
+
+    fn share_capture(&self, region: bool) {
+        self.hide();
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            let captured = crate::capture::shot_to_path(region);
+            shell.state.borrow_mut().visible = true;
+            shell.show_launcher();
+            match captured {
+                Some(path) => {
+                    let ocr = crate::ocr::read_text(&path);
+                    let result = ai::attach(ai::Attachment::Image { path, ocr });
+                    shell.enter_mode(Mode::Ask);
+                    shell.after_attach(result);
+                }
+                None => {
+                    shell.restore_with_status("Capture cancelled".into());
+                }
+            }
+            gtk4::glib::ControlFlow::Break
+        });
     }
 
     fn start_focused_dictation(&self) {
@@ -3237,6 +3388,11 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
                 keywords: "copy".into(),
                 kind: PanelKind::Copy(text),
             });
+            out.push(PanelAction {
+                title: "Attach to Ask AI".into(),
+                keywords: "attach ask ai clipboard".into(),
+                kind: PanelKind::Run(Action::AttachClipboard),
+            });
         }
         Kind::Snippet => {
             let keyword = item.id.strip_prefix("snip:").unwrap_or("").to_string();
@@ -3357,6 +3513,13 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
 }
 
 fn file_actions(out: &mut Vec<PanelAction>, path: &Path, include_open: bool) {
+    out.push(PanelAction {
+        title: "Attach to Ask AI".into(),
+        keywords: "attach ask ai file".into(),
+        kind: PanelKind::Run(Action::AttachPath {
+            path: path.to_path_buf(),
+        }),
+    });
     for (title, action) in crate::ocr::actions_for_path(path) {
         out.push(PanelAction {
             title,
@@ -3414,9 +3577,26 @@ fn item_path(item: &Item) -> Option<PathBuf> {
         Action::OpenPath(path)
         | Action::PlayMedia { path }
         | Action::LaunchDesktop { path }
-        | Action::RunScript { path } => Some(path.clone()),
+        | Action::RunScript { path }
+        | Action::AttachPath { path } => Some(path.clone()),
         _ => None,
     }
+}
+
+fn path_from_clipboard() -> Option<PathBuf> {
+    let text = clipboard::current_text()?;
+    let text = text.trim();
+    if text.is_empty() || text.contains('\n') {
+        return None;
+    }
+    let path = if let Some(rest) = text.strip_prefix("~/") {
+        dirs::home_dir()?.join(rest)
+    } else if text == "~" {
+        dirs::home_dir()?
+    } else {
+        PathBuf::from(text)
+    };
+    if path.is_file() { Some(path) } else { None }
 }
 
 fn alias_typed(query: &str) -> Option<String> {

@@ -85,6 +85,27 @@ pub enum Action {
     AskAi {
         prompt: String,
     },
+    AskSelection {
+        template: String,
+    },
+    ResumeThread {
+        id: String,
+    },
+    NewChat,
+    Remember {
+        text: String,
+    },
+    ForgetMemory {
+        query: String,
+    },
+    ShowMemory,
+    AttachClipboard,
+    AttachSelected,
+    AttachPath {
+        path: PathBuf,
+    },
+    ShareRegion,
+    ShareScreen,
     ToggleVoice,
     SaveSettings,
     InstallExt {

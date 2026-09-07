@@ -74,7 +74,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 24 | Auto-increment snippet placeholders | `{increment}` per snippet | ships |
 | 25 | Emoji keywords | Missing | core |
 | 26 | Ask AI throwaway questions | `?` / Ask mode, local + OAuth/API | ships |
-| 27 | Follow-up AI turns | One-shot; no chat thread | core |
+| 27 | Follow-up AI turns | SQLite threads; empty Ask lists chats | ships |
 | 28 | Take notes from anywhere | `note` / `+title` / **Note from selection** | ships |
 | 29 | Capture selected text into a note | `wl-paste --primary` (not AT-SPI) | partial |
 | 30 | Simple math | `evalexpr` instant answer | ships |
@@ -104,8 +104,8 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 54 | Quit an application | Action panel + closewindow; force-quit is SIGKILL | ships |
 | 55 | Auto-quit applications | Missing | core |
 | 56 | Quit all applications at once | Confirm result; denylist in `quit-keep.json` | ships |
-| 57 | Fix grammar and spelling | Missing | core |
-| 58 | Inline Quick Fix | Missing | core |
+| 57 | Fix grammar and spelling | Ask-AI template on `{selection}` | ships |
+| 58 | Inline Quick Fix | Ask-AI template on `{selection}` | ships |
 | 59 | Uninstall applications | Flatpak / pacman when the desktop file maps; confirm first | ships |
 | 60 | Start a focus session | 25m timer, `status.json` for Waybar | ships |
 | 61 | Unfocus / break | Stop / Unfocus / 5m break; timeout only while running | ships |
@@ -117,12 +117,12 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 67 | Switch display resolution | `hyprctl` modes plus 720p/1080p/1440p/4K | desktop |
 | 68 | Convert images | Missing | ext |
 | 69 | Ask AI to convert images | No image-out tools | ext |
-| 70 | Translate text | Missing | core |
-| 71 | Translate specific language pairs | Missing | core |
+| 70 | Translate text | Ask-AI template on `{selection}` | ships |
+| 71 | Translate specific language pairs | `tr fr` / `en:de` Ask-AI templates | ships |
 | 72 | Quick word lookup | Missing | ext |
 | 73 | Copy file path | Action panel | ships |
 | 74 | Chat with a Hermes agent | Default local model is `qwen3.5:9b-hermes`; not an agent runtime | partial |
-| 75 | Open Claw / OpenClaw | Missing | ext |
+| 75 | Open Claw / OpenClaw | Command if `openclaw` is on PATH | partial |
 | 76 | Search fonts | Missing | ext |
 | 77 | Pick a color | Hex parse only (`#ff5a1f` → RGB) | partial |
 | 78 | Convert color formats | Hex → RGB copy; no HSL/OKLCH/picker | core |
@@ -139,15 +139,15 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 89 | Pin favorites to the top | Action panel pin; empty root lists them first | ships |
 | 90 | Custom AI agents | Missing | core |
 | 91 | Launch an agent with a hotkey | Missing | core |
-| 92 | AI knows who you are | System prompt only | core |
-| 93 | AI remembers what you do | Missing | core |
+| 92 | AI knows who you are | System prompt + memory block | partial |
+| 93 | AI remembers what you do | SQLite memory facts | ships |
 | 94 | Read text from images (OCR) | Missing | core |
 | 95 | Decipher QR codes | Missing | core |
-| 96 | Teach AI skills | Missing | core |
+| 96 | Teach AI skills | `~/.config/flint/skills/*.md` | ships |
 | 97 | Extend AI capabilities | MCP primer; no tool runner | core |
 | 98 | Autonomous “just do it” | Missing | core |
-| 99 | Share the screen with AI | Missing | core |
-| 100 | Share a region with AI | Missing | core |
+| 99 | Share the screen with AI | Explicit capture once after hide | ships |
+| 100 | Share a region with AI | Explicit grim/slurp once after hide | ships |
 | 101 | *(video beat: AI skills doing work unattended — counted in 96–98)* | — | — |
 | 102 | Throw confetti | In-window overlay | ships |
 

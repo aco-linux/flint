@@ -95,6 +95,10 @@ pub fn zbarimg_args(path: &Path) -> [&std::ffi::OsStr; 3] {
     ]
 }
 
+pub fn read_text(path: &Path) -> Option<String> {
+    ocr_output(path)
+}
+
 fn ocr_output(path: &Path) -> Option<String> {
     if !command_exists("tesseract") {
         return None;
