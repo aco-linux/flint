@@ -9,10 +9,12 @@ Flint 0.4 is a public, local-first release. It includes the launcher and product
 Flint stays resident: the first launch keeps a daemon so clipboard history, notes, dictation, and Ask AI stay warm.
 
 Flint opens as a normal desktop window. Under Hyprland it floats centered at
-980×720 on the first frame (`no_anim` so it does not tile large then shrink),
-still resizable, with a title bar; closing the window hides it while the
-resident process remains warm. Copy [`share/hyprland.conf`](share/hyprland.conf)
-for the compositor rules, or let Flint install the same float rule at daemon start.
+980×400 on the first frame (`no_anim` so it does not tile large then shrink),
+then grows with the results (weather card, agenda, GIFs, Instant Answers, Ask
+transcript) up to about 980×900. It stays resizable, with a title bar; closing
+the window hides it while the resident process remains warm. Copy
+[`share/hyprland.conf`](share/hyprland.conf) for the compositor rules, or let
+Flint install the same float rule at daemon start.
 
 ## Install
 
@@ -75,7 +77,7 @@ Type `+keyword` in snippets to save the clipboard. Type `+title` in notes to cre
 
 Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
-- Type `we` and Flint already means weather: it geolocates you and fills in the current conditions.
+- Type `we` and Flint already means weather: it geolocates you and fills in the current conditions. Full sentences work too: “what’s the weather”, “is it going to rain”, “what’s on my calendar today”, “what’s in my inbox”.
 - Apps, calc, commands, and windows paint on the same keystroke. Windows come from the Hyprland event socket, not a poll. Nothing else is scheduled unless you actually asked for a file or live weather.
 - Ranking cares when you last used something, not just how many times. An app from yesterday beats one you hammered two years ago. Typing the start of a name is no longer 200× heavier than a habit.
 - Swapped letters count (`weahter` → weather). Missing letters still do (`wthr` → weather).
@@ -109,7 +111,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
-| PKCE OAuth + loopback `127.0.0.1` + refresh tokens | MCP is a prompt primer; the model cannot run tools. MCP spawn is **off by default** |
+| PKCE OAuth + loopback `127.0.0.1` + refresh tokens | Ask AI can call native Flint tools (calendar, weather, iCloud inbox, Instant Answers). MCP stays a prompt primer and cannot run `tools/call`. MCP spawn is **off by default** |
 
 ## Ask AI
 
