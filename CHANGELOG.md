@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — dictation, notes, focus (Wave 4)
+
+- **Dictate to focused app:** hide Flint, record, transcribe; `wtype --` types the text as argv (never ydotool). Missing wtype copies and the status says to install it. In-bar dictation is unchanged; Ctrl+K **Paste with wtype** on a transcript
+- Dictation history in SQLite (`dictation` table, cap 100). Voice mode empty query lists it; Enter pastes. Root command **Voice history**
+- Language/style are Ask AI prompt templates on the last transcript (email, formal, concise, bullets, translate) — not a second STT engine
+- **Note from selection:** `wl-paste --primary` (then clipboard). Empty primary → status. Job 29 is primary selection, not AT-SPI
+- Focus timer: **Start focus 25m**, **Start break 5m**, **Stop focus**, **Unfocus**. glib 1s timeout only while a session is running. `status.json` (`{text,class,tooltip}`) for Waybar. Root shows remaining time from an in-process mutex, not a file poll
+
 ## Unreleased — in-bar content tools (Wave 3)
 
 - Content search: explicit `content:` / `in:` (or Files mode `content <q>`). One cancellable `rg --max-count 1` over `$HOME` and `search_roots`, never `/`. Ordinary root typing stays in-memory

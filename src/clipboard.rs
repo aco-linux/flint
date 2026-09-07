@@ -396,8 +396,30 @@ fn ago(ts: u64) -> String {
 }
 
 pub fn current_text() -> Option<String> {
+    paste_text(&["--no-newline"])
+}
+
+/// Primary selection. Job 29 is this, not AT-SPI. Tries `wl-paste --primary` then `-p`.
+pub fn primary_text() -> Option<String> {
+    paste_text(primary_paste_args()).or_else(|| paste_text(primary_paste_args_short()))
+}
+
+/// Primary selection, then the regular clipboard. Empty both → `None`.
+pub fn selection_or_clipboard() -> Option<String> {
+    primary_text().or_else(current_text)
+}
+
+pub(crate) fn primary_paste_args() -> &'static [&'static str] {
+    &["--primary", "--no-newline"]
+}
+
+pub(crate) fn primary_paste_args_short() -> &'static [&'static str] {
+    &["-p", "--no-newline"]
+}
+
+fn paste_text(args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("wl-paste")
-        .arg("--no-newline")
+        .args(args)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -413,7 +435,7 @@ pub fn current_text() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Store;
+    use super::{Store, primary_paste_args, primary_paste_args_short};
 
     #[test]
     fn ingest_dedups_and_promotes() {
@@ -519,6 +541,16 @@ mod tests {
             unpinned.len() < 80,
             "oversize unpinned clips must be dropped, kept {}",
             unpinned.len()
+        );
+    }
+
+    #[test]
+    fn job29_is_primary_selection_not_atspi() {
+        assert_eq!(primary_paste_args(), &["--primary", "--no-newline"]);
+        assert_eq!(primary_paste_args_short(), &["-p", "--no-newline"]);
+        assert!(
+            primary_paste_args().contains(&"--primary")
+                || primary_paste_args_short().contains(&"-p")
         );
     }
 }

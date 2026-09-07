@@ -60,10 +60,10 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 10 | Search emojis | Shells `omarchy-menu-emoji` if present | partial |
 | 11 | Search emojis with AI | Missing | ext |
 | 12 | Search Slack emojis | Missing | ext |
-| 13 | Dictate from anywhere | In-launcher only (`pw-record` + voxtype → search box) | core |
-| 14 | Dictate in any language | `voice.language` setting, not a first-class picker | partial |
-| 15 | Dictate with styles | Missing | core |
-| 16 | Remember everything you said | No dictation history | core |
+| 13 | Dictate from anywhere | In-bar + **Dictate to focused app** (`wtype --`) | ships |
+| 14 | Dictate in any language | `voice.language` STT setting + Ask AI post-process on last transcript | partial |
+| 15 | Dictate with styles | Ask AI templates on last transcript (email/formal/concise/bullets) | ships |
+| 16 | Remember everything you said | SQLite `dictation` history, cap 100; Voice mode empty query | ships |
 | 17 | Arrange windows in ~58 presets | Halves, quarters, maximize, center, almost-maximize, next/prev display | ships |
 | 18 | Custom window management commands | Named layouts in `layouts.json`; `layout +name` saves | ships |
 | 19 | Caps Lock as Hyper key, Caps Lock still works | Not a launcher feature | desktop |
@@ -75,8 +75,8 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 25 | Emoji keywords | Missing | core |
 | 26 | Ask AI throwaway questions | `?` / Ask mode, local + OAuth/API | ships |
 | 27 | Follow-up AI turns | One-shot; no chat thread | core |
-| 28 | Take notes from anywhere | `note` / `+title` | partial |
-| 29 | Capture selected text into a note | No `getSelectedText` | core |
+| 28 | Take notes from anywhere | `note` / `+title` / **Note from selection** | ships |
+| 29 | Capture selected text into a note | `wl-paste --primary` (not AT-SPI) | partial |
 | 30 | Simple math | `evalexpr` instant answer | ships |
 | 31 | Complicated math | Same evaluator; no CAS | partial |
 | 32 | Convert units | Length, mass, data, temperature | partial |
@@ -107,8 +107,8 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 57 | Fix grammar and spelling | Missing | core |
 | 58 | Inline Quick Fix | Missing | core |
 | 59 | Uninstall applications | Flatpak / pacman when the desktop file maps; confirm first | ships |
-| 60 | Start a focus session | Missing | core |
-| 61 | Unfocus / break | Missing | core |
+| 60 | Start a focus session | 25m timer, `status.json` for Waybar | ships |
+| 61 | Unfocus / break | Stop / Unfocus / 5m break; timeout only while running | ships |
 | 62 | Download thousands of extensions | Vicinae store + script-commands; not Raycast's catalog | partial |
 | 63 | Build an extension with AI | Missing | out |
 | 64 | Build an extension by hand | Vicinae API host (`List`/`Detail`); no `Form`/`Grid`/OAuth | partial |
@@ -131,7 +131,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 81 | Sync computers and iPhone | n/a | out |
 | 82 | Tags on snippets | Missing | core |
 | 83 | Tags on quicklinks | Missing (no quicklinks) | core |
-| 84 | Menu-bar extras | Waybar is the Linux surface | desktop |
+| 84 | Menu-bar extras | Waybar custom module reads `status.json` | desktop |
 | 85 | Browse a Notion workspace | Missing | ext |
 | 86 | Modify system settings | Flint settings + a few Omarchy launchers | partial |
 | 87 | Practice typing | Missing | ext |

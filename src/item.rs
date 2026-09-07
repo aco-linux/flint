@@ -157,6 +157,17 @@ pub enum Action {
     Qr {
         path: Option<PathBuf>,
     },
+    /// Hide Flint, record, transcribe, then `wtype --` into the focused app.
+    DictateFocused,
+    /// Type `text` with `wtype --` (argv). Missing wtype copies instead.
+    TypeText(String),
+    /// Create a note from primary selection (`wl-paste --primary`), clipboard fallback.
+    NoteFromSelection,
+    StartFocus {
+        seconds: u32,
+        label: String,
+    },
+    StopFocus,
 }
 
 /// Callback identity for an action rendered by a running extension.

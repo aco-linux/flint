@@ -113,6 +113,8 @@ struct State {
     extension: Option<extension::Session>,
     extension_gen: u64,
     voice: VoiceSession,
+    /// Bumped to cancel the 1s focus timeout when idle or replaced.
+    focus_gen: u64,
     search_gen: u64,
     thumbs: HashMap<PathBuf, CachedThumb>,
     captions: HashMap<PathBuf, String>,
@@ -424,6 +426,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             extension: None,
             extension_gen: 0,
             voice: VoiceSession::new(),
+            focus_gen: 0,
             search_gen: 0,
             thumbs: HashMap::new(),
             captions: HashMap::new(),
@@ -533,6 +536,12 @@ impl Clone for Shell {
 
 impl Shell {
     pub fn toggle(&self) {
+        if self.state.borrow().voice.state() == voice::State::Listening
+            && self.state.borrow().voice.dest() == voice::Dest::FocusedApp
+        {
+            self.finish_global_dictation();
+            return;
+        }
         if self.state.borrow().visible {
             self.hide();
         } else if self.state.borrow().extension.is_some() {
@@ -570,9 +579,17 @@ impl Shell {
     }
 
     pub fn hide(&self) {
+        self.hide_inner(true);
+    }
+
+    fn hide_keep_voice(&self) {
+        self.hide_inner(false);
+    }
+
+    fn hide_inner(&self, cancel_voice: bool) {
         self.commit_editing();
         self.close_actions_inner(false);
-        if self.state.borrow().voice.state() != voice::State::Idle {
+        if cancel_voice && self.state.borrow().voice.state() != voice::State::Idle {
             self.state.borrow().voice.cancel();
         }
         self.state.borrow_mut().visible = false;
@@ -1097,6 +1114,9 @@ impl Shell {
             }
             return;
         }
+        if self.handle_ui_action(&item.action) {
+            return;
+        }
         match item.action {
             Action::EnterMode(mode) => self.enter_mode(mode),
             Action::SaveSnippet { keyword } => {
@@ -1549,6 +1569,9 @@ impl Shell {
             }
             PanelKind::Launch => {
                 self.close_actions();
+                if self.handle_ui_action(&item.action) {
+                    return;
+                }
                 self.hide();
                 action::run(&item.action);
             }
@@ -1598,6 +1621,9 @@ impl Shell {
     }
 
     fn dispatch_action(&self, action: Action) {
+        if self.handle_ui_action(&action) {
+            return;
+        }
         match action {
             Action::Layout { .. } | Action::Capture { .. } => self.hide_then(action),
             Action::QuitAll => {
@@ -1734,10 +1760,193 @@ impl Shell {
         rebuild_rows(self);
     }
 
+    fn handle_ui_action(&self, action: &Action) -> bool {
+        match action {
+            Action::DictateFocused => {
+                self.start_focused_dictation();
+                true
+            }
+            Action::NoteFromSelection => {
+                self.note_from_selection();
+                true
+            }
+            Action::StartFocus { seconds, label } => {
+                self.begin_focus(*seconds, label);
+                true
+            }
+            Action::StopFocus => {
+                self.stop_focus();
+                true
+            }
+            Action::TypeText(text) => {
+                self.paste_with_wtype(text);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn start_focused_dictation(&self) {
+        let settings = self.state.borrow().catalog.settings.borrow().clone();
+        match self.state.borrow().voice.state() {
+            voice::State::Listening
+                if self.state.borrow().voice.dest() == voice::Dest::FocusedApp =>
+            {
+                self.finish_global_dictation();
+            }
+            voice::State::Listening => {
+                self.state.borrow().voice.set_dest(voice::Dest::FocusedApp);
+                self.set_status("Listening… Alt+Space pastes into the focused app");
+                self.hide_keep_voice();
+            }
+            voice::State::Transcribing => self.set_status("Still transcribing…"),
+            voice::State::Idle => {
+                let started = self
+                    .state
+                    .borrow()
+                    .voice
+                    .start_for(&settings, voice::Dest::FocusedApp);
+                match started {
+                    Ok(()) => {
+                        self.set_status("Listening… Alt+Space pastes into the focused app");
+                        self.hide_keep_voice();
+                    }
+                    Err(err) => self.set_status(err),
+                }
+            }
+        }
+    }
+
+    fn finish_global_dictation(&self) {
+        let settings = self.state.borrow().catalog.settings.borrow().clone();
+        let voice = self.state.borrow().voice.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(voice.stop(&settings));
+        });
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+            match rx.try_recv() {
+                Ok(Ok(text)) => {
+                    shell.deliver_focused_transcript(text);
+                    gtk4::glib::ControlFlow::Break
+                }
+                Ok(Err(err)) => {
+                    shell.restore_with_status(err);
+                    gtk4::glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    shell.restore_with_status("Dictation stopped unexpectedly".into());
+                    gtk4::glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    fn deliver_focused_transcript(&self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            self.restore_with_status("No speech detected".into());
+            return;
+        }
+        crate::voice::remember(&text);
+        if action::wtype_available() {
+            let _ = action::type_text(&text);
+            self.set_status("Dictation pasted");
+        } else {
+            action::copy_text(&text);
+            self.restore_with_status("install wtype to paste into the focused app".into());
+        }
+    }
+
+    fn restore_with_status(&self, status: String) {
+        self.state.borrow_mut().visible = true;
+        self.show_launcher();
+        self.entry.grab_focus();
+        self.set_status(status);
+        self.refresh();
+    }
+
+    fn paste_with_wtype(&self, text: &str) {
+        if action::wtype_available() {
+            let text = text.to_string();
+            self.hide();
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+                let _ = action::type_text(&text);
+                gtk4::glib::ControlFlow::Break
+            });
+        } else {
+            action::copy_text(text);
+            self.set_status("install wtype to paste into the focused app");
+        }
+    }
+
+    fn note_from_selection(&self) {
+        match clipboard::selection_or_clipboard() {
+            Some(text) if !text.trim().is_empty() => {
+                let note = notes::from_text(&text);
+                self.open_note(&note.id);
+            }
+            _ => self.set_status("No selected text (primary selection is empty)"),
+        }
+    }
+
+    fn begin_focus(&self, seconds: u32, label: &str) {
+        crate::focus::start(seconds, label);
+        self.arm_focus_ticks();
+        let text = crate::focus::status_line().unwrap_or_else(|| "Focus started".into());
+        self.set_status(text);
+        self.refresh();
+    }
+
+    fn stop_focus(&self) {
+        {
+            let mut st = self.state.borrow_mut();
+            st.focus_gen = st.focus_gen.saturating_add(1);
+        }
+        crate::focus::stop();
+        self.set_status("Focus stopped");
+        self.refresh();
+    }
+
+    fn arm_focus_ticks(&self) {
+        let tick_gen = {
+            let mut st = self.state.borrow_mut();
+            st.focus_gen = st.focus_gen.saturating_add(1);
+            st.focus_gen
+        };
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+            if shell.state.borrow().focus_gen != tick_gen {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            match crate::focus::tick() {
+                crate::focus::Tick::Running { text } => {
+                    if shell.state.borrow().visible {
+                        shell.set_status(text);
+                    }
+                    gtk4::glib::ControlFlow::Continue
+                }
+                crate::focus::Tick::Done { text } => {
+                    if shell.state.borrow().visible {
+                        shell.set_status(text);
+                        shell.refresh();
+                    }
+                    gtk4::glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
     fn toggle_voice(&self) {
         let settings = self.state.borrow().catalog.settings.borrow().clone();
+        let dest = self.state.borrow().voice.dest();
         let state = self.state.borrow().voice.state();
         match state {
+            voice::State::Listening if dest == voice::Dest::FocusedApp => {
+                self.finish_global_dictation();
+            }
             voice::State::Listening => {
                 self.set_status("Transcribing…");
                 let voice = self.state.borrow().voice.clone();
@@ -1790,6 +1999,7 @@ impl Shell {
             self.set_status("No speech detected");
             return;
         }
+        crate::voice::remember(&text);
         let current = self.entry.text().to_string();
         let filled = if current.trim_start().starts_with('?')
             || self.state.borrow().mode == Mode::Ask
@@ -1802,7 +2012,7 @@ impl Shell {
         self.entry.set_text(&filled);
         self.entry.set_position(-1);
         self.entry.grab_focus();
-        self.set_status("Dictation captured · edit, then Enter");
+        self.set_status("Dictation captured · edit, then Enter · Ctrl+K to paste with wtype");
         self.refresh();
     }
 
@@ -3056,6 +3266,31 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
                 keywords: "open url".into(),
                 kind: PanelKind::Open,
             });
+        }
+        Kind::Voice => {
+            let text = match &item.action {
+                Action::Paste(text) | Action::TypeText(text) | Action::Copy(text) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            };
+            if let Some(text) = text {
+                out.push(PanelAction {
+                    title: "Paste with wtype".into(),
+                    keywords: "wtype type paste focused".into(),
+                    kind: PanelKind::Run(Action::TypeText(text.clone())),
+                });
+                out.push(PanelAction {
+                    title: "Paste".into(),
+                    keywords: "paste".into(),
+                    kind: PanelKind::Paste(text.clone()),
+                });
+                out.push(PanelAction {
+                    title: "Copy".into(),
+                    keywords: "copy".into(),
+                    kind: PanelKind::Copy(text),
+                });
+            }
         }
         Kind::Command | Kind::Shell => {
             out.push(PanelAction {

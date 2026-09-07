@@ -14,6 +14,7 @@ mod emoji;
 mod extension;
 mod favorites;
 mod files;
+mod focus;
 mod hypr;
 mod intent;
 mod item;

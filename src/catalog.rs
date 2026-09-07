@@ -169,6 +169,13 @@ impl Catalog {
             return self.empty_state();
         }
 
+        if let Some(item) = crate::focus::live_item() {
+            let hay = format!("{} {}", item.title, item.keywords).to_ascii_lowercase();
+            if hay.contains(&query.to_ascii_lowercase()) {
+                results.push(Scored::new(item, 110_000));
+            }
+        }
+
         if let Some(id) = alias::Store::load().lookup(query)
             && let Some(item) = self.lookup_item(id)
         {
@@ -491,6 +498,10 @@ impl Catalog {
     fn search_notes(&self, query: &str) -> Vec<Scored> {
         let q = query.trim();
         let mut results = Vec::new();
+        let selection = notes::from_selection_item();
+        if q.is_empty() {
+            results.push(Scored::new(selection.clone(), 90_000));
+        }
         if let Some(title) = q.strip_prefix('+').map(str::trim)
             && !title.is_empty()
         {
@@ -509,7 +520,8 @@ impl Catalog {
                 100_000,
             ));
         }
-        let items: Vec<Item> = notes::load().into_iter().map(|n| n.to_item()).collect();
+        let mut items = vec![selection];
+        items.extend(notes::load().into_iter().map(|n| n.to_item()));
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
         results.extend(self.score_pool(&items, rest, 18));
         finish(results)
@@ -568,35 +580,62 @@ impl Catalog {
         results
     }
 
-    fn search_voice(&self, _query: &str) -> Vec<Scored> {
-        vec![
-            Scored::new(
+    fn search_voice(&self, query: &str) -> Vec<Scored> {
+        let q = query.trim();
+        let mut results = vec![Scored::new(
+            Item {
+                id: "voice:toggle".into(),
+                title: "Start dictation".into(),
+                subtitle: "Stay in Flint. Speak, then Enter — the transcript fills the search box."
+                    .into(),
+                keywords: "voice dictate speech".into(),
+                kind: Kind::Voice,
+                icon: Icon::Name("audio-input-microphone".into()),
+                action: Action::ToggleVoice,
+            },
+            100_000,
+        )];
+        for item in crate::voice::command_items() {
+            results.push(Scored::new(item, 90_000));
+        }
+        if let Some(last) = crate::voice::last_text() {
+            results.push(Scored::new(
                 Item {
-                    id: "voice:toggle".into(),
-                    title: "Start dictation".into(),
-                    subtitle:
-                        "Stay in Flint. Speak, then Enter — the transcript fills the search box."
-                            .into(),
-                    keywords: "voice dictate speech".into(),
+                    id: "voice:wtype-last".into(),
+                    title: "Paste last dictation with wtype".into(),
+                    subtitle: last.chars().take(64).collect::<String>(),
+                    keywords: format!("wtype paste focused {last}"),
                     kind: Kind::Voice,
-                    icon: Icon::Name("audio-input-microphone".into()),
-                    action: Action::ToggleVoice,
+                    icon: Icon::Name("input-keyboard".into()),
+                    action: Action::TypeText(last.clone()),
                 },
-                100_000,
-            ),
-            Scored::new(
-                Item {
-                    id: "voice:settings".into(),
-                    title: "Voice settings".into(),
-                    subtitle: "Language and Whisper model".into(),
-                    keywords: "voxtype whisper".into(),
-                    kind: Kind::Settings,
-                    icon: Icon::Name("preferences-system".into()),
-                    action: Action::EnterMode(Mode::Settings),
-                },
-                1_000,
-            ),
-        ]
+                80_000,
+            ));
+            for item in crate::voice::postprocess_items(&last) {
+                results.push(Scored::new(item, 70_000));
+            }
+        }
+        results.push(Scored::new(
+            Item {
+                id: "voice:settings".into(),
+                title: "Voice settings".into(),
+                subtitle: "Language and Whisper model".into(),
+                keywords: "voxtype whisper".into(),
+                kind: Kind::Settings,
+                icon: Icon::Name("preferences-system".into()),
+                action: Action::EnterMode(Mode::Settings),
+            },
+            1_000,
+        ));
+        let hist = crate::voice::history_items();
+        if q.is_empty() {
+            for (i, item) in hist.into_iter().enumerate() {
+                results.push(Scored::new(item, 50_000u32.saturating_sub(i as u32)));
+            }
+            return results;
+        }
+        results.extend(self.score_pool(&hist, q, 48));
+        finish(results)
     }
 
     fn search_settings(&self, query: &str) -> Vec<Scored> {
@@ -956,11 +995,20 @@ impl Catalog {
         if let Some(note_id) = id.strip_prefix("note:") {
             return notes::get(note_id).map(|n| n.to_item());
         }
+        if let Some(hist_id) = id.strip_prefix("voice:hist:") {
+            return crate::voice::history_item(hist_id);
+        }
+        if id == "cmd:focus-now" {
+            return crate::focus::live_item();
+        }
         None
     }
 
     fn empty_state(&self) -> Vec<Scored> {
         let mut out = Vec::new();
+        if let Some(item) = crate::focus::live_item() {
+            out.push(Scored::new(item, 40_000));
+        }
         let now = usage::now_secs();
         let favs = favorites::Store::load();
         for id in favs.all() {
@@ -1153,8 +1201,8 @@ fn extension_items() -> Vec<Item> {
         Item {
             id: "ext:voice".into(),
             title: "Dictation".into(),
-            subtitle: "Speak into Flint — transcript fills the search box".into(),
-            keywords: "voice dictate speech microphone".into(),
+            subtitle: "In-bar, or dictate to the focused app with wtype".into(),
+            keywords: "voice dictate speech microphone history wtype".into(),
             kind: Kind::Extension,
             icon: Icon::Name("audio-input-microphone".into()),
             action: Action::EnterMode(Mode::Voice),
@@ -1632,6 +1680,9 @@ fn system_commands() -> Vec<Item> {
     items.extend(crate::quit::items());
     items.extend(crate::hypr::resolution_items());
     items.extend(crate::ocr::items(which));
+    items.extend(crate::voice::command_items());
+    items.push(notes::from_selection_item());
+    items.extend(crate::focus::items());
     if let Some(picker) = smart::picker_item(which) {
         items.push(picker);
     }
@@ -1773,6 +1824,79 @@ mod tests {
             crate::mode::Mode::Root,
             false
         ));
+    }
+
+    #[test]
+    fn wave4_commands_are_searchable() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        crate::focus::reset();
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let dictate = catalog.search_fast("dictate focused").1;
+        assert!(
+            dictate.iter().any(|row| row.item.id == "cmd:dictate-app"),
+            "Dictate to focused app must be a root command"
+        );
+        assert!(
+            dictate
+                .iter()
+                .any(|row| matches!(row.item.action, crate::item::Action::DictateFocused))
+        );
+        let note = catalog.search_fast("note from selection").1;
+        assert!(note.iter().any(|row| row.item.id == "cmd:note-selection"));
+        let focus = catalog.search_fast("start focus").1;
+        assert!(focus.iter().any(|row| row.item.id == "cmd:focus-start"));
+        assert!(
+            catalog
+                .search_fast("unfocus")
+                .1
+                .iter()
+                .any(|row| row.item.id == "cmd:unfocus")
+        );
+        assert_eq!(catalog.search_fast("voice").0, crate::mode::Mode::Voice);
+        let voice = catalog.search_fast("voice").1;
+        assert!(voice.iter().any(|row| row.item.id == "voice:toggle"));
+        assert!(voice.iter().any(|row| row.item.id == "cmd:dictate-app"));
+        assert!(crate::focus::live_item().is_none());
+    }
+
+    #[test]
+    fn voice_mode_empty_query_lists_history() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        crate::db::with_temp(|dir| {
+            crate::db::open_path(&dir.join("flint.db")).expect("open");
+            crate::voice::remember("remember this utterance");
+            let catalog = super::Catalog::load(
+                Rc::new(RefCell::new(Store::load())),
+                Rc::new(RefCell::new(Settings::default())),
+            );
+            let rows = catalog.search_fast("voice").1;
+            assert!(
+                rows.iter()
+                    .any(|row| row.item.keywords.contains("remember this utterance")),
+                "empty Voice query must list dictation history"
+            );
+            assert!(rows.iter().any(|row| matches!(
+                &row.item.action,
+                crate::item::Action::Paste(text) if text == "remember this utterance"
+            )));
+            let styles = catalog.search_fast("voice formal").1;
+            assert!(
+                styles
+                    .iter()
+                    .any(|row| matches!(row.item.action, crate::item::Action::AskAi { .. }))
+            );
+        });
     }
 
     #[test]

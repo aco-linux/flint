@@ -20,6 +20,7 @@ use crate::paths;
 use crate::quicklinks::Link;
 use crate::snippets::Snippet;
 use crate::usage::{self, Record};
+use crate::voice::Entry as Dictation;
 
 const SCHEMA_VERSION: &str = "1";
 const SCHEMA: &str = "
@@ -79,7 +80,14 @@ CREATE TABLE IF NOT EXISTS layouts (
 CREATE TABLE IF NOT EXISTS quit_keep (
     class TEXT PRIMARY KEY NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dictation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
 ";
+
+const MAX_DICTATION: i64 = 100;
 
 struct Db {
     conn: Connection,
@@ -815,6 +823,78 @@ pub fn quit_keep_load() -> Option<Vec<String>> {
     })
 }
 
+fn dictation_insert_conn(conn: &Connection, text: &str, at: u64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO dictation (text, at) VALUES (?1, ?2)",
+        params![text, at as i64],
+    )?;
+    let extra: i64 = conn.query_row("SELECT COUNT(*) FROM dictation", [], |row| row.get(0))?;
+    if extra > MAX_DICTATION {
+        conn.execute(
+            "DELETE FROM dictation WHERE id IN (
+                SELECT id FROM (
+                    SELECT id FROM dictation ORDER BY at ASC, id ASC LIMIT ?1
+                )
+            )",
+            params![extra - MAX_DICTATION],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn dictation_push(text: &str) -> Option<()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    with_conn(|conn| dictation_insert_conn(conn, text, now_secs()))
+}
+
+pub fn dictation_load() -> Option<Vec<Dictation>> {
+    with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT id, text, at FROM dictation ORDER BY at DESC, id DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![MAX_DICTATION], |row| {
+            Ok(Dictation {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                at: row.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        rows.collect()
+    })
+}
+
+pub fn dictation_last() -> Option<String> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT text FROM dictation ORDER BY at DESC, id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+    })
+    .flatten()
+}
+
+pub fn dictation_get(id: i64) -> Option<Dictation> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT id, text, at FROM dictation WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Dictation {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    at: row.get::<_, i64>(2)? as u64,
+                })
+            },
+        )
+        .optional()
+    })
+    .flatten()
+}
+
 #[cfg(test)]
 pub(crate) fn reset() {
     mutate_state(|state| *state = None);
@@ -899,6 +979,26 @@ mod tests {
             assert_eq!(clips.len(), 1);
             assert_eq!(clips[0].text, "first");
             assert!(dir.join("clipboard.json.bak").exists());
+        });
+    }
+
+    #[test]
+    fn dictation_caps_at_100_without_bumping_schema_v1() {
+        with_temp(|dir| {
+            open_path(&dir.join("flint.db")).expect("open");
+            assert_eq!(clips_load().expect("clips").len(), 0);
+            for i in 0..105 {
+                super::dictation_push(&format!("utterance {i}")).expect("push");
+            }
+            let rows = super::dictation_load().expect("load");
+            assert_eq!(rows.len(), 100);
+            assert_eq!(rows[0].text, "utterance 104");
+            assert_eq!(rows[99].text, "utterance 5");
+            assert_eq!(super::dictation_last().as_deref(), Some("utterance 104"));
+            let got = super::dictation_get(rows[0].id).expect("get");
+            assert_eq!(got.text, "utterance 104");
+            crate::notes::create("still v1");
+            assert_eq!(super::notes_load().expect("notes").len(), 1);
         });
     }
 

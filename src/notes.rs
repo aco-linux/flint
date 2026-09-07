@@ -45,6 +45,18 @@ impl Note {
     }
 }
 
+pub fn from_selection_item() -> Item {
+    Item {
+        id: "cmd:note-selection".into(),
+        title: "Note from selection".into(),
+        subtitle: "Primary selection (wl-paste --primary), then clipboard".into(),
+        keywords: "note selection primary capture selected text".into(),
+        kind: Kind::Note,
+        icon: Icon::Name("edit-select-all".into()),
+        action: Action::NoteFromSelection,
+    }
+}
+
 pub fn load() -> Vec<Note> {
     db::notes_load().unwrap_or_default()
 }
@@ -58,6 +70,20 @@ pub fn upsert(note: Note) {
 }
 
 pub fn create(title: &str) -> Note {
+    from_parts(title, "")
+}
+
+/// Title is the first non-empty line; body is the original text.
+pub fn from_text(text: &str) -> Note {
+    let title = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Untitled");
+    let title: String = title.chars().take(64).collect();
+    from_parts(&title, text)
+}
+
+fn from_parts(title: &str, body: &str) -> Note {
     let now = now();
     let title = {
         let t = title.trim();
@@ -66,7 +92,7 @@ pub fn create(title: &str) -> Note {
     let note = Note {
         id: format!("{now:x}"),
         title: title.to_string(),
-        body: String::new(),
+        body: body.to_string(),
         pinned: false,
         updated: now,
     };
@@ -108,5 +134,19 @@ mod tests {
             updated: 1,
         };
         assert_eq!(note.to_item().subtitle, "Buy milk");
+    }
+
+    #[test]
+    fn from_text_uses_first_line_as_title() {
+        crate::db::with_temp(|dir| {
+            crate::db::open_path(&dir.join("flint.db")).expect("open");
+            let note = super::from_text("Ship it\nMore body");
+            assert_eq!(note.title, "Ship it");
+            assert_eq!(note.body, "Ship it\nMore body");
+            assert_eq!(
+                crate::notes::get(&note.id).expect("saved").body,
+                "Ship it\nMore body"
+            );
+        });
     }
 }

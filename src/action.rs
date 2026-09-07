@@ -51,12 +51,19 @@ pub fn run(action: &Action) {
             }
         }
         Action::RunScript { path } => run_script(path),
+        Action::TypeText(text) => {
+            let _ = type_text(text);
+        }
         Action::EnterMode(_)
         | Action::SaveSnippet { .. }
         | Action::CreateNote { .. }
         | Action::OpenNote { .. }
         | Action::AskAi { .. }
         | Action::ToggleVoice
+        | Action::DictateFocused
+        | Action::NoteFromSelection
+        | Action::StartFocus { .. }
+        | Action::StopFocus
         | Action::SaveSettings
         | Action::InstallExt { .. }
         | Action::SyncScriptCommands
@@ -193,6 +200,32 @@ fn paste_text(text: &str) {
     });
 }
 
+pub fn wtype_available() -> bool {
+    which("wtype")
+}
+
+/// Type `text` with `wtype --` as argv (never a shell, never ydotool).
+/// Returns false when wtype is missing; the text is copied instead.
+pub fn type_text(text: &str) -> bool {
+    if !which("wtype") {
+        copy_text(text);
+        return false;
+    }
+    let args = wtype_args(text);
+    let _ = Command::new("wtype")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    true
+}
+
+/// `wtype -- <text>` so a leading dash in the transcript cannot be an option.
+pub(crate) fn wtype_args(text: &str) -> [&str; 2] {
+    ["--", text]
+}
+
 fn run_in_terminal(command: &str) {
     let wrapped = format!("{command}; echo; read -n 1 -s -r -p 'Press any key to close'");
     let candidates: &[(&str, &[&str])] = &[
@@ -306,6 +339,14 @@ mod tests {
             spacebar_play(&note).is_none(),
             "space in a text query must still insert a space"
         );
+    }
+
+    #[test]
+    fn wtype_uses_argv_not_a_shell() {
+        let args = super::wtype_args("hello --world");
+        assert_eq!(args, ["--", "hello --world"]);
+        assert_ne!(args[0], "-c");
+        assert!(!args.iter().any(|a| a.contains('|')));
     }
 
     #[test]
