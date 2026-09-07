@@ -716,11 +716,11 @@ fn chat_url(endpoint: &str, path: &str) -> String {
     }
     // OpenAI-compatible servers often already include `/v1` (xAI's default is
     // `https://api.x.ai/v1`). Don't emit `/v1/v1/chat/completions`.
-    let path = if base.ends_with("/v1") {
-        path.strip_prefix("/v1").unwrap_or(path)
-    } else {
-        path
-    };
+    if base.ends_with("/v1") {
+        if let Some(rest) = path.strip_prefix("/v1/") {
+            return format!("{base}/{rest}");
+        }
+    }
     format!("{base}{path}")
 }
 

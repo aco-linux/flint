@@ -250,13 +250,17 @@ fn stop_record() -> bool {
     let Some(lock) = read_lock() else {
         return false;
     };
-    let _ = fs::remove_file(pid_file());
     if !recorder_is_ours(&lock) {
+        let _ = fs::remove_file(pid_file());
         return false;
     }
+    // SAFETY: lock.pid is > 1 and currently matches this machine's wf-recorder
+    // (comm + starttime, or a legacy pid-only file whose comm is still
+    // wf-recorder). kill(2) is a syscall; ESRCH/EPERM are ignored.
     unsafe {
         let _ = libc::kill(lock.pid, libc::SIGINT);
     }
+    let _ = fs::remove_file(pid_file());
     true
 }
 
@@ -273,9 +277,15 @@ struct RecorderLock {
 fn write_lock(pid: u32) {
     paths::ensure();
     let pid = pid as i32;
-    let starttime = proc_starttime(pid).unwrap_or(0);
     if let Ok(mut file) = fs::File::create(pid_file()) {
-        let _ = writeln!(file, "{pid} {starttime}");
+        match proc_starttime(pid).filter(|t| *t > 0) {
+            Some(starttime) => {
+                let _ = writeln!(file, "{pid} {starttime}");
+            }
+            None => {
+                let _ = writeln!(file, "{pid}");
+            }
+        }
         let _ = fs::set_permissions(pid_file(), fs::Permissions::from_mode(0o600));
     }
 }
@@ -304,7 +314,8 @@ fn recorder_matches(lock: &RecorderLock, comm: &str, starttime: Option<u64>) -> 
     }
     match lock.starttime {
         Some(want) if want > 0 => starttime == Some(want),
-        _ => true,
+        Some(_) => false,
+        None => true,
     }
 }
 
@@ -313,7 +324,10 @@ fn proc_comm(pid: i32) -> String {
 }
 
 fn proc_starttime(pid: i32) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_proc_starttime(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+fn parse_proc_starttime(stat: &str) -> Option<u64> {
     let after_comm = stat.rsplit_once(')')?.1;
     after_comm.split_whitespace().nth(19)?.parse().ok()
 }
@@ -369,8 +383,8 @@ fn which(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        RecorderLock, items, parse_recorder_lock, recorder_matches, recording_filename,
-        screenshot_filename,
+        RecorderLock, items, parse_proc_starttime, parse_recorder_lock, recorder_matches,
+        recording_filename, screenshot_filename,
     };
 
     #[test]
@@ -433,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_record_requires_wf_recorder_identity() {
+    fn recorder_matches_requires_wf_recorder_identity() {
         let lock = RecorderLock {
             pid: 42,
             starttime: Some(100),
@@ -447,11 +461,29 @@ mod tests {
             !recorder_matches(&lock, "wf-recorder\n", Some(101)),
             "same name after PID reuse must not match a different start time"
         );
+        assert!(
+            !recorder_matches(
+                &RecorderLock {
+                    pid: 42,
+                    starttime: Some(0),
+                },
+                "wf-recorder\n",
+                Some(100)
+            ),
+            "starttime 0 is not a wildcard"
+        );
         let legacy = RecorderLock {
             pid: 42,
             starttime: None,
         };
         assert!(recorder_matches(&legacy, "wf-recorder\n", Some(9)));
         assert!(!recorder_matches(&legacy, "firefox\n", Some(9)));
+    }
+
+    #[test]
+    fn parse_proc_starttime_uses_field_22() {
+        let stat = "4242 (wf-recorder) S 1 4242 4242 0 -1 4194304 10 0 0 0 1 2 0 0 20 0 1 0 999888 123456 80 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        assert_eq!(parse_proc_starttime(stat), Some(999888));
+        assert!(parse_proc_starttime("no-paren-stat").is_none());
     }
 }
