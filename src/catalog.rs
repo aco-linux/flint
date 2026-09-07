@@ -62,6 +62,7 @@ impl Scored {
 pub struct LiveExtras {
     pub files: Vec<Scored>,
     pub weather: Option<Scored>,
+    pub gifs: Vec<Scored>,
 }
 
 impl Catalog {
@@ -150,6 +151,7 @@ impl Catalog {
             Mode::Quicklink => self.search_quicklinks(&rest),
             Mode::Calc => self.search_calc(&rest),
             Mode::Emoji => self.search_emoji(&rest),
+            Mode::Gif => self.search_gif(&rest),
             Mode::Content => self.search_content(&rest),
             Mode::Extension => self.search_root(&rest),
         };
@@ -662,6 +664,15 @@ impl Catalog {
         let q = query.trim();
         let s = self.settings.borrow();
         let mut items = vec![
+            Item {
+                id: "set:window".into(),
+                title: "Open Settings window".into(),
+                subtitle: "Connections, plugins, skills, Ask AI, files".into(),
+                keywords: "prefs window settings".into(),
+                kind: Kind::Settings,
+                icon: Icon::Name("preferences-system".into()),
+                action: Action::OpenPrefs { page: None },
+            },
             setting_toggle(
                 "autostart",
                 "Launch at login",
@@ -724,10 +735,30 @@ impl Catalog {
                 "provider",
                 "AI provider",
                 &s.ai.provider,
-                "ollama openai anthropic google custom",
+                "ollama openai anthropic google xai custom",
             ),
             setting_value("model", "AI model", &s.ai.model, q, "model"),
             setting_value("endpoint", "AI endpoint", &s.ai.endpoint, q, "url host"),
+            Item {
+                id: "set:signin-xai".into(),
+                title: "Connect Grok (xAI) with your subscription".into(),
+                subtitle: auth::signed_in_label(),
+                keywords: "oauth grok xai x.ai subscription super grok".into(),
+                kind: Kind::Ai,
+                icon: Icon::Name("network-workgroup".into()),
+                action: Action::SignIn {
+                    provider: "xai".into(),
+                },
+            },
+            Item {
+                id: "set:import-grok".into(),
+                title: "Use existing Grok CLI login".into(),
+                subtitle: "Imports ~/.grok/auth.json from grok login".into(),
+                keywords: "grok cli auth.json import xai".into(),
+                kind: Kind::Ai,
+                icon: Icon::Name("document-open".into()),
+                action: Action::ImportGrok,
+            },
             Item {
                 id: "set:signin-google".into(),
                 title: "Connect Google Gemini API with OAuth".into(),
@@ -750,6 +781,133 @@ impl Catalog {
                     provider: "custom".into(),
                 },
             },
+            crate::connectors::connect_item(&crate::connectors::PRESETS[0]),
+            crate::connectors::connect_item(&crate::connectors::PRESETS[1]),
+            crate::connectors::connect_item(&crate::connectors::PRESETS[2]),
+            crate::connectors::connect_item(&crate::connectors::PRESETS[3]),
+            crate::caldav::connect_item("apple-calendar", "Apple Calendar"),
+            crate::caldav::connect_item("proton-calendar", "Proton Calendar"),
+            setting_value(
+                "tenor-key",
+                "Tenor API key (GIF picker)",
+                if crate::auth::has_api_key("tenor") || !s.connectors.tenor_key.is_empty() {
+                    "••••••••"
+                } else {
+                    "(optional · free at tenor.com)"
+                },
+                q,
+                "gif tenor giphy",
+            ),
+            setting_value(
+                "notion-client",
+                "Notion OAuth client ID",
+                if s.connectors.notion_client_id.is_empty() {
+                    "(for Connect Notion)"
+                } else {
+                    "••••••••"
+                },
+                q,
+                "notion oauth",
+            ),
+            setting_value(
+                "todoist-client",
+                "Todoist OAuth client ID",
+                if s.connectors.todoist_client_id.is_empty() {
+                    "(for Connect Todoist)"
+                } else {
+                    "••••••••"
+                },
+                q,
+                "todoist oauth",
+            ),
+            setting_value(
+                "notion-secret",
+                "Notion OAuth client secret",
+                if crate::auth::has_api_key("notion-secret") {
+                    "••••••••"
+                } else {
+                    "(required for Connect Notion)"
+                },
+                q,
+                "notion oauth secret",
+            ),
+            setting_value(
+                "todoist-secret",
+                "Todoist OAuth client secret",
+                if crate::auth::has_api_key("todoist-secret") {
+                    "••••••••"
+                } else {
+                    "(required for Connect Todoist)"
+                },
+                q,
+                "todoist oauth secret",
+            ),
+            setting_value(
+                "outlook-client",
+                "Outlook OAuth client ID",
+                if s.connectors.outlook_client_id.is_empty() {
+                    "(for Connect Outlook)"
+                } else {
+                    "••••••••"
+                },
+                q,
+                "outlook microsoft oauth",
+            ),
+            setting_value(
+                "apple-id",
+                "Apple ID (iCloud Calendar)",
+                if s.connectors.apple_id.is_empty() {
+                    "(for Apple Calendar)"
+                } else {
+                    &s.connectors.apple_id
+                },
+                q,
+                "apple icloud caldav",
+            ),
+            setting_value(
+                "apple-password",
+                "Apple app-specific password",
+                if crate::auth::has_api_key("apple-calendar") {
+                    "••••••••"
+                } else {
+                    "(type the password after selecting this)"
+                },
+                q,
+                "apple password caldav",
+            ),
+            setting_value(
+                "proton-user",
+                "Proton Calendar user",
+                if s.connectors.proton_user.is_empty() {
+                    "(for Proton CalDAV)"
+                } else {
+                    &s.connectors.proton_user
+                },
+                q,
+                "proton caldav",
+            ),
+            setting_value(
+                "proton-password",
+                "Proton Calendar app password",
+                if crate::auth::has_api_key("proton-calendar") {
+                    "••••••••"
+                } else {
+                    "(type the password after selecting this)"
+                },
+                q,
+                "proton password caldav",
+            ),
+            setting_value(
+                "caldav-url",
+                "CalDAV URL",
+                if s.connectors.caldav_url.is_empty() {
+                    "https://caldav.icloud.com/"
+                } else {
+                    &s.connectors.caldav_url
+                },
+                q,
+                "caldav url apple proton",
+            ),
             Item {
                 id: "set:signout".into(),
                 title: "Sign out".into(),
@@ -947,6 +1105,10 @@ impl Catalog {
             .collect()
     }
 
+    fn search_gif(&self, query: &str) -> Vec<Scored> {
+        vec![Scored::new(crate::gif::search_item(query), 80_000)]
+    }
+
     fn search_content(&self, query: &str) -> Vec<Scored> {
         let q = query.trim();
         if q.is_empty() {
@@ -1092,6 +1254,7 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
         | Mode::Quicklink
         | Mode::Calc
         | Mode::Emoji
+        | Mode::Gif
         | Mode::Content
         | Mode::Extension => false,
     }
@@ -1100,6 +1263,9 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
 pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
     let (_, rest) = Mode::parse(query);
     if crate::content::term_from_query(query).is_some() {
+        return true;
+    }
+    if Mode::parse(query).0 == Mode::Gif && !Mode::parse(query).1.trim().is_empty() {
         return true;
     }
     if mode == Mode::Root
@@ -1156,6 +1322,25 @@ pub fn live_extras(
         return extras;
     }
 
+    if mode == Mode::Gif && !q.trim().is_empty() {
+        let key = crate::auth::api_key("tenor")
+            .or_else(|| {
+                let legacy = settings.connectors.tenor_key.trim();
+                (!legacy.is_empty()).then(|| legacy.to_string())
+            })
+            .or_else(|| std::env::var("TENOR_API_KEY").ok())
+            .unwrap_or_default();
+        if let Ok(hits) = crate::gif::search(&q, &key, 16) {
+            for (i, hit) in hits.iter().enumerate() {
+                extras.gifs.push(Scored::new(
+                    crate::gif::to_item(hit),
+                    70_000u32.saturating_sub(i as u32 * 10),
+                ));
+            }
+        }
+        return extras;
+    }
+
     let want_files = asked_for_files(&q, mode, settings.files.include_in_root);
     if !want_files {
         return extras;
@@ -1200,12 +1385,41 @@ pub fn live_extras(
 }
 
 fn extension_items() -> Vec<Item> {
-    vec![
+    let mut items = vec![
+        Item {
+            id: "ext:emoji".into(),
+            title: "Emoji".into(),
+            subtitle: "Type emoji, pick one, Enter pastes it".into(),
+            keywords: "emoji picker smile".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("face-smile".into()),
+            action: Action::EnterMode(Mode::Emoji),
+        },
+        Item {
+            id: "ext:gif".into(),
+            title: "GIFs".into(),
+            subtitle: "Type gif cats · pick one · Enter copies it".into(),
+            keywords: "gif giphy tenor".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("image-x-generic".into()),
+            action: Action::EnterMode(Mode::Gif),
+        },
+        Item {
+            id: "ext:signin-grok".into(),
+            title: "Sign in with Grok (xAI)".into(),
+            subtitle: "Opens your browser · uses your SuperGrok / xAI subscription".into(),
+            keywords: "sign in login oauth grok xai x.ai subscription super grok cursor".into(),
+            kind: Kind::Ai,
+            icon: Icon::Name("network-workgroup".into()),
+            action: Action::SignIn {
+                provider: "xai".into(),
+            },
+        },
         Item {
             id: "ext:ask".into(),
             title: "Ask AI".into(),
-            subtitle: "Local models, or sign in with a subscription".into(),
-            keywords: "ask ai chatgpt ollama claude gemini oauth".into(),
+            subtitle: "Local models, Grok subscription, or an API key".into(),
+            keywords: "ask ai chatgpt ollama claude gemini grok xai oauth".into(),
             kind: Kind::Extension,
             icon: Icon::Name("help-faq".into()),
             action: Action::EnterMode(Mode::Ask),
@@ -1276,11 +1490,11 @@ fn extension_items() -> Vec<Item> {
         Item {
             id: "ext:settings".into(),
             title: "Settings".into(),
-            subtitle: "OAuth, local models, voice, autostart".into(),
-            keywords: "prefs preferences config".into(),
+            subtitle: "Connections, plugins, skills, Ask AI — opens a window".into(),
+            keywords: "prefs preferences config settings window".into(),
             kind: Kind::Extension,
             icon: Icon::Name("preferences-system".into()),
-            action: Action::EnterMode(Mode::Settings),
+            action: Action::OpenPrefs { page: None },
         },
         Item {
             id: "ext:links".into(),
@@ -1300,7 +1514,9 @@ fn extension_items() -> Vec<Item> {
             icon: Icon::Name("accessories-calculator".into()),
             action: Action::EnterMode(Mode::Calc),
         },
-    ]
+    ];
+    items.extend(crate::connectors::items());
+    items
 }
 
 fn setting_toggle(id: &str, title: &str, on: bool, keywords: &str) -> Item {
@@ -2151,5 +2367,105 @@ mod tests {
             summary: "+79°F ☀️ Sunny".into(),
         }));
         assert!(matches!(Live::from_item(&item), Live::Weather { .. }));
+    }
+
+    #[test]
+    fn emoji_query_lists_glyphs_you_can_paste() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use crate::item::Action;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let (mode, rows) = catalog.search_fast("emoji");
+        assert_eq!(mode, crate::mode::Mode::Emoji);
+        assert!(rows.len() >= 8, "empty emoji query should list the picker");
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row.item.action, Action::Paste(ref g) if !g.is_empty())),
+            "emoji rows must paste a glyph"
+        );
+        let smile = catalog.search_fast("emoji smile").1;
+        assert!(smile.iter().any(|row| row.item.id.contains("smile")
+            || row.item.title.contains('😄')
+            || row.item.title.contains('😊')));
+    }
+
+    #[test]
+    fn gif_query_offers_an_https_tenor_search() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use crate::item::Action;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let (mode, rows) = catalog.search_fast("gif cats");
+        assert_eq!(mode, crate::mode::Mode::Gif);
+        assert!(
+            rows.iter().any(|row| match &row.item.action {
+                Action::OpenUri(url) => url.starts_with("https://tenor.com/"),
+                _ => false,
+            }),
+            "gif cats must offer a real https Tenor URL, got {:?}",
+            rows.iter().map(|r| &r.item.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn settings_command_opens_the_window() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use crate::item::Action;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let settings = catalog.search_fast("settings").1;
+        assert!(
+            settings.iter().any(|row| matches!(
+                row.item.action,
+                Action::OpenPrefs { .. }
+            )),
+            "Settings must open the window, not only a search list"
+        );
+    }
+
+    #[test]
+    fn sign_in_with_grok_is_findable() {
+        use crate::clipboard::Store;
+        use crate::config::Settings;
+        use crate::item::Action;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let catalog = super::Catalog::load(
+            Rc::new(RefCell::new(Store::load())),
+            Rc::new(RefCell::new(Settings::default())),
+        );
+        let grok = catalog.search_fast("sign in grok").1;
+        assert!(
+            grok.iter().any(|row| matches!(
+                row.item.action,
+                Action::SignIn { ref provider } if provider == "xai"
+            )),
+            "typing sign in grok should surface Connect Grok"
+        );
+        let settings = catalog.search_fast("set grok").1;
+        assert!(
+            settings.iter().any(|row| row.item.id == "set:signin-xai"
+                || row.item.id == "ext:signin-grok"
+                || matches!(row.item.action, Action::SignIn { ref provider } if provider == "xai"))
+        );
     }
 }

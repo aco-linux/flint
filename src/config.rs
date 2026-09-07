@@ -14,6 +14,21 @@ pub struct Settings {
     pub voice: Voice,
     pub mcp: Vec<McpServer>,
     pub store: Store,
+    pub connectors: Connectors,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Connectors {
+    pub notion_client_id: String,
+    pub todoist_client_id: String,
+    pub outlook_client_id: String,
+    pub tenor_key: String,
+    pub apple_id: String,
+    pub proton_user: String,
+    pub caldav_url: String,
+    /// Local Obsidian vault — added to file search roots when set.
+    pub obsidian_vault: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +192,14 @@ impl Settings {
                 settings.ai.api_key = legacy_key;
             }
         }
+        if !settings.connectors.tenor_key.is_empty() {
+            let legacy = std::mem::take(&mut settings.connectors.tenor_key);
+            if crate::auth::save_api_key("tenor", &legacy).is_ok() {
+                dirty = true;
+            } else {
+                settings.connectors.tenor_key = legacy;
+            }
+        }
         if settings.ai.endpoint.is_empty() {
             settings.ai.endpoint = defaults.ai.endpoint.clone();
             dirty = true;
@@ -216,6 +239,73 @@ impl Settings {
             let _ = paths::write_private(&path(), raw);
         }
         sync_autostart(self.general.autostart);
+    }
+
+    pub fn set_provider(&mut self, id: &str) -> String {
+        let id = id.trim();
+        self.ai.provider = match id {
+            "openai" | "anthropic" | "google" | "xai" | "custom" | "ollama" => id.into(),
+            "grok" => "xai".into(),
+            "chatgpt" => "openai".into(),
+            "claude" => "anthropic".into(),
+            _ => self.ai.provider.clone(),
+        };
+        match self.ai.provider.as_str() {
+            "ollama" => {
+                self.ai.endpoint = "http://127.0.0.1:11434".into();
+            }
+            "openai" => {
+                self.ai.endpoint = "https://api.openai.com".into();
+            }
+            "anthropic" => {
+                self.ai.endpoint = "https://api.anthropic.com".into();
+            }
+            "google" => {
+                self.ai.endpoint =
+                    "https://generativelanguage.googleapis.com/v1beta/openai".into();
+            }
+            "xai" => {
+                crate::xai::apply_defaults(self);
+                return format!("AI provider → {}", self.ai.provider);
+            }
+            _ => {}
+        }
+        self.save();
+        format!("AI provider → {}", self.ai.provider)
+    }
+
+    pub fn add_mcp(&mut self, name: &str, command: &str, args: Vec<String>) -> Result<(), String> {
+        let name = name.trim();
+        let command = command.trim();
+        if name.is_empty() || command.is_empty() {
+            return Err("MCP name and command are required".into());
+        }
+        if !crate::mcp::is_safe_mcp_command(command) {
+            return Err("MCP command must be npx".into());
+        }
+        if self.mcp.iter().any(|s| s.name == name) {
+            return Err("An MCP server with that name already exists".into());
+        }
+        self.mcp.push(McpServer {
+            name: name.into(),
+            command: command.into(),
+            args,
+            enabled: true,
+        });
+        self.save();
+        Ok(())
+    }
+
+    pub fn remove_mcp(&mut self, name: &str) {
+        self.mcp.retain(|s| s.name != name);
+        self.save();
+    }
+
+    pub fn set_mcp_enabled(&mut self, name: &str, enabled: bool) {
+        if let Some(server) = self.mcp.iter_mut().find(|s| s.name == name) {
+            server.enabled = enabled;
+            self.save();
+        }
     }
 
     pub fn use_model(&mut self, source: &str, model: &str, endpoint: &str, api: &str) -> String {
@@ -323,7 +413,8 @@ impl Settings {
                     "ollama" => "openai".into(),
                     "openai" => "anthropic".into(),
                     "anthropic" => "google".into(),
-                    "google" => "custom".into(),
+                    "google" => "xai".into(),
+                    "xai" => "custom".into(),
                     _ => "ollama".into(),
                 };
                 match self.ai.provider.as_str() {
@@ -339,6 +430,10 @@ impl Settings {
                     "google" => {
                         self.ai.endpoint =
                             "https://generativelanguage.googleapis.com/v1beta/openai".into();
+                    }
+                    "xai" => {
+                        self.ai.endpoint = crate::xai::CHAT_ENDPOINT.into();
+                        self.ai.model = crate::xai::DEFAULT_MODEL.into();
                     }
                     _ => {}
                 }
@@ -362,6 +457,80 @@ impl Settings {
             "set:apikey" if !typed.is_empty() => {
                 match crate::auth::save_api_key(&self.ai.provider, typed) {
                     Ok(storage) => format!("API key saved in {storage}"),
+                    Err(error) => error,
+                }
+            }
+            "set:tenor-key" if !typed.is_empty() => {
+                match crate::auth::save_api_key("tenor", typed) {
+                    Ok(storage) => {
+                        self.connectors.tenor_key.clear();
+                        format!("Tenor API key saved in {storage}")
+                    }
+                    Err(error) => error,
+                }
+            }
+            "set:notion-client" if !typed.is_empty() => {
+                self.connectors.notion_client_id = typed.to_string();
+                "Notion OAuth client ID saved".into()
+            }
+            "set:todoist-client" if !typed.is_empty() => {
+                self.connectors.todoist_client_id = typed.to_string();
+                "Todoist OAuth client ID saved".into()
+            }
+            "set:notion-secret" if !typed.is_empty() => {
+                match crate::auth::save_api_key("notion-secret", typed) {
+                    Ok(storage) => format!("Notion client secret saved in {storage}"),
+                    Err(error) => error,
+                }
+            }
+            "set:todoist-secret" if !typed.is_empty() => {
+                match crate::auth::save_api_key("todoist-secret", typed) {
+                    Ok(storage) => format!("Todoist client secret saved in {storage}"),
+                    Err(error) => error,
+                }
+            }
+            "set:outlook-client" if !typed.is_empty() => {
+                self.connectors.outlook_client_id = typed.to_string();
+                "Outlook OAuth client ID saved".into()
+            }
+            "set:apple-id" if !typed.is_empty() => {
+                self.connectors.apple_id = typed.to_string();
+                "Apple ID saved".into()
+            }
+            "set:proton-user" if !typed.is_empty() => {
+                self.connectors.proton_user = typed.to_string();
+                "Proton user saved".into()
+            }
+            "set:caldav-url" if !typed.is_empty() => {
+                match validate_https_url(typed, "CalDAV URL") {
+                    Ok(()) => {
+                        self.connectors.caldav_url = typed.to_string();
+                        "CalDAV URL saved".into()
+                    }
+                    Err(error) => error,
+                }
+            }
+            "set:obsidian-vault" if !typed.is_empty() => {
+                let path = typed.trim().trim_end_matches('/').to_string();
+                if path.len() > 4096 || path.contains('\0') {
+                    "Obsidian vault path is invalid".into()
+                } else {
+                    self.connectors.obsidian_vault = path.clone();
+                    if !self.files.search_roots.iter().any(|r| r == &path) {
+                        self.files.search_roots.push(path);
+                    }
+                    "Obsidian vault added to file search".into()
+                }
+            }
+            "set:apple-password" if !typed.is_empty() => {
+                match crate::auth::save_api_key("apple-calendar", typed) {
+                    Ok(storage) => format!("Apple app password saved in {storage}"),
+                    Err(error) => error,
+                }
+            }
+            "set:proton-password" if !typed.is_empty() => {
+                match crate::auth::save_api_key("proton-calendar", typed) {
+                    Ok(storage) => format!("Proton app password saved in {storage}"),
                     Err(error) => error,
                 }
             }
@@ -542,5 +711,12 @@ mod tests {
         assert!(validate_https_url("https://id.example.com/auth", "authorize").is_ok());
         assert!(validate_https_url("http://id.example.com/auth", "authorize").is_err());
         assert!(validate_https_url("https://id.example.com/auth#x", "authorize").is_err());
+    }
+
+    #[test]
+    fn mcp_add_rejects_empty_and_non_npx() {
+        let mut s = Settings::default();
+        assert!(s.add_mcp("", "npx", Vec::new()).is_err());
+        assert!(s.add_mcp("evil", "bash", Vec::new()).is_err());
     }
 }

@@ -108,6 +108,10 @@ pub enum Action {
     ShareScreen,
     ToggleVoice,
     SaveSettings,
+    /// Dedicated settings window (not the launcher search list).
+    OpenPrefs {
+        page: Option<String>,
+    },
     InstallExt {
         id: String,
     },
@@ -124,6 +128,10 @@ pub enum Action {
     },
     SignIn {
         provider: String,
+    },
+    ImportGrok,
+    ConnectorFetch {
+        id: String,
     },
     SignOut,
     RefreshModels,

@@ -31,11 +31,7 @@ pub fn run(action: &Action) {
         Action::Copy(text) => copy_text(text),
         Action::Paste(text) => paste_text(text),
         Action::OpenUri(uri) => {
-            if !is_safe_uri(uri) {
-                return;
-            }
-            let _ =
-                gtk4::gio::AppInfo::launch_default_for_uri(uri, gtk4::gio::AppLaunchContext::NONE);
+            let _ = open_uri(uri);
         }
         Action::OpenPath(path) => open_path(path),
         Action::PlayMedia { path } => play_media(path),
@@ -76,11 +72,14 @@ pub fn run(action: &Action) {
         | Action::StartFocus { .. }
         | Action::StopFocus
         | Action::SaveSettings
+        | Action::OpenPrefs { .. }
         | Action::InstallExt { .. }
         | Action::SyncScriptCommands
         | Action::SyncVicinae
         | Action::UseModel { .. }
         | Action::SignIn { .. }
+        | Action::ImportGrok
+        | Action::ConnectorFetch { .. }
         | Action::SignOut
         | Action::RefreshModels
         | Action::LaunchExtension { .. }
@@ -176,13 +175,41 @@ fn play_media(path: &Path) {
 fn open_path(path: &Path) {
     match glib::filename_to_uri(path, None) {
         Ok(uri) => {
-            let _ =
-                gtk4::gio::AppInfo::launch_default_for_uri(&uri, gtk4::gio::AppLaunchContext::NONE);
+            let _ = open_uri(&uri);
         }
         Err(_) => {
             let _ = detach("xdg-open", &[path.to_string_lossy().as_ref()]);
         }
     }
+}
+
+/// Open https/http/file URLs from the GTK main thread. GTK portals first,
+/// then `gio open`, then `xdg-open`. The URI is always an argv, never a shell.
+pub fn open_uri(uri: &str) -> Result<(), String> {
+    if !is_safe_uri(uri) {
+        return Err("Refusing to open an unsafe URL".into());
+    }
+    if gtk4::gio::AppInfo::launch_default_for_uri(uri, gtk4::gio::AppLaunchContext::NONE).is_ok() {
+        return Ok(());
+    }
+    if run_status("gio", &["open", uri]) {
+        return Ok(());
+    }
+    if run_status("xdg-open", &[uri]) {
+        return Ok(());
+    }
+    Err(format!("Could not open the browser. Copy this URL: {uri}"))
+}
+
+fn run_status(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub fn copy_text(text: &str) {
@@ -306,6 +333,14 @@ mod tests {
     use super::{is_safe_uri, spacebar_play};
     use crate::item::{Action, Icon, Item, Kind};
     use std::path::PathBuf;
+
+    #[test]
+    fn open_uri_rejects_javascript_and_allows_https() {
+        assert!(!is_safe_uri("javascript:alert(1)"));
+        assert!(!is_safe_uri(""));
+        assert!(is_safe_uri("https://accounts.x.ai/oauth2/device"));
+        assert!(is_safe_uri("http://127.0.0.1:4242/callback"));
+    }
 
     #[test]
     fn spacebar_plays_audio_and_video_and_ignores_text() {

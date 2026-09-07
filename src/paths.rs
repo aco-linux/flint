@@ -55,6 +55,7 @@ pub fn ensure() {
     migrate_legacy();
     tighten_private_file(&config_dir().join("config.json"));
     tighten_private_file(&config_dir().join("auth.json"));
+    tighten_private_file(&config_dir().join("connectors-auth.json"));
     tighten_private_file(&config_dir().join("api-keys.json"));
     tighten_private_file(&config_dir().join("snippets.json"));
     tighten_private_file(&config_dir().join("aliases.json"));

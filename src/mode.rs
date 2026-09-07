@@ -13,6 +13,7 @@ pub enum Mode {
     Quicklink,
     Calc,
     Emoji,
+    Gif,
     Content,
     /// A running extension owns the list. Never parsed from text.
     Extension,
@@ -80,8 +81,17 @@ impl Mode {
         if let Some(rest) = strip_kw(q, &["calc "]) {
             return (Mode::Calc, rest);
         }
-        if let Some(rest) = strip_kw(q, &["emoji "]) {
+        if q.eq_ignore_ascii_case("emoji") || q.eq_ignore_ascii_case("emojis") {
+            return (Mode::Emoji, String::new());
+        }
+        if let Some(rest) = strip_kw(q, &["emoji ", "emojis "]) {
             return (Mode::Emoji, rest);
+        }
+        if q.eq_ignore_ascii_case("gif") || q.eq_ignore_ascii_case("gifs") {
+            return (Mode::Gif, String::new());
+        }
+        if let Some(rest) = strip_kw(q, &["gif ", "gifs "]) {
+            return (Mode::Gif, rest);
         }
         if let Some(rest) = strip_content(q) {
             return (Mode::Content, rest);
@@ -104,6 +114,7 @@ impl Mode {
             Mode::Quicklink => Some("LINKS"),
             Mode::Calc => Some("CALC"),
             Mode::Emoji => Some("EMOJI"),
+            Mode::Gif => Some("GIF"),
             Mode::Content => Some("CONTENT"),
             Mode::Extension => Some("EXT"),
         }
@@ -124,6 +135,7 @@ impl Mode {
             Mode::Quicklink => "Quicklinks — type +name url to create",
             Mode::Calc => "Calculation history — type math, dates, or percents",
             Mode::Emoji => "Search emoji — smile, :smile:, or a keyword",
+            Mode::Gif => "Search GIFs — cats, wow, shipit",
             Mode::Content => "Search file contents — ripgrep, cancelled on the next key",
             Mode::Extension => "Search…",
         }
@@ -144,6 +156,7 @@ impl Mode {
             Mode::Quicklink => "No quicklinks yet.",
             Mode::Calc => "No calculations yet.",
             Mode::Emoji => "No matching emoji.",
+            Mode::Gif => "Type a search — cats, wow, shipit.",
             Mode::Content => "No matching file contents.",
             Mode::Extension => "Nothing to show.",
         }
@@ -164,6 +177,7 @@ impl Mode {
             Mode::Quicklink => "Type +gh https://github.com/search?q={argument} to save a link.",
             Mode::Calc => "Try 20% of 80, today + 7d, or 2+2. History stays on this machine.",
             Mode::Emoji => "Type smile or :fire:. Enter pastes the glyph.",
+            Mode::Gif => "Add a Tenor API key in Settings for in-launcher GIFs, or Enter opens Tenor.",
             Mode::Content => "Type a phrase. Flint runs rg over $HOME, never /.",
             Mode::Extension => "Esc goes back.",
         }
@@ -184,6 +198,7 @@ impl Mode {
             Mode::Quicklink => "link ",
             Mode::Calc => "calc ",
             Mode::Emoji => "emoji ",
+            Mode::Gif => "gif ",
             Mode::Content => "content ",
             Mode::Extension => "",
         }
@@ -253,7 +268,9 @@ mod tests {
         assert_eq!(Mode::parse("calculator").0, Mode::Root);
         assert_eq!(Mode::parse("emoji smile"), (Mode::Emoji, "smile".into()));
         assert_eq!(Mode::parse("emoji"), (Mode::Emoji, "".into()));
-        assert_eq!(Mode::parse("emojis").0, Mode::Root);
+        assert_eq!(Mode::parse("emojis"), (Mode::Emoji, "".into()));
+        assert_eq!(Mode::parse("gif cats"), (Mode::Gif, "cats".into()));
+        assert_eq!(Mode::parse("gif"), (Mode::Gif, "".into()));
         assert_eq!(
             Mode::parse("content invoices"),
             (Mode::Content, "invoices".into())

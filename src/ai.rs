@@ -472,13 +472,14 @@ pub fn chat(settings: &Settings, history: &[Turn], prompt: &str) -> Result<Reply
     }
     let system = compose_system(settings);
     match settings.ai.provider.as_str() {
-        "openai" | "google" | "custom" | "lmstudio" | "llamacpp" => {
+        "openai" | "google" | "custom" | "lmstudio" | "llamacpp" | "xai" => {
             let credential = credential(settings)?;
             let label = match settings.ai.provider.as_str() {
                 "google" => "Google",
                 "lmstudio" => "LM Studio",
                 "llamacpp" => "llama.cpp",
                 "custom" => "Custom",
+                "xai" => "Grok (xAI)",
                 _ => "OpenAI",
             };
             chat_completions(

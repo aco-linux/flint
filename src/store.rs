@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{McpServer, Settings};
 use crate::item::{Action, Icon, Item, Kind};
-use crate::mode::Mode;
 use crate::scripts;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +68,9 @@ pub fn items(settings: &Settings) -> Vec<Item> {
             let mut item = cmd.to_item();
             if !settings.general.allow_script_commands {
                 item.subtitle = format!("{} · off until Settings", item.subtitle);
-                item.action = Action::EnterMode(Mode::Settings);
+                item.action = Action::OpenPrefs {
+                    page: Some("extensions".into()),
+                };
             }
             items.push(item);
         }

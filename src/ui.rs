@@ -31,6 +31,7 @@ use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
+use crate::prefs;
 use crate::quicklinks;
 use crate::snippets;
 use crate::store;
@@ -93,6 +94,7 @@ pub struct Shell {
     live_cancel: Arc<files::Cancel>,
     thumb_jobs: Sender<PathBuf>,
     thumb_cancel: Arc<files::Cancel>,
+    prefs: Rc<RefCell<Option<prefs::Host>>>,
 }
 
 struct State {
@@ -449,6 +451,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         live_cancel: live_cancel.clone(),
         thumb_jobs: thumb_tx,
         thumb_cancel: thumb_cancel.clone(),
+        prefs: Rc::new(RefCell::new(None)),
     };
 
     bind_shell(&shell);
@@ -543,6 +546,7 @@ impl Clone for Shell {
             live_cancel: self.live_cancel.clone(),
             thumb_jobs: self.thumb_jobs.clone(),
             thumb_cancel: self.thumb_cancel.clone(),
+            prefs: self.prefs.clone(),
         }
     }
 }
@@ -696,6 +700,11 @@ impl Shell {
                 live.files.iter().map(|row| row.item.id.clone()).collect();
             st.results.retain(|row| !incoming.contains(&row.item.id));
             st.results.extend(live.files);
+            let incoming_gifs: std::collections::HashSet<String> =
+                live.gifs.iter().map(|row| row.item.id.clone()).collect();
+            st.results
+                .retain(|row| !incoming_gifs.contains(&row.item.id));
+            st.results.extend(live.gifs);
             st.results.sort_by(|a, b| {
                 b.score
                     .cmp(&a.score)
@@ -953,7 +962,7 @@ impl Shell {
         match shortcut(key, mods) {
             Some(Shortcut::Settings) => {
                 self.close_actions();
-                self.enter_mode(Mode::Settings);
+                self.open_prefs(None);
                 Propagation::Stop
             }
             Some(Shortcut::Notes) => {
@@ -1156,6 +1165,7 @@ impl Shell {
         }
         match item.action {
             Action::EnterMode(mode) => self.enter_mode(mode),
+            Action::OpenPrefs { page } => self.open_prefs(page.as_deref()),
             Action::SaveSnippet { keyword } => {
                 match clipboard::current_text() {
                     Some(text) if clipboard::looks_secret(&text) => {
@@ -1204,6 +1214,42 @@ impl Shell {
                 }
                 self.sign_in(&provider);
             }
+            Action::OpenUri(_) => self.hide_then(item.action),
+            Action::ConnectorFetch { id } => {
+                let settings = self.state.borrow().catalog.settings.borrow().clone();
+                match crate::connectors::fetch(&id, &settings) {
+                    Ok(items) => {
+                        let scored: Vec<_> = items
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, item)| {
+                                catalog::Scored::new(item, 40_000u32.saturating_sub(i as u32))
+                            })
+                            .collect();
+                        {
+                            let mut st = self.state.borrow_mut();
+                            st.results = scored;
+                            st.selected = 0;
+                        }
+                        self.sync_chrome();
+                        rebuild_rows(self);
+                        self.set_status("Connected results");
+                    }
+                    Err(err) => self.set_status(err),
+                }
+            }
+            Action::ImportGrok => match crate::xai::import_grok_cli() {
+                Ok(msg) => {
+                    {
+                        let st = self.state.borrow();
+                        let mut settings = st.catalog.settings.borrow_mut();
+                        crate::xai::apply_defaults(&mut settings);
+                    }
+                    self.set_status(msg);
+                    self.refresh();
+                }
+                Err(err) => self.set_status(err),
+            },
             Action::SignOut => {
                 let status = match auth::clear() {
                     Ok(()) => "Signed out and removed the stored OAuth credential".into(),
@@ -1279,7 +1325,14 @@ impl Shell {
                     calc::record(calc_expr(&item.subtitle), &text);
                 }
                 self.hide();
-                action::run(&Action::Copy(text));
+                if item.id.starts_with("gif:") {
+                    action::copy_text(&text);
+                    thread::spawn(move || {
+                        let _ = crate::gif::copy_gif_bytes(&text);
+                    });
+                } else {
+                    action::run(&Action::Copy(text));
+                }
             }
             Action::RunScript { path } => {
                 let allowed = self
@@ -1303,6 +1356,82 @@ impl Shell {
                 self.hide();
                 action::run(&action);
             }
+        }
+    }
+
+    pub fn open_prefs(&self, page: Option<&str>) {
+        self.hide();
+        if let Some(host) = self.prefs.borrow().as_ref() {
+            host.show(page);
+            return;
+        }
+        let Some(app) = self.window.application() else {
+            self.set_status("Could not open Settings");
+            return;
+        };
+        let settings = self.state.borrow().catalog.settings.clone();
+        let shell = self.clone();
+        let host = prefs::open(
+            &app,
+            settings,
+            Rc::new(move |event| shell.handle_prefs(event)),
+        );
+        host.show(page);
+        *self.prefs.borrow_mut() = Some(host);
+    }
+
+    fn handle_prefs(&self, event: prefs::Event) {
+        match event {
+            prefs::Event::SignIn(provider) => {
+                {
+                    let st = self.state.borrow();
+                    let mut settings = st.catalog.settings.borrow_mut();
+                    auth::apply_provider_defaults(&mut settings, &provider);
+                }
+                self.sign_in(&provider);
+            }
+            prefs::Event::ImportGrok => match crate::xai::import_grok_cli() {
+                Ok(msg) => {
+                    {
+                        let st = self.state.borrow();
+                        let mut settings = st.catalog.settings.borrow_mut();
+                        crate::xai::apply_defaults(&mut settings);
+                    }
+                    self.prefs_status(&msg);
+                    self.refresh_prefs();
+                }
+                Err(err) => self.prefs_status(&err),
+            },
+            prefs::Event::SignOut => {
+                let status = match auth::clear() {
+                    Ok(()) => "Signed out".into(),
+                    Err(error) => format!("Signed out locally: {error}"),
+                };
+                self.prefs_status(&status);
+                self.refresh_prefs();
+            }
+            prefs::Event::RefreshModels => self.refresh_models(),
+            prefs::Event::OpenStore => {
+                self.open(Mode::Store);
+            }
+            prefs::Event::SyncVicinae => self.sync_vicinae(),
+            prefs::Event::SyncScripts => self.sync_scripts(),
+            prefs::Event::OpenPath(path) => {
+                action::run(&Action::OpenPath(path));
+            }
+        }
+    }
+
+    fn prefs_status(&self, text: &str) {
+        if let Some(host) = self.prefs.borrow().as_ref() {
+            host.set_status(text);
+        }
+        self.set_status(text);
+    }
+
+    fn refresh_prefs(&self) {
+        if let Some(host) = self.prefs.borrow().as_ref() {
+            host.rebuild();
         }
     }
 
@@ -1691,7 +1820,9 @@ impl Shell {
             return;
         }
         match action {
-            Action::Layout { .. } | Action::Capture { .. } => self.hide_then(action),
+            Action::Layout { .. } | Action::Capture { .. } | Action::OpenUri(_) => {
+                self.hide_then(action)
+            }
             Action::QuitAll => {
                 self.show_oneshot(crate::quit::confirm_item(), "Enter to confirm quit all");
             }
@@ -2227,31 +2358,93 @@ impl Shell {
 
     fn sign_in(&self, provider: &str) {
         let settings = self.state.borrow().catalog.settings.borrow().clone();
-        let provider = provider.to_string();
-        self.set_status(format!("Opening {provider} sign-in in your browser…"));
-        let (tx, rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(auth::login(&provider, &settings));
-        });
-        let shell = self.clone();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
-            match rx.try_recv() {
-                Ok(Ok(msg)) => {
-                    shell.set_status(msg);
-                    shell.refresh();
-                    gtk4::glib::ControlFlow::Break
-                }
-                Ok(Err(err)) => {
-                    shell.set_status(err);
-                    gtk4::glib::ControlFlow::Break
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    shell.set_status("Sign-in stopped");
-                    gtk4::glib::ControlFlow::Break
-                }
+        match auth::start_login(provider, &settings) {
+            Ok((job, pending)) => {
+                action::copy_text(&job.url);
+                let opened = auth::open_browser(&job.url);
+                let status = match &opened {
+                    Ok(()) => job.message.clone(),
+                    Err(err) => format!("{err} · URL copied to the clipboard"),
+                };
+                self.show_signin_progress(&job, &status);
+                let (tx, rx) = std::sync::mpsc::channel();
+                thread::spawn(move || {
+                    let _ = tx.send(auth::finish_login(pending));
+                });
+                let shell = self.clone();
+                gtk4::glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
+                    match rx.try_recv() {
+                        Ok(Ok(msg)) => {
+                            shell.prefs_status(&msg);
+                            shell.refresh();
+                            shell.refresh_prefs();
+                            gtk4::glib::ControlFlow::Break
+                        }
+                        Ok(Err(err)) => {
+                            shell.set_status(err);
+                            gtk4::glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            gtk4::glib::ControlFlow::Continue
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            shell.set_status("Sign-in stopped");
+                            gtk4::glib::ControlFlow::Break
+                        }
+                    }
+                });
             }
+            Err(err) => {
+                self.show_oneshot(
+                    Item {
+                        id: "auth:error".into(),
+                        title: err.clone(),
+                        subtitle: "Sign-in did not start — nothing was sent to a browser".into(),
+                        keywords: "oauth signin".into(),
+                        kind: Kind::Settings,
+                        icon: Icon::Name("dialog-error".into()),
+                        action: Action::Copy(err.clone()),
+                    },
+                    &err,
+                );
+            }
+        }
+    }
+
+    fn show_signin_progress(&self, job: &auth::BrowserJob, status: &str) {
+        let mut items = Vec::new();
+        if let Some(code) = &job.user_code {
+            items.push(Item {
+                id: "auth:code".into(),
+                title: format!("Confirm this code: {code}"),
+                subtitle: "xAI shows the same code in the browser".into(),
+                keywords: "oauth grok xai".into(),
+                kind: Kind::Ai,
+                icon: Icon::Name("dialog-password".into()),
+                action: Action::Copy(code.clone()),
+            });
+        }
+        items.push(Item {
+            id: "auth:open".into(),
+            title: "Open the sign-in page again".into(),
+            subtitle: job.url.clone(),
+            keywords: "oauth browser".into(),
+            kind: Kind::Web,
+            icon: Icon::Name("web-browser".into()),
+            action: Action::OpenUri(job.url.clone()),
         });
+        {
+            let mut st = self.state.borrow_mut();
+            st.search_gen = st.search_gen.saturating_add(1);
+            st.results = items
+                .into_iter()
+                .map(|item| catalog::Scored::new(item, 200_000))
+                .collect();
+            st.selected = 0;
+        }
+        self.set_status(status);
+        self.sync_chrome();
+        rebuild_rows(self);
     }
 
     fn refresh_models(&self) {

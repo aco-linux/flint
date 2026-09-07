@@ -7,8 +7,65 @@ const SKILLS_CAP: usize = 12 * 1024;
 
 /// Load `~/.config/flint/skills/*.md` into a system-prompt block.
 /// Missing directory is fine. Total cap is 12 KiB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub preview: String,
+}
+
+pub fn dir() -> std::path::PathBuf {
+    paths::config_dir().join("skills")
+}
+
+pub fn list() -> Vec<Skill> {
+    list_in(&dir())
+}
+
+pub fn list_in(dir: &Path) -> Vec<Skill> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with('.'))
+        })
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let text = fs::read_to_string(&path).ok()?;
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("skill")
+                .to_string();
+            let preview = text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
+            Some(Skill {
+                name,
+                path,
+                preview,
+            })
+        })
+        .collect()
+}
+
 pub fn prompt_block() -> Option<String> {
-    from_dir(&paths::config_dir().join("skills"))
+    from_dir(&dir())
 }
 
 fn truncate_bytes(s: &str, max: usize) -> &str {
@@ -104,6 +161,10 @@ mod tests {
         assert!(block.contains("Prefer rustfmt."));
         assert!(block.contains("Never commit secrets."));
         assert!(!block.contains("not a skill"));
+        let listed = super::list_in(&dir);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "alpha");
+        assert!(listed[0].preview.contains("rustfmt"));
         let _ = fs::remove_dir_all(&dir);
     }
 
