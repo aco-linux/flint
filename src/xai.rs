@@ -41,10 +41,6 @@ struct InstantLike {
 }
 
 impl InstantLike {
-    fn now() -> Self {
-        Self { unix: unix_now() }
-    }
-
     fn after(secs: u64) -> Self {
         Self {
             unix: unix_now().saturating_add(secs),
@@ -101,7 +97,7 @@ pub fn start_device() -> Result<DevicePending, String> {
     };
     let url = pin_xai_url(&url)?;
     let interval = parsed.interval.max(5);
-    let expires = parsed.expires_in.max(60).min(15 * 60);
+    let expires = parsed.expires_in.clamp(60, 15 * 60);
     Ok(DevicePending {
         verification_url: url,
         user_code: parsed.user_code,
@@ -335,7 +331,7 @@ fn parse_rfc3339(raw: &str) -> Option<u64> {
     let hour: u32 = tparts.next()?.parse().ok()?;
     let min: u32 = tparts.next()?.parse().ok()?;
     let sec: u32 = tparts.next()?.parse().ok()?;
-    if year < 1970 || year > 9999 {
+    if !(1970..=9999).contains(&year) {
         return None;
     }
     if !(1..=12).contains(&month) || hour > 23 || min > 59 || sec > 60 {

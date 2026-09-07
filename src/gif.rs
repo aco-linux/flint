@@ -130,7 +130,15 @@ pub fn to_item(hit: &Hit) -> Item {
         keywords: format!("gif {}", hit.title),
         kind: Kind::Media,
         icon: Icon::Name("image-x-generic".into()),
-        action: Action::Copy(hit.url.clone()),
+        action: Action::Copy(gif_copy_url(hit).to_string()),
+    }
+}
+
+fn gif_copy_url(hit: &Hit) -> &str {
+    if hit.url.starts_with("https://") || !hit.preview.starts_with("https://") {
+        &hit.url
+    } else {
+        &hit.preview
     }
 }
 
@@ -426,6 +434,11 @@ mod tests {
         });
         let hits = parse_v2(&value).unwrap();
         assert_eq!(hits[0].url, "https://media.tenor.com/cat.gif");
+        assert_eq!(hits[0].preview, "https://media.tenor.com/cat-tiny.gif");
+        assert_eq!(
+            super::gif_copy_url(&hits[0]),
+            "https://media.tenor.com/cat.gif"
+        );
     }
 
     #[test]

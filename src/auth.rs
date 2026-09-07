@@ -623,12 +623,6 @@ pub fn finish_login(pending: PendingLogin) -> Result<String, String> {
     }
 }
 
-pub fn login(provider_id: &str, settings: &Settings) -> Result<String, String> {
-    let (job, pending) = start_login(provider_id, settings)?;
-    open_browser(&job.url)?;
-    finish_login(pending)
-}
-
 fn finish_loopback(pending: LoopbackPending) -> Result<String, String> {
     let code = wait_for_code(&pending.listener, pending.port, &pending.state)?;
     let response = match pending.provider_id.as_str() {
@@ -659,7 +653,11 @@ fn finish_loopback(pending: LoopbackPending) -> Result<String, String> {
     })?;
     Ok(format!(
         "Signed in with {} · credentials stored in {storage}",
-        pending.provider_id
+        PROVIDERS
+            .iter()
+            .find(|provider| provider.id == pending.provider_id)
+            .map(|provider| provider.title)
+            .unwrap_or(&pending.provider_id)
     ))
 }
 
