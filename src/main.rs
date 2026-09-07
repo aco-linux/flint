@@ -22,6 +22,7 @@ mod hypr;
 mod intent;
 mod item;
 mod layout;
+mod mail;
 mod mcp;
 mod memory;
 mod mode;
@@ -40,12 +41,14 @@ mod skills;
 mod smart;
 mod snippets;
 mod store;
+mod tools;
 mod translate;
 mod tz;
 mod ui;
 mod usage;
 mod voice;
 mod weather;
+mod web;
 mod xai;
 
 use std::cell::RefCell;
@@ -62,7 +65,8 @@ use mode::Mode;
 
 pub(crate) const APP_ID: &str = "dev.flint.launcher";
 pub(crate) const WINDOW_WIDTH: i32 = 980;
-pub(crate) const WINDOW_HEIGHT: i32 = 720;
+pub(crate) const WINDOW_HEIGHT: i32 = 400;
+pub(crate) const WINDOW_HEIGHT_MAX: i32 = 900;
 
 #[derive(Debug)]
 enum Cmd {

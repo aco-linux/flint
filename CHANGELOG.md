@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — in-app results and smart sizing
+
+- Natural-language intents: “what’s the weather”, “is it going to rain”, “what’s on my calendar today”, “what’s in my inbox” route to live cards instead of a web search
+- Ask AI shows a scrollable transcript in the same window (not a truncated one-line row). Native tools read calendar, weather, iCloud inbox, and Instant Answers
+- GIFs preview in the list; the Tenor browser fallback is gone
+- DuckDuckGo Instant Answers render in Flint. Opening a SERP is an action-panel escape hatch
+- Apple CalDAV discovers the calendar collection and filters today. Google/Outlook events copy in-app instead of opening HTML
+- Light iCloud IMAP inbox using the same Apple app-specific password
+- The floating window starts compact (~980×400) and grows with weather cards, agendas, GIFs, search snippets, and chat
+- Empty-state chips and Ctrl+K action rows are clickable
+
 ## Unreleased — store and desktop glue (Wave 6)
 
 - Extension `confirmAlert` shows Confirm / Cancel rows; Enter resolves the RPC (no longer cancel-always)

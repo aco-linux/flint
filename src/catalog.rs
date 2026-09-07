@@ -63,6 +63,9 @@ pub struct LiveExtras {
     pub files: Vec<Scored>,
     pub weather: Option<Scored>,
     pub gifs: Vec<Scored>,
+    pub calendar: Vec<Scored>,
+    pub mail: Vec<Scored>,
+    pub web: Vec<Scored>,
 }
 
 impl Catalog {
@@ -223,6 +226,36 @@ impl Catalog {
                 IntentKind::Time => {
                     results.push(Scored::new(weather::time_item(), 60_000 + hit.score))
                 }
+                IntentKind::Calendar => {
+                    results.push(Scored::new(calendar_stub(), 70_000 + hit.score));
+                }
+                IntentKind::Email => {
+                    results.push(Scored::new(
+                        crate::mail::stub(&self.settings.borrow()),
+                        70_000 + hit.score,
+                    ));
+                }
+                IntentKind::Gif => {
+                    let terms = intent::gif_terms(query);
+                    results.push(Scored::new(
+                        crate::gif::search_item(if terms.is_empty() { query } else { &terms }),
+                        65_000 + hit.score,
+                    ));
+                }
+                IntentKind::Web => {
+                    results.push(Scored::new(
+                        crate::web::search_item(query),
+                        12_000 + hit.score,
+                    ));
+                }
+                IntentKind::Ask => {
+                    if !query.is_empty() {
+                        results.push(Scored::new(
+                            ask_prompt_item(query, &self.settings.borrow()),
+                            50_000,
+                        ));
+                    }
+                }
             }
         }
 
@@ -357,20 +390,16 @@ impl Catalog {
         drop(windows);
         drop(hay);
 
-        if !query.starts_with(['>', '$', '=', '/', '~', ';']) {
-            let encoded = urlencoding_lite(query);
-            results.push(Scored::new(
-                Item {
-                    id: format!("search:{query}"),
-                    title: format!("Search the web for “{query}”"),
-                    subtitle: "DuckDuckGo".into(),
-                    keywords: "google ddg web".into(),
-                    kind: Kind::Web,
-                    icon: Icon::Name("system-search".into()),
-                    action: Action::OpenUri(format!("https://duckduckgo.com/?q={encoded}")),
-                },
-                400,
-            ));
+        if !query.starts_with(['>', '$', '=', '/', '~', ';'])
+            && !meaning.tool_intent()
+            && !meaning.has(IntentKind::Web)
+        {
+            let encoded_score = if meaning.has(IntentKind::Ask) {
+                8_000
+            } else {
+                400
+            };
+            results.push(Scored::new(crate::web::search_item(query), encoded_score));
         }
 
         let limit = if file_heavy {
@@ -1106,7 +1135,7 @@ impl Catalog {
     }
 
     fn search_gif(&self, query: &str) -> Vec<Scored> {
-        vec![Scored::new(crate::gif::search_item(query), 80_000)]
+        vec![Scored::new(crate::gif::search_item(query), 20_000)]
     }
 
     fn search_content(&self, query: &str) -> Vec<Scored> {
@@ -1268,12 +1297,15 @@ pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
     if Mode::parse(query).0 == Mode::Gif && !Mode::parse(query).1.trim().is_empty() {
         return true;
     }
+    let meaning = intent::resolve(&rest);
+    if mode == Mode::Root && meaning.has(IntentKind::Weather) && weather::cached().is_none() {
+        return true;
+    }
     if mode == Mode::Root
-        && intent::resolve(&rest)
-            .intents
-            .iter()
-            .any(|hit| hit.kind == IntentKind::Weather)
-        && weather::cached().is_none()
+        && (meaning.has(IntentKind::Calendar)
+            || meaning.has(IntentKind::Email)
+            || meaning.has(IntentKind::Web)
+            || (meaning.has(IntentKind::Gif) && !intent::gif_terms(&rest).is_empty()))
     {
         return true;
     }
@@ -1309,6 +1341,17 @@ pub fn live_extras(
         ));
     }
 
+    let meaning = intent::resolve(&q);
+    if meaning.has(IntentKind::Calendar) {
+        extras.calendar = live_calendar(settings);
+    }
+    if meaning.has(IntentKind::Email) {
+        extras.mail = live_mail(settings);
+    }
+    if meaning.has(IntentKind::Web) && !meaning.tool_intent() {
+        extras.web = live_web(&q);
+    }
+
     if let Some(term) = crate::content::term_from_query(query) {
         let items = crate::content::search(&term, &settings.files.search_roots, 40);
         for item in items {
@@ -1322,7 +1365,14 @@ pub fn live_extras(
         return extras;
     }
 
-    if mode == Mode::Gif && !q.trim().is_empty() {
+    if (mode == Mode::Gif && !q.trim().is_empty())
+        || (mode == Mode::Root && meaning.has(IntentKind::Gif) && !intent::gif_terms(&q).is_empty())
+    {
+        let terms = if mode == Mode::Gif {
+            q.to_string()
+        } else {
+            intent::gif_terms(&q)
+        };
         let key = crate::auth::api_key("tenor")
             .or_else(|| {
                 let legacy = settings.connectors.tenor_key.trim();
@@ -1330,15 +1380,22 @@ pub fn live_extras(
             })
             .or_else(|| std::env::var("TENOR_API_KEY").ok())
             .unwrap_or_default();
-        if let Ok(hits) = crate::gif::search(&q, &key, 16) {
+        if let Ok(hits) = crate::gif::search(&terms, &key, 16) {
             for (i, hit) in hits.iter().enumerate() {
-                extras.gifs.push(Scored::new(
-                    crate::gif::to_item(hit),
+                let item = crate::gif::to_item(hit);
+                let live = crate::gif::cache_preview(hit)
+                    .map(|path| Live::Image { path })
+                    .unwrap_or(Live::None);
+                extras.gifs.push(Scored::with_live(
+                    item,
                     70_000u32.saturating_sub(i as u32 * 10),
+                    live,
                 ));
             }
         }
-        return extras;
+        if mode == Mode::Gif {
+            return extras;
+        }
     }
 
     let want_files = asked_for_files(&q, mode, settings.files.include_in_root);
@@ -1708,7 +1765,7 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
     }
     score = score.saturating_add(usage::score(input.usage.get(&input.item.id), input.now));
     score = score.saturating_add(match input.item.kind {
-        Kind::Weather => 220,
+        Kind::Weather | Kind::Calendar | Kind::Mail => 220,
         Kind::Extension => 120,
         Kind::Ai | Kind::Note => 90,
         Kind::Media => 90,
@@ -1839,18 +1896,128 @@ fn run_item(command: String, terminal: bool) -> Item {
     }
 }
 
-fn urlencoding_lite(input: &str) -> String {
-    let mut out = String::new();
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
+fn calendar_stub() -> Item {
+    if crate::connectors::calendar_connected() {
+        Item {
+            id: "live:calendar".into(),
+            title: "Today’s calendar".into(),
+            subtitle: "Loading events…".into(),
+            keywords: "calendar agenda schedule meetings".into(),
+            kind: Kind::Calendar,
+            icon: Icon::Name("office-calendar".into()),
+            action: Action::Copy("Today’s calendar".into()),
+        }
+    } else {
+        Item {
+            id: "live:calendar".into(),
+            title: "Today’s calendar".into(),
+            subtitle: "Set Apple ID and app password in Settings".into(),
+            keywords: "calendar agenda schedule meetings".into(),
+            kind: Kind::Calendar,
+            icon: Icon::Name("office-calendar".into()),
+            action: Action::OpenPrefs {
+                page: Some("connections".into()),
+            },
         }
     }
+}
+
+fn ask_prompt_item(query: &str, settings: &crate::config::Settings) -> Item {
+    let follow = crate::ai::current_thread();
+    let subtitle = if let Some(thread) = &follow {
+        format!(
+            "Follow-up · {} · {} · {}",
+            thread.title, settings.ai.provider, settings.ai.model
+        )
+    } else {
+        format!("{} · {}", settings.ai.provider, settings.ai.model)
+    };
+    Item {
+        id: format!("ask:{query}"),
+        title: format!("Ask “{query}”"),
+        subtitle,
+        keywords: query.to_string(),
+        kind: Kind::Ai,
+        icon: Icon::Name("help-faq".into()),
+        action: Action::AskAi {
+            prompt: query.to_string(),
+        },
+    }
+}
+
+fn live_calendar(settings: &crate::config::Settings) -> Vec<Scored> {
+    if !crate::connectors::calendar_connected() {
+        return vec![Scored::new(calendar_stub(), 88_000)];
+    }
+    let mut out = Vec::new();
+    for id in [
+        "apple-calendar",
+        "google-calendar",
+        "outlook",
+        "proton-calendar",
+    ] {
+        if let Ok(items) = crate::connectors::fetch(id, settings) {
+            for (i, item) in items.into_iter().take(16).enumerate() {
+                let live = if item.subtitle.is_empty() {
+                    Live::None
+                } else {
+                    Live::Snippet {
+                        text: item.subtitle.clone(),
+                    }
+                };
+                out.push(Scored::with_live(
+                    item,
+                    86_000u32.saturating_sub(i as u32 * 10),
+                    live,
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(Scored::new(calendar_stub(), 88_000));
+    }
     out
+}
+
+fn live_mail(settings: &crate::config::Settings) -> Vec<Scored> {
+    match crate::mail::fetch(settings) {
+        Ok(items) => items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let live = if item.subtitle.is_empty() {
+                    Live::None
+                } else {
+                    Live::Snippet {
+                        text: item.subtitle.clone(),
+                    }
+                };
+                Scored::with_live(item, 86_000u32.saturating_sub(i as u32 * 10), live)
+            })
+            .collect(),
+        Err(_) => vec![Scored::new(crate::mail::stub(settings), 88_000)],
+    }
+}
+
+fn live_web(query: &str) -> Vec<Scored> {
+    match crate::web::fetch(query) {
+        Ok(rows) => {
+            let mut out: Vec<Scored> = rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, (item, live))| {
+                    Scored::with_live(item, 40_000u32.saturating_sub(i as u32 * 10), live)
+                })
+                .collect();
+            if out.is_empty() {
+                out.push(Scored::new(crate::web::browser_fallback(query), 500));
+            } else {
+                out.push(Scored::new(crate::web::browser_fallback(query), 300));
+            }
+            out
+        }
+        Err(_) => vec![Scored::new(crate::web::browser_fallback(query), 500)],
+    }
 }
 
 fn system_commands() -> Vec<Item> {
@@ -2012,6 +2179,20 @@ mod tests {
         assert!(
             weahter.iter().any(|row| row.item.id == "live:weather"),
             "swapped letters should still surface weather"
+        );
+        let cal = catalog.search_fast("what's on my calendar today?").1;
+        assert!(
+            cal.iter().any(|row| row.item.id == "live:calendar"
+                || row.item.kind == crate::item::Kind::Calendar
+                || matches!(row.item.action, crate::item::Action::AskAi { .. })),
+            "natural-language calendar must not fall through to a browser search"
+        );
+        assert!(
+            !cal.iter().any(|row| matches!(
+                row.item.action,
+                crate::item::Action::OpenUri(ref url) if url.contains("duckduckgo")
+            )),
+            "calendar questions must stay in Flint"
         );
         assert!(
             !super::live_needed("firefox", crate::mode::Mode::Root, true),
@@ -2410,13 +2591,19 @@ mod tests {
         let (mode, rows) = catalog.search_fast("gif cats");
         assert_eq!(mode, crate::mode::Mode::Gif);
         assert!(
-            rows.iter().any(|row| match &row.item.action {
-                Action::OpenUri(url) => url.starts_with("https://tenor.com/"),
-                _ => false,
-            }),
-            "gif cats must offer a real https Tenor URL, got {:?}",
-            rows.iter().map(|r| &r.item.title).collect::<Vec<_>>()
+            rows.iter()
+                .any(|row| row.item.id.contains("gif")
+                    && !matches!(row.item.action, Action::OpenUri(_))),
+            "gif cats must stay in Flint, got {:?}",
+            rows.iter()
+                .map(|r| (&r.item.title, format!("{:?}", r.item.action)))
+                .collect::<Vec<_>>()
         );
+        assert!(super::live_needed(
+            "gif cats",
+            crate::mode::Mode::Gif,
+            false
+        ));
     }
 
     #[test]

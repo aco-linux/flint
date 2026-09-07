@@ -283,7 +283,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     let results_host = Box::new(Orientation::Vertical, 2);
     results_host.add_css_class("results");
 
-    let (empty, empty_title, empty_sub) = empty_state();
+    let (empty, empty_title, empty_sub) = empty_state(&entry);
     results_host.append(&empty);
 
     let scroll = ScrolledWindow::builder()
@@ -347,7 +347,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     detail_view.set_right_margin(18);
     let detail = ScrolledWindow::builder()
         .min_content_height(220)
-        .max_content_height(360)
+        .max_content_height(420)
         .hscrollbar_policy(PolicyType::Never)
         .child(&detail_view)
         .css_classes(["note-scroll"])
@@ -613,6 +613,7 @@ impl Shell {
             self.state.borrow().voice.cancel();
         }
         self.state.borrow_mut().visible = false;
+        hypr::resize_launcher(crate::WINDOW_WIDTH, crate::WINDOW_HEIGHT);
         self.window.set_visible(false);
     }
 
@@ -665,6 +666,7 @@ impl Shell {
         self.update_preview();
         self.request_visible_thumbs();
         self.schedule_live(generation, query, include_in_root);
+        self.fit_window();
     }
 
     fn schedule_live(&self, generation: u64, query: String, include_in_root: bool) {
@@ -696,15 +698,11 @@ impl Shell {
                 st.results.retain(|row| row.item.id != "live:weather");
                 st.results.insert(0, weather);
             }
-            let incoming: std::collections::HashSet<String> =
-                live.files.iter().map(|row| row.item.id.clone()).collect();
-            st.results.retain(|row| !incoming.contains(&row.item.id));
-            st.results.extend(live.files);
-            let incoming_gifs: std::collections::HashSet<String> =
-                live.gifs.iter().map(|row| row.item.id.clone()).collect();
-            st.results
-                .retain(|row| !incoming_gifs.contains(&row.item.id));
-            st.results.extend(live.gifs);
+            merge_live(&mut st.results, live.files);
+            merge_live(&mut st.results, live.gifs);
+            merge_live(&mut st.results, live.calendar);
+            merge_live(&mut st.results, live.mail);
+            merge_live(&mut st.results, live.web);
             st.results.sort_by(|a, b| {
                 b.score
                     .cmp(&a.score)
@@ -721,6 +719,36 @@ impl Shell {
         rebuild_rows(self);
         self.update_preview();
         self.request_visible_thumbs();
+        self.fit_window();
+    }
+
+    fn fit_window(&self) {
+        if !self.state.borrow().visible {
+            return;
+        }
+        let (n, live, ask) = {
+            let st = self.state.borrow();
+            let n = st.results.len().min(14) as i32;
+            let live = st.results.iter().filter(|row| !row.live.is_none()).count() as i32;
+            let ask = st.mode == Mode::Ask && ai::current_id().is_some();
+            (n, live, ask)
+        };
+        let mut height = 180 + n * 52 + live * 18;
+        if ask {
+            height = height.max(720);
+        }
+        if self.preview.is_visible() {
+            height = height.max(520);
+        }
+        if self.detail.is_visible() {
+            height += 180;
+        }
+        if n == 0 {
+            height = crate::WINDOW_HEIGHT;
+        }
+        height = height.clamp(crate::WINDOW_HEIGHT, crate::WINDOW_HEIGHT_MAX);
+        self.window.set_default_size(crate::WINDOW_WIDTH, height);
+        hypr::resize_launcher(crate::WINDOW_WIDTH, height);
     }
 
     fn apply_hypr_windows(&self, windows: Vec<crate::item::Item>) {
@@ -941,8 +969,12 @@ impl Shell {
             Some(Editing::FormField { kind, .. }) if kind == "textarea" => true,
             _ => false,
         };
-        self.detail.set_visible(editing);
-        if editing {
+        let transcript = st.mode == Mode::Ask && !editing && ai::current_id().is_some();
+        self.detail.set_visible(editing || transcript);
+        if transcript {
+            drop(st);
+            self.paint_transcript();
+        } else if editing {
             self.preview.set_visible(false);
         }
     }
@@ -1324,13 +1356,23 @@ impl Shell {
                 if item.kind == Kind::Calc {
                     calc::record(calc_expr(&item.subtitle), &text);
                 }
-                self.hide();
                 if item.id.starts_with("gif:") {
                     action::copy_text(&text);
                     thread::spawn(move || {
                         let _ = crate::gif::copy_gif_bytes(&text);
                     });
+                    self.set_status("Copying GIF…");
+                    return;
+                }
+                let stay = matches!(
+                    item.kind,
+                    Kind::Calendar | Kind::Mail | Kind::Ai | Kind::Weather | Kind::Web
+                );
+                if stay {
+                    action::copy_text(&text);
+                    self.set_status("Copied");
                 } else {
+                    self.hide();
                     action::run(&Action::Copy(text));
                 }
             }
@@ -1458,6 +1500,7 @@ impl Shell {
         self.state.borrow_mut().mode = Mode::Notes;
         self.entry.set_text(&note.title);
         self.entry.set_position(-1);
+        self.detail_view.set_editable(true);
         self.detail_view.buffer().set_text(&note.body);
         self.set_status("Editing note · Ctrl+S saves, Esc returns");
         self.sync_chrome();
@@ -1642,6 +1685,13 @@ impl Shell {
             title.set_xalign(0.0);
             title.set_hexpand(true);
             row.append(&title);
+            let click = GestureClick::new();
+            let shell = self.clone();
+            click.connect_released(move |_, _, _, _| {
+                shell.state.borrow_mut().action_selected = idx;
+                shell.run_selected_action();
+            });
+            row.add_controller(click);
             self.action_list.append(&row);
         }
         self.action_panel.set_visible(true);
@@ -1858,6 +1908,7 @@ impl Shell {
         self.state.borrow_mut().editing = Some(Editing::ClipEdit(entry.id.clone()));
         self.state.borrow_mut().mode = Mode::Clipboard;
         self.entry.set_text(&entry.display_title());
+        self.detail_view.set_editable(true);
         self.detail_view.buffer().set_text(&entry.text);
         self.set_status("Editing clipboard · Ctrl+S saves");
         self.sync_chrome();
@@ -1946,31 +1997,30 @@ impl Shell {
     }
 
     fn show_ai_reply(&self, text: String, source: String) {
-        let item = Item {
-            id: "ask:reply".into(),
-            title: text
-                .lines()
-                .next()
-                .unwrap_or("Answer")
-                .chars()
-                .take(72)
-                .collect(),
-            subtitle: format!("{source} · Enter copies"),
-            keywords: text.clone(),
-            kind: Kind::Ai,
-            icon: Icon::Name("help-faq".into()),
-            action: Action::Copy(text.clone()),
+        let _ = text;
+        self.set_status(source);
+        self.entry.set_text("");
+        self.state.borrow_mut().mode = Mode::Ask;
+        self.refresh();
+        self.paint_transcript();
+        self.fit_window();
+    }
+
+    fn paint_transcript(&self) {
+        let Some(id) = ai::current_id() else {
+            return;
         };
-        {
-            let mut st = self.state.borrow_mut();
-            st.results = vec![Scored::new(item, 100_000)];
-            st.selected = 0;
-            st.mode = Mode::Ask;
+        let text = ai::transcript(&id);
+        if text.is_empty() {
+            return;
         }
+        self.detail_view.set_editable(false);
         self.detail_view.buffer().set_text(&text);
         self.detail.set_visible(true);
-        self.sync_chrome();
-        rebuild_rows(self);
+        let buffer = self.detail_view.buffer();
+        let mut end = buffer.end_iter();
+        self.detail_view
+            .scroll_to_iter(&mut end, 0.0, false, 0.0, 0.0);
     }
 
     fn handle_ui_action(&self, action: &Action) -> bool {
@@ -2007,6 +2057,8 @@ impl Shell {
                     Some(thread) => {
                         self.enter_mode(Mode::Ask);
                         self.set_status(format!("Resumed “{}”. Type a follow-up.", thread.title));
+                        self.paint_transcript();
+                        self.fit_window();
                     }
                     None => self.set_status("That chat is gone"),
                 }
@@ -2015,6 +2067,8 @@ impl Shell {
             Action::NewChat => {
                 ai::new_chat();
                 self.enter_mode(Mode::Ask);
+                self.detail.set_visible(false);
+                self.detail_view.buffer().set_text("");
                 self.set_status("New chat");
                 true
             }
@@ -2761,6 +2815,13 @@ fn start_hypr_watch() {
     hypr::watch(move |windows| push_ui(&inbox, UiMsg::Windows(windows)));
 }
 
+fn merge_live(results: &mut Vec<Scored>, incoming: Vec<Scored>) {
+    let ids: std::collections::HashSet<String> =
+        incoming.iter().map(|row| row.item.id.clone()).collect();
+    results.retain(|row| !ids.contains(&row.item.id));
+    results.extend(incoming);
+}
+
 fn rebuild_rows(shell: &Shell) {
     let host = &shell.results_host;
     while let Some(child) = host.last_child() {
@@ -3246,6 +3307,7 @@ impl Shell {
         self.state.borrow_mut().mode = Mode::Extension;
         if kind == "textarea" {
             self.entry.set_text("");
+            self.detail_view.set_editable(true);
             self.detail_view.buffer().set_text(&value);
             self.set_status("Editing field · Ctrl+S saves, Esc returns");
             self.sync_chrome();
@@ -3595,7 +3657,7 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
     row
 }
 
-fn empty_state() -> (Box, Label, Label) {
+fn empty_state(entry: &Entry) -> (Box, Label, Label) {
     let wrap = Box::new(Orientation::Vertical, 10);
     wrap.add_css_class("empty");
 
@@ -3612,11 +3674,28 @@ fn empty_state() -> (Box, Label, Label) {
 
     let chips = Box::new(Orientation::Horizontal, 8);
     chips.set_margin_top(8);
-    for hint in [
-        "file", "?ask", "note", "win", "clip", "link", "calc", "store", "set",
+    for (hint, fill) in [
+        ("file", "file "),
+        ("?ask", "?"),
+        ("note", "note "),
+        ("win", "win "),
+        ("clip", "clip "),
+        ("link", "link "),
+        ("calc", "calc "),
+        ("store", "store "),
+        ("set", "set "),
     ] {
         let chip = Label::new(Some(hint));
         chip.add_css_class("chip");
+        let click = GestureClick::new();
+        let entry = entry.clone();
+        let fill = fill.to_string();
+        click.connect_released(move |_, _, _, _| {
+            entry.set_text(&fill);
+            entry.set_position(-1);
+            entry.grab_focus();
+        });
+        chip.add_controller(click);
         chips.append(&chip);
     }
     wrap.append(&chips);
@@ -3681,6 +3760,8 @@ fn kind_icon(kind: Kind) -> &'static str {
         Kind::Script => "utilities-terminal",
         Kind::Weather => "weather-few-clouds",
         Kind::Media => "audio-x-generic",
+        Kind::Calendar => "office-calendar",
+        Kind::Mail => "mail-unread",
     }
 }
 
@@ -3828,6 +3909,13 @@ fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
                 keywords: "open url".into(),
                 kind: PanelKind::Open,
             });
+            if item.subtitle.starts_with("https://") {
+                out.push(PanelAction {
+                    title: "Open this result".into(),
+                    keywords: "open url browser".into(),
+                    kind: PanelKind::Run(Action::OpenUri(item.subtitle.clone())),
+                });
+            }
         }
         Kind::Voice => {
             let text = match &item.action {
