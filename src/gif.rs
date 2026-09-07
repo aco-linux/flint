@@ -97,9 +97,7 @@ pub(crate) fn copy_gif_bytes(url: &str) -> bool {
     else {
         return false;
     };
-    if !output.status.success()
-        || output.stdout.is_empty()
-        || output.stdout.len() > 8 * 1024 * 1024
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 * 1024
     {
         return false;
     }
@@ -163,10 +161,7 @@ fn tenor_search(
         "data-urlencode = \"key={}\"\n",
         curl_cfg_escape(key)
     ));
-    cfg.push_str(&format!(
-        "data-urlencode = \"limit={}\"\n",
-        limit.min(24)
-    ));
+    cfg.push_str(&format!("data-urlencode = \"limit={}\"\n", limit.min(24)));
     if v2 {
         cfg.push_str("data-urlencode = \"media_filter=gif,tinygif\"\n");
     }
@@ -469,7 +464,10 @@ mod tests {
     fn live_commons_returns_https_gifs() {
         let hits = super::search("cat", "", 4).expect("commons GIF search");
         assert!(!hits.is_empty());
-        assert!(hits.iter().all(|h| h.url.starts_with("https://upload.wikimedia.org/")));
+        assert!(
+            hits.iter()
+                .all(|h| h.url.starts_with("https://upload.wikimedia.org/"))
+        );
     }
 
     #[test]

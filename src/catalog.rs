@@ -2433,10 +2433,9 @@ mod tests {
         );
         let settings = catalog.search_fast("settings").1;
         assert!(
-            settings.iter().any(|row| matches!(
-                row.item.action,
-                Action::OpenPrefs { .. }
-            )),
+            settings
+                .iter()
+                .any(|row| matches!(row.item.action, Action::OpenPrefs { .. })),
             "Settings must open the window, not only a search list"
         );
     }
@@ -2462,10 +2461,8 @@ mod tests {
             "typing sign in grok should surface Connect Grok"
         );
         let settings = catalog.search_fast("set grok").1;
-        assert!(
-            settings.iter().any(|row| row.item.id == "set:signin-xai"
-                || row.item.id == "ext:signin-grok"
-                || matches!(row.item.action, Action::SignIn { ref provider } if provider == "xai"))
-        );
+        assert!(settings.iter().any(|row| row.item.id == "set:signin-xai"
+            || row.item.id == "ext:signin-grok"
+            || matches!(row.item.action, Action::SignIn { ref provider } if provider == "xai")));
     }
 }

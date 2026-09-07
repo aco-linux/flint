@@ -58,7 +58,9 @@ fn caldav_item(id: &str, title: &str, subtitle: &str) -> Item {
         action: if connected {
             Action::ConnectorFetch { id: id.into() }
         } else {
-            Action::SignIn { provider: id.into() }
+            Action::SignIn {
+                provider: id.into(),
+            }
         },
     }
 }
@@ -189,7 +191,11 @@ fn parse_event_block(block: &str) -> Option<Event> {
     if uid.is_empty() {
         uid = summary.clone();
     }
-    Some(Event { uid, summary, start })
+    Some(Event {
+        uid,
+        summary,
+        start,
+    })
 }
 
 fn unfold(input: &str) -> String {

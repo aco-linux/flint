@@ -101,9 +101,7 @@ pub fn items() -> Vec<Item> {
                 kind: Kind::Extension,
                 icon: Icon::Name("office-calendar".into()),
                 action: if connected {
-                    Action::ConnectorFetch {
-                        id: p.id.into(),
-                    }
+                    Action::ConnectorFetch { id: p.id.into() }
                 } else {
                     Action::SignIn {
                         provider: p.id.into(),
@@ -222,7 +220,10 @@ fn outlook_today() -> Result<Vec<Item>, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             Some(Item {
-                id: format!("ol:{}", v.get("id").and_then(Value::as_str).unwrap_or(&title)),
+                id: format!(
+                    "ol:{}",
+                    v.get("id").and_then(Value::as_str).unwrap_or(&title)
+                ),
                 title,
                 subtitle: start.into(),
                 keywords: "outlook calendar".into(),
@@ -258,12 +259,7 @@ fn todoist_inbox() -> Result<Vec<Item>, String> {
                 keywords: "todoist task".into(),
                 kind: Kind::Web,
                 icon: Icon::Name("view-list-bullet".into()),
-                action: Action::Copy(
-                    v.get("url")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into(),
-                ),
+                action: Action::Copy(v.get("url").and_then(Value::as_str).unwrap_or("").into()),
             })
         })
         .collect())
@@ -393,12 +389,7 @@ fn https_get(url: &str, token: &str, extra: &[(&str, &str)]) -> Result<Value, St
     curl_json(&str_args)
 }
 
-fn https_post(
-    url: &str,
-    token: &str,
-    extra: &[(&str, &str)],
-    body: &str,
-) -> Result<Value, String> {
+fn https_post(url: &str, token: &str, extra: &[(&str, &str)], body: &str) -> Result<Value, String> {
     let parsed = Url::parse(url).map_err(|_| "Invalid connector URL".to_string())?;
     if parsed.scheme() != "https" {
         return Err("Connector URLs must be HTTPS".into());
@@ -421,7 +412,11 @@ fn https_post(
             "-H",
             "Accept: application/json",
         ])
-        .args(extra.iter().flat_map(|(k, v)| ["-H".into(), format!("{k}: {v}")]))
+        .args(
+            extra
+                .iter()
+                .flat_map(|(k, v)| ["-H".into(), format!("{k}: {v}")]),
+        )
         .args(["--data-binary", "@-", url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -17,7 +17,6 @@ use gtk4::{
 use crate::auth;
 use crate::config::{McpServer, Settings};
 
-
 pub const PAGES: &[(&str, &str)] = &[
     ("general", "General"),
     ("ask", "Ask AI"),
@@ -740,7 +739,9 @@ fn page_extensions(settings: &Rc<RefCell<Settings>>, host: &Host) -> Box {
     let installed = crate::extension::installed();
     let list = make_card();
     if installed.is_empty() {
-        let empty = Label::new(Some("No plugins installed yet. Open the Store to add some."));
+        let empty = Label::new(Some(
+            "No plugins installed yet. Open the Store to add some.",
+        ));
         empty.add_css_class("prefs-row-sub");
         empty.set_xalign(0.0);
         list.append(&empty);
@@ -1059,12 +1060,17 @@ fn page_advanced(settings: &Rc<RefCell<Settings>>, host: &Host) -> Box {
     ));
     let card = make_card();
     let client = settings.borrow().ai.client_id.clone();
-    card.append(&field_row("Google / custom OAuth client ID", &client, false, {
-        let s = settings.clone();
-        move |v| {
-            let _ = s.borrow_mut().apply("set:client-id", &v);
-        }
-    }));
+    card.append(&field_row(
+        "Google / custom OAuth client ID",
+        &client,
+        false,
+        {
+            let s = settings.clone();
+            move |v| {
+                let _ = s.borrow_mut().apply("set:client-id", &v);
+            }
+        },
+    ));
     let outlook = settings.borrow().connectors.outlook_client_id.clone();
     card.append(&field_row("Outlook client ID", &outlook, false, {
         let s = settings.clone();

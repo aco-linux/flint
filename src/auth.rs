@@ -231,10 +231,7 @@ fn load_connector_store() -> ConnectorStore {
         .unwrap_or_default()
 }
 
-fn upsert_connector_account(
-    mut store: ConnectorStore,
-    stored: PersistedTokens,
-) -> ConnectorStore {
+fn upsert_connector_account(mut store: ConnectorStore, stored: PersistedTokens) -> ConnectorStore {
     store.accounts.insert(stored.provider.clone(), stored);
     store
 }
@@ -1350,7 +1347,11 @@ mod tests {
     fn apple_calendar_starts_by_opening_appleid() {
         let settings = crate::config::Settings::default();
         let (job, pending) = super::start_login("apple-calendar", &settings).expect("notice");
-        assert!(job.url.starts_with("https://appleid.apple.com"), "{}", job.url);
+        assert!(
+            job.url.starts_with("https://appleid.apple.com"),
+            "{}",
+            job.url
+        );
         match pending {
             super::PendingLogin::Notice(msg) => assert!(msg.contains("app-specific")),
             _ => panic!("expected a notice login, not a 180s wait"),

@@ -177,7 +177,9 @@ impl Mode {
             Mode::Quicklink => "Type +gh https://github.com/search?q={argument} to save a link.",
             Mode::Calc => "Try 20% of 80, today + 7d, or 2+2. History stays on this machine.",
             Mode::Emoji => "Type smile or :fire:. Enter pastes the glyph.",
-            Mode::Gif => "Add a Tenor API key in Settings for in-launcher GIFs, or Enter opens Tenor.",
+            Mode::Gif => {
+                "Add a Tenor API key in Settings for in-launcher GIFs, or Enter opens Tenor."
+            }
             Mode::Content => "Type a phrase. Flint runs rg over $HOME, never /.",
             Mode::Extension => "Esc goes back.",
         }

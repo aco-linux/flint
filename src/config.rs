@@ -261,8 +261,7 @@ impl Settings {
                 self.ai.endpoint = "https://api.anthropic.com".into();
             }
             "google" => {
-                self.ai.endpoint =
-                    "https://generativelanguage.googleapis.com/v1beta/openai".into();
+                self.ai.endpoint = "https://generativelanguage.googleapis.com/v1beta/openai".into();
             }
             "xai" => {
                 crate::xai::apply_defaults(self);

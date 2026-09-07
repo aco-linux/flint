@@ -117,10 +117,7 @@ pub fn finish_device(pending: DevicePending) -> Result<String, String> {
     while !pending.deadline.expired() {
         thread::sleep(wait);
         let body = form_body(&[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
-            ),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", &pending.device_code),
             ("client_id", CLIENT_ID),
         ]);
@@ -177,9 +174,7 @@ pub fn finish_device(pending: DevicePending) -> Result<String, String> {
                     client_id: CLIENT_ID.into(),
                     api_origin: API_ORIGIN.into(),
                 })?;
-                return Ok(format!(
-                    "Signed in to Grok (xAI) · credential in {storage}"
-                ));
+                return Ok(format!("Signed in to Grok (xAI) · credential in {storage}"));
             }
             Err(err) if err.contains("authorization_pending") => continue,
             Err(err) => return Err(err),
@@ -193,11 +188,10 @@ pub fn import_grok_cli() -> Result<String, String> {
 }
 
 pub fn import_grok_cli_from(path: &std::path::Path) -> Result<String, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|_| format!("No Grok CLI login at {}", path.display()))?;
-    let value: Value =
-        serde_json::from_str::<Value>(&raw)
-            .map_err(|_| "Grok CLI auth.json is not valid JSON".to_string())?;
+    let raw =
+        fs::read_to_string(path).map_err(|_| format!("No Grok CLI login at {}", path.display()))?;
+    let value: Value = serde_json::from_str::<Value>(&raw)
+        .map_err(|_| "Grok CLI auth.json is not valid JSON".to_string())?;
     let obj = value
         .as_object()
         .ok_or("Grok CLI auth.json is not an object")?;
@@ -341,11 +335,24 @@ fn parse_rfc3339(raw: &str) -> Option<u64> {
     let hour: u32 = tparts.next()?.parse().ok()?;
     let min: u32 = tparts.next()?.parse().ok()?;
     let sec: u32 = tparts.next()?.parse().ok()?;
+    if year < 1970 || year > 9999 {
+        return None;
+    }
+    if !(1..=12).contains(&month) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    const MD: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut dim = MD[(month - 1) as usize];
+    if month == 2 && is_leap(year) {
+        dim = 29;
+    }
+    if day < 1 || day > dim {
+        return None;
+    }
     let mut days: i64 = 0;
     for y in 1970..year {
         days += if is_leap(y) { 366 } else { 365 };
     }
-    const MD: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     for m in 1..month {
         days += i64::from(MD[(m - 1) as usize]);
         if m == 2 && is_leap(year) {
@@ -370,7 +377,7 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_rfc3339, DeviceResponse};
+    use super::{DeviceResponse, parse_rfc3339};
 
     #[test]
     fn pin_xai_url_allows_known_hosts() {
@@ -399,13 +406,29 @@ mod tests {
     fn parses_grok_cli_expiry() {
         let ts = parse_rfc3339("2026-09-07T05:53:04.570283924Z").expect("ts");
         assert!(ts > 1_700_000_000);
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert!(parse_rfc3339("2024-02-29T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_grok_cli_expiry() {
+        assert!(parse_rfc3339("2026-13-01T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2026-00-01T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2026-04-31T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2025-02-29T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2026-09-07T24:00:00Z").is_none());
+        assert!(parse_rfc3339("2026-09-07T00:60:00Z").is_none());
+        assert!(parse_rfc3339("1969-12-31T23:59:59Z").is_none());
     }
 
     #[test]
     fn import_requires_a_file() {
         let err = super::import_grok_cli_from(std::path::Path::new("/tmp/flint-no-such-grok.json"))
             .unwrap_err();
-        assert!(err.contains("Grok CLI") || err.contains("auth.json"), "{err}");
+        assert!(
+            err.contains("Grok CLI") || err.contains("auth.json"),
+            "{err}"
+        );
     }
 
     #[test]

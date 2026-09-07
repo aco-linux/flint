@@ -707,11 +707,21 @@ fn anthropic(
 
 fn chat_url(endpoint: &str, path: &str) -> String {
     let base = endpoint.trim_end_matches('/');
-    if base.ends_with(path) || base.contains("/chat/completions") || base.contains("/messages") {
-        base.to_string()
-    } else {
-        format!("{base}{path}")
+    if base.ends_with(path)
+        || base.contains("/chat/completions")
+        || base.contains("/messages")
+        || base.ends_with("/api/chat")
+    {
+        return base.to_string();
     }
+    // OpenAI-compatible servers often already include `/v1` (xAI's default is
+    // `https://api.x.ai/v1`). Don't emit `/v1/v1/chat/completions`.
+    let path = if base.ends_with("/v1") {
+        path.strip_prefix("/v1").unwrap_or(path)
+    } else {
+        path
+    };
+    format!("{base}{path}")
 }
 
 fn http_json(
@@ -903,13 +913,55 @@ fn write_request<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Attachment, Turn, attach, attach_clipboard, chat_messages, command_items, compose_system,
-        compose_user, ensure_thread, history, new_chat, parse_url, peek_attachments, reset, resume,
-        selection_items, thread_items,
+        Attachment, Turn, attach, attach_clipboard, chat_messages, chat_url, command_items,
+        compose_system, compose_user, ensure_thread, history, new_chat, parse_url,
+        peek_attachments, reset, resume, selection_items, thread_items,
     };
     use crate::config::Settings;
     use crate::db;
     use crate::item::Action;
+
+    #[test]
+    fn chat_url_does_not_double_v1() {
+        assert_eq!(
+            chat_url("https://api.x.ai/v1", "/v1/chat/completions"),
+            "https://api.x.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://api.x.ai/v1/", "/v1/chat/completions"),
+            "https://api.x.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://api.openai.com", "/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url(
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "/v1/chat/completions"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://api.anthropic.com", "/v1/messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            chat_url("https://api.anthropic.com/v1", "/v1/messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            chat_url("http://127.0.0.1:11434", "/api/chat"),
+            "http://127.0.0.1:11434/api/chat"
+        );
+        assert_eq!(
+            chat_url(
+                "https://api.x.ai/v1/chat/completions",
+                "/v1/chat/completions"
+            ),
+            "https://api.x.ai/v1/chat/completions"
+        );
+    }
 
     #[test]
     fn parses_ollama_url() {

@@ -2372,8 +2372,9 @@ impl Shell {
                     let _ = tx.send(auth::finish_login(pending));
                 });
                 let shell = self.clone();
-                gtk4::glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
-                    match rx.try_recv() {
+                gtk4::glib::timeout_add_local(
+                    std::time::Duration::from_millis(80),
+                    move || match rx.try_recv() {
                         Ok(Ok(msg)) => {
                             shell.prefs_status(&msg);
                             shell.refresh();
@@ -2391,8 +2392,8 @@ impl Shell {
                             shell.set_status("Sign-in stopped");
                             gtk4::glib::ControlFlow::Break
                         }
-                    }
-                });
+                    },
+                );
             }
             Err(err) => {
                 self.show_oneshot(
