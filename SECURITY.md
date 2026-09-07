@@ -37,7 +37,7 @@ Please include:
 - Turn a consumer ChatGPT, Claude, or other chat subscription into API access; only provider-supported API OAuth works
 - Ship a shared OAuth client ID; a production distributor must register and verify its own provider clients where required
 - Guarantee that every Linux session has an unlocked Secret Service; the UI reports when mode-`600` fallback storage is used
-- Run every Vicinae / Raycast extension API (`Form`, Grid, OAuth, preferences, selected text)
+- Run every Vicinae / Raycast extension API (Grid layout, OAuth, preference editing, AT-SPI)
 - Verify git tags or script signatures
 - Protect you from a malicious `npx` package if you enable MCP
 

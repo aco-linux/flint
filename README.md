@@ -42,6 +42,13 @@ bind = SUPER SHIFT, F, exec, flint --files
 ```
 
 On Omarchy, Super+Space stays the system menu. Bind Flint to Alt+Space in `~/.config/hypr/bindings.lua`. A full snippet is in [`share/hyprland.conf`](share/hyprland.conf).
+Optional extra binds (focus 25m, dictate to app, clipboard, files, windows) live in [`share/flint-binds.conf`](share/flint-binds.conf). Flint copies that file to `~/.config/hypr/flint-binds.conf` only when the path is missing — it never overwrites `hyprland.conf`. Source it yourself:
+
+```
+source = ~/.config/hypr/flint-binds.conf
+```
+
+Caps Lock as Hyper is not a launcher feature. A keyd/kanata snippet is in [`share/keyd-hyper.conf`](share/keyd-hyper.conf); Flint does not ship a remapper.
 When upgrading from 0.1, replace the old `dev.flint.Launcher` window-rule class
 with the release ID `dev.flint.launcher` so the centered floating rule still applies.
 
@@ -98,7 +105,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 
 | Works | Not 1.0 |
 | --- | --- |
-| Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, window layouts, quit/uninstall, screenshot/record, display resolution, settings, store browse | Extensions: `List`, `Detail`, actions, navigation, toasts, storage — no `Form`, `Grid` layout, menu-bar, or extension OAuth yet |
+| Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, window layouts, quit/uninstall, screenshot/record, display resolution, settings, store browse | Extensions: `List`, `Detail`, `Form` as a list of fields, `confirmAlert`, `getSelectedText` (primary paste). No `Grid` layout, menu-bar, extension OAuth, AT-SPI app-menu search, or preference editing |
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
@@ -143,9 +150,10 @@ Flint runs Vicinae and Raycast-style extensions as one Node process per command.
 - Install from the Store, then enable **Run installed extensions** in Settings. Commands appear in root search under the extension's name.
 - First launch runs `npm install` once into `~/.local/share/flint/runtime/` (pinned `react`, `react-reconciler`, `@vicinae/api`, `esbuild`) and bundles the command with `esbuild` when sources change. `node` and `npm` must be on `PATH`.
 - Enter runs the item's first action, Shift+Enter the second. Esc pops a pushed view, then leaves the extension. Hiding the window keeps a running view-command alive.
-- Supported: `List` (sections, accessories, keywords, icons), `Detail`, `ActionPanel`, `useNavigation`, `showToast`, `showHUD`, `Clipboard`, `LocalStorage`, `Cache`, `getPreferenceValues` (manifest defaults), `open`, `runInTerminal`, `closeMainWindow`, `popToRoot`, no-view commands. `@raycast/api` imports are aliased to `@vicinae/api`.
-- Not yet: `Form`, `Grid` layout (grids render as lists), `MenuBarExtra`, search-bar dropdowns, extension OAuth, `getSelectedText`, command arguments, editing preferences in Settings, `confirmAlert` (cancels), file-search RPC.
-- Extension `console.log` output goes to Flint's stderr, tagged with the extension name. `LocalStorage` lives in `~/.local/share/flint/extensions/<name>/`.
+- Supported: `List` (sections, accessories, keywords, icons), `Detail`, `Form` as a list of fields (Enter edits like clipboard rename; checkbox toggles; Submit is a row), `ActionPanel`, `useNavigation`, `showToast`, `showHUD`, `Clipboard`, `LocalStorage`, `Cache`, `getPreferenceValues` (manifest defaults), `getSelectedText` (`wl-paste --primary`, then clipboard — never AT-SPI), `confirmAlert` (Confirm / Cancel rows), `open`, `runInTerminal`, `closeMainWindow`, `popToRoot`, no-view commands. `@raycast/api` imports are aliased to `@vicinae/api`.
+- Not yet: `Grid` layout (grids render as lists), `MenuBarExtra`, search-bar dropdowns, extension OAuth, command arguments, editing preferences in Settings, file-search RPC, focused-app menu search (no AT-SPI). Calendar, meetings, Notion, and typing trainers belong in the Store, not core.
+- A view-command Node process is killed after ~5 minutes with no messages so RSS drops. Idle RSS is unchanged when **Run installed extensions** is off.
+- Extension `console.log` output goes to Flint's stderr, tagged with the extension name. `LocalStorage` lives in `~/.local/share/flint/extensions/<name>/`. Settings lists one row per installed extension (defaults only).
 
 ## Privacy and safety
 

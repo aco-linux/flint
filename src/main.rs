@@ -84,6 +84,7 @@ fn main() {
         let cmd = parse_command_line(cmdline);
         if shell.borrow().is_none() {
             paths::ensure();
+            hypr::install_binds_snippet();
             clipboard::watch(clips.clone());
             std::thread::spawn(models::warm);
             let catalog = Catalog::load(clips.clone(), settings.clone());

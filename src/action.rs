@@ -85,6 +85,8 @@ pub fn run(action: &Action) {
         | Action::RefreshModels
         | Action::LaunchExtension { .. }
         | Action::Extension { .. }
+        | Action::ExtensionConfirm { .. }
+        | Action::ExtensionFormField { .. }
         | Action::SaveQuicklink { .. }
         | Action::SaveLayout { .. }
         | Action::QuitAll

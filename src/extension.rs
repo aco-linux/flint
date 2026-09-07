@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -22,6 +22,9 @@ use serde_json::{Value, json};
 use crate::item::{Action, ExtAction, Icon, Item, Kind};
 
 const HOST_JS: &str = include_str!("../share/runtime/flint-host.js");
+/// Kill a view-command Node process after this much silence. One-shot check
+/// on the existing pump — not a timer when `allow_extensions` is off.
+pub const HOST_IDLE_SECS: u64 = 5 * 60;
 const RUNTIME_PACKAGES: &[&str] = &[
     "react@19.1.1",
     "react-reconciler@0.32.0",
@@ -158,6 +161,44 @@ pub fn command_items() -> Vec<Item> {
                 },
             });
         }
+    }
+    items
+}
+
+/// One Settings row per installed extension. Values come from the manifest;
+/// editing preferences in Settings is not implemented.
+pub fn preference_items() -> Vec<Item> {
+    let mut items = Vec::new();
+    for ext in installed() {
+        let title = if ext.manifest.title.is_empty() {
+            ext.manifest.name.clone()
+        } else {
+            ext.manifest.title.clone()
+        };
+        let names: Vec<&str> = ext
+            .manifest
+            .preferences
+            .iter()
+            .map(|p| p.name.as_str())
+            .filter(|n| !n.is_empty())
+            .collect();
+        let subtitle = if names.is_empty() {
+            "Manifest defaults · editing preferences is not implemented".into()
+        } else {
+            format!("Defaults only · {}", names.join(", "))
+        };
+        items.push(Item {
+            id: format!("set:ext-prefs:{}", ext.manifest.name),
+            title: format!("{title} preferences"),
+            subtitle,
+            keywords: format!(
+                "preferences settings extension {}",
+                ext.manifest.name.replace('-', " ")
+            ),
+            kind: Kind::Settings,
+            icon: Icon::Name("preferences-system".into()),
+            action: Action::SaveSettings,
+        });
     }
     items
 }
@@ -399,6 +440,7 @@ pub struct Session {
     rx: Receiver<Msg>,
     out: Sender<Value>,
     child: Arc<Mutex<Option<Child>>>,
+    last_activity: Mutex<Instant>,
 }
 
 impl Session {
@@ -432,14 +474,31 @@ impl Session {
             rx,
             out,
             child,
+            last_activity: Mutex::new(Instant::now()),
         }
     }
 
+    fn touch(&self) {
+        if let Ok(mut last) = self.last_activity.lock() {
+            *last = Instant::now();
+        }
+    }
+
+    pub fn idle_expired(&self) -> bool {
+        self.last_activity
+            .lock()
+            .ok()
+            .is_some_and(|last| host_idle_expired(*last, Instant::now()))
+    }
+
     pub fn try_recv(&self) -> Option<Msg> {
-        self.rx.try_recv().ok()
+        let msg = self.rx.try_recv().ok()?;
+        self.touch();
+        Some(msg)
     }
 
     pub fn invoke(&self, node: u64, prop: &str, args: Vec<Value>) {
+        self.touch();
         let _ = self.out.send(json!({
             "type": "invoke",
             "node": node,
@@ -463,6 +522,7 @@ impl Session {
     }
 
     pub fn respond(&self, id: u64, result: Result<Value, String>) {
+        self.touch();
         let msg = match result {
             Ok(result) => json!({"type": "response", "id": id, "result": result}),
             Err(error) => json!({"type": "response", "id": id, "error": error}),
@@ -471,8 +531,13 @@ impl Session {
     }
 
     pub fn pop(&self) {
+        self.touch();
         let _ = self.out.send(json!({"type": "pop"}));
     }
+}
+
+pub fn host_idle_expired(last: Instant, now: Instant) -> bool {
+    now.duration_since(last) >= Duration::from_secs(HOST_IDLE_SECS)
 }
 
 impl Drop for Session {
@@ -656,6 +721,7 @@ pub struct View {
     pub rows: Vec<Row>,
     /// A `Detail` or unsupported root shows as one row with a preview.
     pub notice: Option<String>,
+    pub is_form: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -668,6 +734,92 @@ pub struct Row {
     pub icon: Icon,
     pub detail: String,
     pub actions: Vec<ExtAction>,
+    pub field_id: String,
+    pub field_kind: String,
+    pub field_value: String,
+    pub field_on_change: Option<(u64, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfirmPrompt {
+    pub title: String,
+    pub message: String,
+    pub primary: String,
+    pub dismiss: String,
+}
+
+pub fn confirm_prompt(params: &Value) -> ConfirmPrompt {
+    let title = params
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Confirm")
+        .to_string();
+    let message = params
+        .get("message")
+        .or_else(|| params.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let primary = params
+        .pointer("/primaryAction/title")
+        .and_then(Value::as_str)
+        .unwrap_or("Confirm")
+        .to_string();
+    let dismiss = params
+        .pointer("/dismissAction/title")
+        .and_then(Value::as_str)
+        .unwrap_or("Cancel")
+        .to_string();
+    ConfirmPrompt {
+        title,
+        message,
+        primary,
+        dismiss,
+    }
+}
+
+pub fn confirm_items(prompt: &ConfirmPrompt) -> Vec<Item> {
+    let subtitle = if prompt.message.is_empty() {
+        prompt.title.clone()
+    } else {
+        prompt.message.clone()
+    };
+    vec![
+        Item {
+            id: "vx-confirm:yes".into(),
+            title: prompt.primary.clone(),
+            subtitle: subtitle.clone(),
+            keywords: "confirm yes ok".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("emblem-ok".into()),
+            action: Action::ExtensionConfirm { confirmed: true },
+        },
+        Item {
+            id: "vx-confirm:no".into(),
+            title: prompt.dismiss.clone(),
+            subtitle: "Esc cancels".into(),
+            keywords: "cancel no dismiss".into(),
+            kind: Kind::Extension,
+            icon: Icon::Name("dialog-error".into()),
+            action: Action::ExtensionConfirm { confirmed: false },
+        },
+    ]
+}
+
+pub fn form_values(view: &View) -> Value {
+    let mut map = serde_json::Map::new();
+    for row in &view.rows {
+        if row.field_id.is_empty() {
+            continue;
+        }
+        let value = if row.field_kind == "checkbox" {
+            Value::Bool(row.field_value == "true")
+        } else {
+            Value::String(row.field_value.clone())
+        };
+        map.insert(row.field_id.clone(), value);
+    }
+    Value::Object(map)
 }
 
 fn children(node: &Value) -> &[Value] {
@@ -746,6 +898,7 @@ pub fn parse_view(message: &Value) -> View {
     };
     match node_type(top) {
         "list" | "grid" => parse_list(top, &mut view),
+        "form" => parse_form(top, &mut view),
         "detail" => {
             view.title = prop_str(top, "navigationTitle");
             let markdown = prop_str(top, "markdown");
@@ -773,7 +926,7 @@ pub fn parse_view(message: &Value) -> View {
             view.local_filter = false;
         }
         _ => {
-            view.notice = Some("Forms are not supported by Flint yet.".into());
+            view.notice = Some("This command has nothing to show.".into());
         }
     }
     view
@@ -807,6 +960,191 @@ fn parse_list(list: &Value, view: &mut View) {
             }
             _ => {}
         }
+    }
+}
+
+fn parse_form(form: &Value, view: &mut View) {
+    view.title = prop_str(form, "navigationTitle");
+    view.is_loading = prop_bool(form, "isLoading").unwrap_or(false);
+    view.local_filter = true;
+    view.is_form = true;
+    view.placeholder = "Filter fields…".into();
+    let shared = children(form)
+        .iter()
+        .find(|c| node_type(c) == "action-panel")
+        .map(collect_actions)
+        .unwrap_or_default();
+    if !shared.is_empty() {
+        let title = shared
+            .first()
+            .map(|a| a.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Submit".into());
+        view.rows.push(Row {
+            id: format!("vx-form-submit:{}", node_id(form)),
+            title,
+            subtitle: "Enter submits · fields are a list (no grid)".into(),
+            icon: Icon::Name("emblem-ok".into()),
+            actions: shared.clone(),
+            ..Row::default()
+        });
+    }
+    for child in children(form) {
+        match node_type(child) {
+            "text-field" | "password-field" | "text-area-field" | "textarea-field"
+            | "checkbox-field" | "dropdown-field" | "date-picker-field" | "file-picker-field"
+            | "tag-picker-field" => {
+                view.rows.push(parse_form_field(child, &shared));
+            }
+            "form-description" => {
+                let title = prop_str(child, "title");
+                let text = prop_str(child, "text");
+                let empty_title = title.is_empty();
+                view.rows.push(Row {
+                    id: format!("vx-form-desc:{}", node_id(child)),
+                    title: if empty_title { text.clone() } else { title },
+                    subtitle: if empty_title { String::new() } else { text },
+                    icon: Icon::Name("dialog-information".into()),
+                    actions: shared.clone(),
+                    ..Row::default()
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn form_field_kind(node_type: &str) -> &'static str {
+    match node_type {
+        "password-field" => "password",
+        "text-area-field" | "textarea-field" => "textarea",
+        "checkbox-field" => "checkbox",
+        "dropdown-field" => "dropdown",
+        "date-picker-field" => "date",
+        "file-picker-field" => "file",
+        "tag-picker-field" => "tags",
+        _ => "text",
+    }
+}
+
+fn field_value_string(node: &Value) -> String {
+    match prop(node, "value").or_else(|| prop(node, "defaultValue")) {
+        Some(Value::Bool(b)) => {
+            if *b {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(Value::Object(o)) => o
+            .get("value")
+            .map(|v| match v {
+                Value::Bool(b) => {
+                    if *b {
+                        "true".into()
+                    } else {
+                        "false".into()
+                    }
+                }
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn field_subtitle(kind: &str, value: &str, extra: &str) -> String {
+    let shown = match kind {
+        "password" if !value.is_empty() => "••••".into(),
+        "checkbox" => {
+            if value == "true" {
+                "On · Enter toggles".into()
+            } else {
+                "Off · Enter toggles".into()
+            }
+        }
+        _ if value.is_empty() => "Enter to edit".into(),
+        _ => value.to_string(),
+    };
+    if extra.is_empty() {
+        shown
+    } else if shown.is_empty() {
+        extra.to_string()
+    } else {
+        format!("{shown}  ·  {extra}")
+    }
+}
+
+fn parse_form_field(field: &Value, shared: &[ExtAction]) -> Row {
+    let kind = form_field_kind(node_type(field)).to_string();
+    let id = prop_str(field, "id");
+    let title = {
+        let title = prop_str(field, "title");
+        if title.is_empty() {
+            if id.is_empty() {
+                kind.clone()
+            } else {
+                id.clone()
+            }
+        } else {
+            title
+        }
+    };
+    let value = field_value_string(field);
+    let extra = if kind == "dropdown" {
+        children(field)
+            .iter()
+            .filter(|c| node_type(c) == "dropdown-item")
+            .map(|c| {
+                let t = prop_str(c, "title");
+                if t.is_empty() {
+                    prop_str(c, "value")
+                } else {
+                    t
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        let info = prop_str(field, "info");
+        let error = prop_str(field, "error");
+        [error.as_str(), info.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("  ·  ")
+    };
+    let on_change = callback(field, "onChange");
+    Row {
+        id: format!("vx-form-field:{}", node_id(field)),
+        title,
+        subtitle: field_subtitle(&kind, &value, &extra),
+        keywords: id.clone(),
+        icon: Icon::Name(
+            match kind.as_str() {
+                "checkbox" => "checkbox-checked-symbolic",
+                "password" => "dialog-password",
+                "file" => "folder",
+                _ => "document-edit",
+            }
+            .into(),
+        ),
+        actions: shared.to_vec(),
+        field_id: id,
+        field_kind: kind,
+        field_value: value,
+        field_on_change: on_change,
+        ..Row::default()
     }
 }
 
@@ -871,6 +1209,7 @@ fn parse_item(item: &Value, section: &str, shared: &[ExtAction]) -> Row {
         icon: parse_icon(prop(item, "icon")),
         detail,
         actions,
+        ..Row::default()
     }
 }
 
@@ -884,12 +1223,23 @@ fn walk_actions(nodes: &[Value], out: &mut Vec<ExtAction>) {
     for node in nodes {
         match node_type(node) {
             "action" => {
-                if prop(node, "onAction").is_some() {
-                    out.push(ExtAction {
-                        title: prop_str(node, "title"),
-                        node: node_id(node),
-                    });
-                }
+                let prop_name = if prop(node, "onAction").is_some() {
+                    "onAction"
+                } else if prop(node, "onSubmit").is_some() {
+                    "onSubmit"
+                } else {
+                    continue;
+                };
+                let title = prop_str(node, "title");
+                out.push(ExtAction {
+                    title: if title.is_empty() {
+                        "Submit".into()
+                    } else {
+                        title
+                    },
+                    node: node_id(node),
+                    prop: prop_name.into(),
+                });
             }
             "action-panel-section" | "action-panel-submenu" => walk_actions(children(node), out),
             _ => {}
@@ -1112,5 +1462,107 @@ mod tests {
             Icon::Path(_)
         ));
         assert!(matches!(parse_icon(None), Icon::None));
+    }
+
+    #[test]
+    fn form_fields_flatten_to_list_rows() {
+        let msg = json!({
+            "type": "render",
+            "depth": 1,
+            "root": [{
+                "id": 1, "type": "nav-frame", "props": {},
+                "children": [{
+                    "id": 2, "type": "form",
+                    "props": {"navigationTitle": "New thing"},
+                    "children": [
+                        {
+                            "id": 3, "type": "action-panel", "props": {},
+                            "children": [{
+                                "id": 4, "type": "action",
+                                "props": {"title": "Create", "onSubmit": {"$cb": [4, "onSubmit"]}},
+                                "children": []
+                            }]
+                        },
+                        {
+                            "id": 5, "type": "text-field",
+                            "props": {
+                                "id": "name",
+                                "title": "Name",
+                                "value": "Ada",
+                                "onChange": {"$cb": [5, "onChange"]}
+                            },
+                            "children": []
+                        },
+                        {
+                            "id": 6, "type": "checkbox-field",
+                            "props": {"id": "ok", "title": "Agree", "value": true},
+                            "children": []
+                        }
+                    ]
+                }]
+            }]
+        });
+        let view = parse_view(&msg);
+        assert!(view.is_form);
+        assert!(view.notice.is_none());
+        assert_eq!(view.title, "New thing");
+        assert_eq!(view.rows.len(), 3);
+        assert_eq!(view.rows[0].title, "Create");
+        assert_eq!(view.rows[0].actions[0].prop, "onSubmit");
+        assert_eq!(view.rows[1].title, "Name");
+        assert_eq!(view.rows[1].field_id, "name");
+        assert_eq!(view.rows[1].field_value, "Ada");
+        assert_eq!(view.rows[1].field_on_change, Some((5, "onChange".into())));
+        assert_eq!(view.rows[2].field_kind, "checkbox");
+        assert_eq!(view.rows[2].field_value, "true");
+        let values = form_values(&view);
+        assert_eq!(values["name"], "Ada");
+        assert_eq!(values["ok"], true);
+    }
+
+    #[test]
+    fn confirm_prompt_uses_action_titles() {
+        let prompt = confirm_prompt(&json!({
+            "title": "Delete?",
+            "message": "Gone forever",
+            "primaryAction": {"title": "Delete"},
+            "dismissAction": {"title": "Keep"}
+        }));
+        assert_eq!(prompt.primary, "Delete");
+        assert_eq!(prompt.dismiss, "Keep");
+        let items = confirm_items(&prompt);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items[0].action,
+            Action::ExtensionConfirm { confirmed: true }
+        ));
+        assert!(matches!(
+            items[1].action,
+            Action::ExtensionConfirm { confirmed: false }
+        ));
+        let defaults = confirm_prompt(&json!({"title": "Sure?"}));
+        assert_eq!(defaults.primary, "Confirm");
+        assert_eq!(defaults.dismiss, "Cancel");
+    }
+
+    #[test]
+    fn host_idle_is_five_minutes_not_a_poll() {
+        let start = Instant::now();
+        assert!(!host_idle_expired(start, start + Duration::from_secs(60)));
+        assert!(host_idle_expired(
+            start,
+            start + Duration::from_secs(HOST_IDLE_SECS)
+        ));
+        assert_eq!(HOST_IDLE_SECS, 300);
+    }
+
+    #[test]
+    fn host_script_requests_selected_text_and_confirm() {
+        assert!(HOST_JS.contains("ui.getSelectedText"));
+        assert!(HOST_JS.contains("ui.confirmAlert"));
+        assert!(
+            !HOST_JS.to_ascii_lowercase().contains("at-spi")
+                && !HOST_JS.to_ascii_lowercase().contains("atspi")
+        );
     }
 }

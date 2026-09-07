@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — store and desktop glue (Wave 6)
+
+- Extension `confirmAlert` shows Confirm / Cancel rows; Enter resolves the RPC (no longer cancel-always)
+- `Form` is an honest list of fields: Enter edits with the clipboard-rename / TextView pattern and calls `onChange`; checkbox toggles; Submit is a row (`onSubmit` gets current values). Grid still renders as a list
+- `getSelectedText` is `wl-paste --primary`, then clipboard — never AT-SPI. Job 88 (focused-app menu search) is not implemented
+- Settings lists one row per installed extension (manifest defaults). Editing preferences is not implemented
+- Optional Hyprland binds in `share/flint-binds.conf`, copied to `~/.config/hypr/flint-binds.conf` only if missing. Source it yourself. Caps Lock as Hyper: `share/keyd-hyper.conf` (keyd/kanata); Flint does not ship a remapper
+- Idle-kill the extension Node process ~5 minutes after the last message. No extra timer when extensions are off
+- Calendar, meetings, Notion, OpenClaw, typing: Store / extensions, not core
+
 ## Unreleased — AI threads, memory, skills (Wave 5)
 
 - Threaded Ask AI in SQLite (`ai_threads` / `ai_messages`). First Ask creates a chat; follow-ups append user+assistant. Empty Ask lists recent chats (LIKE search on title/text). Enter resumes. Esc or **New chat** starts another
@@ -60,10 +70,10 @@
 
 - Stop the open animation that tiles Flint large then shrinks it: Hyprland now floats, sizes, and centers on the first frame (`no_anim`), and Flint no longer re-dispatches float/resize after map
 
-- Opt-in Node host for installed Vicinae / Raycast-style extensions (`general.allow_extensions`, off by default). Each command is one Node process with real `react` 19 and `@vicinae/api`; List/Detail rows render in Flint's result list
-- Enter runs the first action, Shift+Enter the second; Esc pops a pushed view then leaves. Clipboard, open, terminal, LocalStorage, toasts, and no-view commands work. Confirm dialogs cancel until Flint has a real prompt
+- Opt-in Node host for installed Vicinae / Raycast-style extensions (`general.allow_extensions`, off by default). Each command is one Node process with real `react` 19 and `@vicinae/api`; List/Detail/Form-as-list rows render in Flint's result list
+- Enter runs the first action, Shift+Enter the second; Esc pops a pushed view then leaves. Clipboard, open, terminal, LocalStorage, toasts, confirm, selected-text, and no-view commands work
 - Runtime (`~/.local/share/flint/runtime/`) is installed with pinned `npm` packages on first launch; command sources are bundled with `esbuild`. Config is sent on stdin, not argv
-- Not yet: `Form`, Grid layout, menu-bar, extension OAuth, preference editing, selected-text, or file-search RPC
+- Not yet: Grid layout, menu-bar, extension OAuth, preference editing, or file-search RPC
 
 ## 0.4.0 — floating window and media thumbs
 

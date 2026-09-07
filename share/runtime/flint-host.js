@@ -143,7 +143,9 @@ function boot() {
         send({ type: "setSearchText", text: text ?? "" });
       },
       async getSelectedText() {
-        return "";
+        const res = await request("ui.getSelectedText");
+        if (typeof res === "string") return res;
+        return res && typeof res.text === "string" ? res.text : "";
       },
       async popToRoot() {
         send({ type: "popToRoot" });
@@ -154,7 +156,8 @@ function boot() {
       },
       async confirmAlert(options) {
         const res = await request("ui.confirmAlert", options);
-        return { confirmed: Boolean(res?.confirmed) };
+        if (typeof res === "boolean") return res;
+        return Boolean(res && res.confirmed);
       },
     },
     Storage: {

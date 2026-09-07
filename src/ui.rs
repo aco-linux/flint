@@ -112,6 +112,7 @@ struct State {
     /// A running extension command. While set, the list belongs to it.
     extension: Option<extension::Session>,
     extension_gen: u64,
+    pending_confirm: Option<PendingConfirm>,
     voice: VoiceSession,
     /// Bumped to cancel the 1s focus timeout when idle or replaced.
     focus_gen: u64,
@@ -131,6 +132,17 @@ enum Editing {
     Note(String),
     ClipRename(String),
     ClipEdit(String),
+    FormField {
+        node: u64,
+        prop: String,
+        kind: String,
+        field_id: String,
+    },
+}
+
+struct PendingConfirm {
+    id: u64,
+    prompt: extension::ConfirmPrompt,
 }
 
 #[derive(Clone)]
@@ -425,6 +437,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             pending_alias: None,
             extension: None,
             extension_gen: 0,
+            pending_confirm: None,
             voice: VoiceSession::new(),
             focus_gen: 0,
             search_gen: 0,
@@ -588,6 +601,9 @@ impl Shell {
 
     fn hide_inner(&self, cancel_voice: bool) {
         self.commit_editing();
+        if self.state.borrow().pending_confirm.is_some() {
+            self.finish_confirm(false);
+        }
         self.close_actions_inner(false);
         if cancel_voice && self.state.borrow().voice.state() != voice::State::Idle {
             self.state.borrow().voice.cancel();
@@ -911,7 +927,11 @@ impl Shell {
             self.status.set_text(&st.status);
             self.status.set_visible(true);
         }
-        let editing = matches!(st.editing, Some(Editing::Note(_) | Editing::ClipEdit(_)));
+        let editing = match &st.editing {
+            Some(Editing::Note(_) | Editing::ClipEdit(_)) => true,
+            Some(Editing::FormField { kind, .. }) if kind == "textarea" => true,
+            _ => false,
+        };
         self.detail.set_visible(editing);
         if editing {
             self.preview.set_visible(false);
@@ -960,8 +980,13 @@ impl Shell {
                 Propagation::Stop
             }
             Some(Shortcut::Save) if self.state.borrow().editing.is_some() => {
+                let was_form =
+                    matches!(self.state.borrow().editing, Some(Editing::FormField { .. }));
                 self.commit_editing();
                 self.set_status("Saved");
+                if was_form && self.state.borrow().extension.is_some() {
+                    self.refresh_extension();
+                }
                 Propagation::Stop
             }
             Some(Shortcut::Save) => Propagation::Proceed,
@@ -975,15 +1000,19 @@ impl Shell {
                             Some(Editing::ClipRename(_) | Editing::ClipEdit(_)) => {
                                 Some(Mode::Clipboard)
                             }
-                            None => None,
+                            Some(Editing::FormField { .. }) | None => None,
                         };
                         self.commit_editing();
                         if let Some(mode) = back {
                             self.enter_mode(mode);
+                        } else if self.state.borrow().extension.is_some() {
+                            self.refresh_extension();
                         }
                     } else if self.state.borrow().voice.state() == voice::State::Listening {
                         self.state.borrow().voice.cancel();
                         self.set_status("Dictation cancelled");
+                    } else if self.state.borrow().pending_confirm.is_some() {
+                        self.finish_confirm(false);
                     } else if self.state.borrow().extension.is_some() {
                         self.extension_back();
                     } else if self.state.borrow().mode == Mode::Ask
@@ -1188,6 +1217,22 @@ impl Shell {
             Action::RefreshModels => self.refresh_models(),
             Action::LaunchExtension { dir, command } => self.launch_extension(dir, command),
             Action::Extension { actions, .. } => self.run_extension_action(&actions, 0),
+            Action::ExtensionConfirm { confirmed } => self.finish_confirm(confirmed),
+            Action::ExtensionFormField {
+                node,
+                prop,
+                kind,
+                value,
+                field_id,
+            } => {
+                if kind == "checkbox" {
+                    let next = if value == "true" { "false" } else { "true" };
+                    self.commit_form_field(node, &prop, &kind, &field_id, next.into());
+                    self.refresh_extension();
+                } else {
+                    self.begin_form_edit(node, prop, kind, value, field_id);
+                }
+            }
             Action::SaveQuicklink { name, target } => {
                 match quicklinks::create(&name, &target) {
                     Ok(link) => {
@@ -1319,6 +1364,19 @@ impl Shell {
                     drop(store);
                     self.set_status("Clipboard edit rejected (empty or looks like a secret)");
                 }
+            }
+            Editing::FormField {
+                node,
+                prop,
+                kind,
+                field_id,
+            } => {
+                let value = if kind == "textarea" {
+                    buffer_text(&self.detail_view)
+                } else {
+                    self.entry.text().to_string()
+                };
+                self.commit_form_field(node, &prop, &kind, &field_id, value);
             }
         }
         self.state.borrow_mut().editing = None;
@@ -2618,6 +2676,21 @@ impl Shell {
     }
 
     fn pump_extension(&self, generation: u64) -> gtk4::glib::ControlFlow {
+        {
+            let expired = {
+                let st = self.state.borrow();
+                if st.extension_gen != generation {
+                    return gtk4::glib::ControlFlow::Break;
+                }
+                st.extension.as_ref().is_some_and(|s| s.idle_expired())
+            };
+            if expired {
+                self.end_extension();
+                self.refresh();
+                self.set_status("Extension host idle — stopped");
+                return gtk4::glib::ControlFlow::Break;
+            }
+        }
         loop {
             let msg = {
                 let st = self.state.borrow();
@@ -2709,9 +2782,13 @@ impl Shell {
                     return gtk4::glib::ControlFlow::Break;
                 }
                 extension::Msg::Request { id, method, params } => {
-                    let result = self.serve_extension_request(&method, &params);
-                    if let Some(session) = &self.state.borrow().extension {
-                        session.respond(id, result);
+                    if method == "ui.confirmAlert" {
+                        self.begin_confirm_alert(id, &params);
+                    } else {
+                        let result = self.serve_extension_request(&method, &params);
+                        if let Some(session) = &self.state.borrow().extension {
+                            session.respond(id, result);
+                        }
                     }
                 }
                 extension::Msg::Done => {
@@ -2779,7 +2856,17 @@ impl Shell {
             session.view.clone()
         };
         let mut rows: Vec<Scored> = Vec::new();
-        if let Some(view) = &view {
+        let confirm = self
+            .state
+            .borrow()
+            .pending_confirm
+            .as_ref()
+            .map(|p| p.prompt.clone());
+        if let Some(prompt) = confirm {
+            for (index, item) in extension::confirm_items(&prompt).into_iter().enumerate() {
+                rows.push(Scored::new(item, 100_000u32.saturating_sub(index as u32)));
+            }
+        } else if let Some(view) = &view {
             let needle = query.trim().to_lowercase();
             for (index, row) in view.rows.iter().enumerate() {
                 if view.local_filter && !needle.is_empty() {
@@ -2799,6 +2886,21 @@ impl Shell {
                 } else {
                     format!("{}  ·  {}", row.section, row.subtitle)
                 };
+                let action = if !row.field_kind.is_empty() {
+                    let (node, prop) = row.field_on_change.clone().unwrap_or((0, String::new()));
+                    Action::ExtensionFormField {
+                        node,
+                        prop,
+                        kind: row.field_kind.clone(),
+                        value: row.field_value.clone(),
+                        field_id: row.field_id.clone(),
+                    }
+                } else {
+                    Action::Extension {
+                        actions: row.actions.clone(),
+                        detail: row.detail.clone(),
+                    }
+                };
                 let item = Item {
                     id: row.id.clone(),
                     title: row.title.clone(),
@@ -2806,10 +2908,7 @@ impl Shell {
                     keywords: row.keywords.clone(),
                     kind: Kind::Extension,
                     icon: row.icon.clone(),
-                    action: Action::Extension {
-                        actions: row.actions.clone(),
-                        detail: row.detail.clone(),
-                    },
+                    action,
                 };
                 rows.push(Scored::new(item, 100_000u32.saturating_sub(index as u32)));
             }
@@ -2854,8 +2953,21 @@ impl Shell {
             }
             return;
         };
+        let args = if action.prop == "onSubmit" {
+            let values = self
+                .state
+                .borrow()
+                .extension
+                .as_ref()
+                .and_then(|s| s.view.as_ref())
+                .map(extension::form_values)
+                .unwrap_or(serde_json::json!({}));
+            vec![serde_json::json!({"values": values})]
+        } else {
+            Vec::new()
+        };
         if let Some(session) = &self.state.borrow().extension {
-            session.invoke(action.node, "onAction", Vec::new());
+            session.invoke(action.node, &action.prop, args);
         }
     }
 
@@ -2877,6 +2989,9 @@ impl Shell {
     }
 
     fn end_extension(&self) {
+        if self.state.borrow().pending_confirm.is_some() {
+            self.finish_confirm(false);
+        }
         let session = self.state.borrow_mut().extension.take();
         if session.is_some() {
             let mut st = self.state.borrow_mut();
@@ -2886,6 +3001,104 @@ impl Shell {
             }
         }
         drop(session);
+    }
+
+    fn begin_confirm_alert(&self, id: u64, params: &serde_json::Value) {
+        if let Some(prev) = self.state.borrow_mut().pending_confirm.take()
+            && let Some(session) = &self.state.borrow().extension
+        {
+            session.respond(prev.id, Ok(serde_json::json!({"confirmed": false})));
+        }
+        let prompt = extension::confirm_prompt(params);
+        let status = if prompt.message.is_empty() {
+            prompt.title.clone()
+        } else {
+            format!("{} — {}", prompt.title, prompt.message)
+        };
+        self.state.borrow_mut().pending_confirm = Some(PendingConfirm { id, prompt });
+        self.entry.set_text("");
+        self.set_status(status);
+        self.refresh_extension();
+    }
+
+    fn finish_confirm(&self, confirmed: bool) {
+        let pending = self.state.borrow_mut().pending_confirm.take();
+        let Some(pending) = pending else {
+            return;
+        };
+        if let Some(session) = &self.state.borrow().extension {
+            session.respond(pending.id, Ok(serde_json::json!({"confirmed": confirmed})));
+        }
+        if self.state.borrow().extension.is_some() {
+            self.set_status("");
+            self.refresh_extension();
+        }
+    }
+
+    fn begin_form_edit(
+        &self,
+        node: u64,
+        prop: String,
+        kind: String,
+        value: String,
+        field_id: String,
+    ) {
+        self.state.borrow_mut().editing = Some(Editing::FormField {
+            node,
+            prop,
+            kind: kind.clone(),
+            field_id,
+        });
+        self.state.borrow_mut().mode = Mode::Extension;
+        if kind == "textarea" {
+            self.entry.set_text("");
+            self.detail_view.buffer().set_text(&value);
+            self.set_status("Editing field · Ctrl+S saves, Esc returns");
+            self.sync_chrome();
+            self.detail_view.grab_focus();
+        } else {
+            self.entry.set_text(&value);
+            self.entry.set_position(-1);
+            self.detail.set_visible(false);
+            self.set_status("Editing field · Ctrl+S saves, Esc returns");
+            self.sync_chrome();
+            self.entry.grab_focus();
+        }
+    }
+
+    fn commit_form_field(&self, node: u64, prop: &str, kind: &str, field_id: &str, value: String) {
+        if let Some(session) = self.state.borrow_mut().extension.as_mut()
+            && let Some(view) = session.view.as_mut()
+        {
+            for row in &mut view.rows {
+                if row.field_id == field_id && !field_id.is_empty() {
+                    row.field_value = value.clone();
+                    row.subtitle = if kind == "checkbox" {
+                        if value == "true" {
+                            "On · Enter toggles".into()
+                        } else {
+                            "Off · Enter toggles".into()
+                        }
+                    } else if kind == "password" && !value.is_empty() {
+                        "••••".into()
+                    } else if value.is_empty() {
+                        "Enter to edit".into()
+                    } else {
+                        value.clone()
+                    };
+                }
+            }
+        }
+        if !prop.is_empty() {
+            let arg = if kind == "checkbox" {
+                serde_json::json!(value == "true")
+            } else {
+                serde_json::json!(value)
+            };
+            if let Some(session) = &self.state.borrow().extension {
+                session.invoke(node, prop, vec![arg]);
+            }
+        }
     }
 
     fn serve_extension_request(
@@ -2925,6 +3138,9 @@ impl Shell {
                 Ok(json!({}))
             }
             "clipboard.read" => Ok(json!({"text": clipboard::current_text().unwrap_or_default()})),
+            "ui.getSelectedText" => Ok(json!({
+                "text": clipboard::selection_or_clipboard().unwrap_or_default()
+            })),
             "app.open" => {
                 let target = params
                     .get("target")
@@ -2967,10 +3183,6 @@ impl Shell {
                     terminal: true,
                 });
                 Ok(json!({}))
-            }
-            "ui.confirmAlert" => {
-                self.set_status("Confirm dialogs are not supported yet — cancelled");
-                Ok(json!({"confirmed": false}))
             }
             other => Err(format!("{other} is not supported by Flint")),
         }

@@ -423,6 +423,10 @@ impl Settings {
                 self.voice.model = typed.to_string();
                 format!("Voice model → {}", self.voice.model)
             }
+            other if other.starts_with("set:ext-prefs:") => {
+                "Extension preferences use package.json defaults. Editing them here is not implemented."
+                    .into()
+            }
             _ => "Nothing to change — type a value, then Enter".into(),
         };
         self.save();

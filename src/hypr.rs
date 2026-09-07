@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,28 @@ fn listen(on_change: impl Fn(Vec<Item>)) {
 /// then contract; the static rule has to win on the first frame instead.
 pub fn float_launcher() {
     install_float_rule();
+}
+
+const BINDS_SNIPPET: &str = include_str!("../share/flint-binds.conf");
+
+/// Copy `share/flint-binds.conf` to `~/.config/hypr/flint-binds.conf` when
+/// the Hyprland config dir exists and the file is missing. Never overwrites.
+pub fn install_binds_snippet() {
+    let Some(config) = dirs::config_dir() else {
+        return;
+    };
+    let _ = write_binds_if_absent(&config.join("hypr"));
+}
+
+pub fn write_binds_if_absent(hypr_dir: &Path) -> bool {
+    if !hypr_dir.is_dir() {
+        return false;
+    }
+    let dest = hypr_dir.join("flint-binds.conf");
+    if dest.exists() {
+        return false;
+    }
+    fs::write(&dest, BINDS_SNIPPET).is_ok()
 }
 
 pub fn install_float_rule() {
@@ -474,6 +497,51 @@ mod tests {
         );
         assert!(conf.contains("initial_class") || conf.contains("initialClass"));
         assert!(conf.contains(crate::APP_ID));
+    }
+
+    #[test]
+    fn flint_binds_snippet_is_sourced_not_installed() {
+        let conf = include_str!("../share/flint-binds.conf");
+        assert!(conf.contains("source = ~/.config/hypr/flint-binds.conf"));
+        assert!(conf.contains("flint --files"));
+        assert!(conf.contains("flint --windows"));
+        assert!(conf.contains("flint --clipboard"));
+        assert!(conf.contains("Start focus 25m") || conf.contains("start focus"));
+        assert!(conf.contains("Dictate to focused app") || conf.contains("dictate"));
+        assert!(
+            conf.lines()
+                .filter(|l| l.trim_start().starts_with("bind"))
+                .all(|l| l.trim_start().starts_with('#')),
+            "binds must stay commented so sourcing is a no-op"
+        );
+        let hypr = include_str!("../share/hyprland.conf");
+        assert!(hypr.contains("source = ~/.config/hypr/flint-binds.conf"));
+    }
+
+    #[test]
+    fn write_binds_if_absent_does_not_overwrite() {
+        let dir = std::env::temp_dir().join(format!("flint-hypr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(super::write_binds_if_absent(&dir));
+        let path = dir.join("flint-binds.conf");
+        std::fs::write(&path, "keep-me").unwrap();
+        assert!(!super::write_binds_if_absent(&dir));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep-me");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!super::write_binds_if_absent(&dir));
+    }
+
+    #[test]
+    fn hyper_key_is_documented_not_shipped() {
+        let keyd = include_str!("../share/keyd-hyper.conf");
+        assert!(keyd.contains("keyd"));
+        assert!(keyd.contains("kanata"));
+        assert!(keyd.contains("overload(hyper, capslock)"));
+        assert!(
+            !keyd.lines().any(|l| l.trim_start().starts_with("bind")),
+            "do not ship compositor binds from the remapper snippet"
+        );
     }
 
     #[test]

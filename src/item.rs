@@ -138,6 +138,18 @@ pub enum Action {
         actions: Vec<ExtAction>,
         detail: String,
     },
+    /// Resolve a pending `confirmAlert` RPC.
+    ExtensionConfirm {
+        confirmed: bool,
+    },
+    /// Edit a Form field (list-row subset).
+    ExtensionFormField {
+        node: u64,
+        prop: String,
+        kind: String,
+        value: String,
+        field_id: String,
+    },
     Confetti,
     SaveQuicklink {
         name: String,
@@ -196,6 +208,8 @@ pub enum Action {
 pub struct ExtAction {
     pub title: String,
     pub node: u64,
+    /// Host callback name (`onAction` or `onSubmit`).
+    pub prop: String,
 }
 
 /// What a result *shows* — not what happens when you press Enter.

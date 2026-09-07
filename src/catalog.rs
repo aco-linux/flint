@@ -881,6 +881,7 @@ impl Catalog {
             },
         ];
         drop(s);
+        items.extend(crate::extension::preference_items());
         if !q.is_empty() && !q.contains('=') {
             items.insert(
                 0,

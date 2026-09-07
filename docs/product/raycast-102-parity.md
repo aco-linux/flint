@@ -66,7 +66,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 16 | Remember everything you said | SQLite `dictation` history, cap 100; Voice mode empty query | ships |
 | 17 | Arrange windows in ~58 presets | Halves, quarters, maximize, center, almost-maximize, next/prev display | ships |
 | 18 | Custom window management commands | Named layouts in `layouts.json`; `layout +name` saves | ships |
-| 19 | Caps Lock as Hyper key, Caps Lock still works | Not a launcher feature | desktop |
+| 19 | Caps Lock as Hyper key, Caps Lock still works | Documented keyd/kanata snippet; no remapper shipped | desktop |
 | 20 | Nicknames for apps | Aliases via Ctrl+K / `alias:` | ships |
 | 21 | Nicknames for commands | Same alias map | ships |
 | 22 | Reusable text snippets | `;` / `snip`, `+keyword` save | ships |
@@ -83,7 +83,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 33 | Date calculations | `today + 7d`, `days until`, `days since` | ships |
 | 34 | Percentage / discount calculations | `% of` / `% off` / `+ %` | ships |
 | 35 | Calculation history | `calc` / `=` private JSON | ships |
-| 36 | Hotkeys to open favorite apps | Hyprland binds Flint; no per-app hotkeys | core |
+| 36 | Hotkeys to open favorite apps | Optional `flint-binds.conf`; user sources it | desktop |
 | 37 | Single-key command aliases | Missing | core |
 | 38 | Double-tap to a folder | Missing | core |
 | 39 | Search screenshots by content | File search is name/type, not OCR | core |
@@ -111,7 +111,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 61 | Unfocus / break | Stop / Unfocus / 5m break; timeout only while running | ships |
 | 62 | Download thousands of extensions | Vicinae store + script-commands; not Raycast's catalog | partial |
 | 63 | Build an extension with AI | Missing | out |
-| 64 | Build an extension by hand | Vicinae API host (`List`/`Detail`); no `Form`/`Grid`/OAuth | partial |
+| 64 | Build an extension by hand | Vicinae API host (`List`/`Detail`/`Form` list); no Grid layout/OAuth | partial |
 | 65 | Time at a destination | Local time item only | core |
 | 66 | Time difference between two cities | Missing | core |
 | 67 | Switch display resolution | `hyprctl` modes plus 720p/1080p/1440p/4K | desktop |
@@ -135,7 +135,7 @@ Numbering follows the 2.0 narration. Closely related beats in the video are spli
 | 85 | Browse a Notion workspace | Missing | ext |
 | 86 | Modify system settings | Flint settings + a few Omarchy launchers | partial |
 | 87 | Practice typing | Missing | ext |
-| 88 | Search commands in the focused app | Missing (no GTK/AT-SPI menu scrape yet) | core |
+| 88 | Search commands in the focused app | Missing — never AT-SPI / a11y-bus poll | ext |
 | 89 | Pin favorites to the top | Action panel pin; empty root lists them first | ships |
 | 90 | Custom AI agents | Missing | core |
 | 91 | Launch an agent with a hotkey | Missing | core |
