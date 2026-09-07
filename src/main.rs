@@ -1,28 +1,52 @@
 mod action;
 mod ai;
+mod alias;
 mod auth;
+mod calc;
+mod caldav;
+mod capture;
 mod catalog;
 mod clipboard;
 mod config;
+mod connectors;
+mod content;
+mod db;
 mod desktop;
+mod emoji;
+mod extension;
+mod favorites;
 mod files;
+mod focus;
+mod gif;
 mod hypr;
 mod intent;
 mod item;
+mod layout;
 mod mcp;
+mod memory;
 mod mode;
 mod models;
 mod notes;
+mod ocr;
 mod paths;
+mod pkg;
+mod placeholder;
+mod prefs;
 mod preview;
+mod quicklinks;
+mod quit;
 mod scripts;
+mod skills;
 mod smart;
 mod snippets;
 mod store;
+mod translate;
+mod tz;
 mod ui;
 mod usage;
 mod voice;
 mod weather;
+mod xai;
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -45,6 +69,7 @@ enum Cmd {
     Toggle,
     Daemon,
     Mode(Mode),
+    Prefs,
     Quit,
 }
 
@@ -65,6 +90,7 @@ fn main() {
         let cmd = parse_command_line(cmdline);
         if shell.borrow().is_none() {
             paths::ensure();
+            hypr::install_binds_snippet();
             clipboard::watch(clips.clone());
             std::thread::spawn(models::warm);
             let catalog = Catalog::load(clips.clone(), settings.clone());
@@ -83,6 +109,7 @@ fn main() {
                         Cmd::Daemon => {}
                         Cmd::Toggle => ui.toggle(),
                         Cmd::Mode(mode) => ui.open(mode),
+                        Cmd::Prefs => ui.open_prefs(None),
                         Cmd::Quit => {}
                     }
                 }
@@ -159,7 +186,7 @@ fn parse_command_line(cmdline: &gio::ApplicationCommandLine) -> Cmd {
         return Cmd::Mode(Mode::Voice);
     }
     if dict.contains("settings") || dict.contains("prefs") {
-        return Cmd::Mode(Mode::Settings);
+        return Cmd::Prefs;
     }
     if dict.contains("store") {
         return Cmd::Mode(Mode::Store);
@@ -203,7 +230,7 @@ fn parse_args(args: &[OsString]) -> Cmd {
         return Cmd::Mode(Mode::Voice);
     }
     if flags.iter().any(|a| a == "--settings" || a == "--prefs") {
-        return Cmd::Mode(Mode::Settings);
+        return Cmd::Prefs;
     }
     if flags.iter().any(|a| a == "--store") {
         return Cmd::Mode(Mode::Store);
@@ -243,5 +270,7 @@ mod tests {
         assert_eq!(mode(&["--ask"]), Mode::Ask);
         assert!(matches!(cmd(&["flint"]), Cmd::Toggle));
         assert!(matches!(cmd(&["flint", "--daemon"]), Cmd::Daemon));
+        assert!(matches!(cmd(&["flint", "--settings"]), Cmd::Prefs));
+        assert!(matches!(cmd(&["--prefs"]), Cmd::Prefs));
     }
 }

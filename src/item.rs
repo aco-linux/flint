@@ -85,8 +85,33 @@ pub enum Action {
     AskAi {
         prompt: String,
     },
+    AskSelection {
+        template: String,
+    },
+    ResumeThread {
+        id: String,
+    },
+    NewChat,
+    Remember {
+        text: String,
+    },
+    ForgetMemory {
+        query: String,
+    },
+    ShowMemory,
+    AttachClipboard,
+    AttachSelected,
+    AttachPath {
+        path: PathBuf,
+    },
+    ShareRegion,
+    ShareScreen,
     ToggleVoice,
     SaveSettings,
+    /// Dedicated settings window (not the launcher search list).
+    OpenPrefs {
+        page: Option<String>,
+    },
     InstallExt {
         id: String,
     },
@@ -104,8 +129,95 @@ pub enum Action {
     SignIn {
         provider: String,
     },
+    ImportGrok,
+    ConnectorFetch {
+        id: String,
+    },
     SignOut,
     RefreshModels,
+    /// Start an installed extension command in the Node host.
+    LaunchExtension {
+        dir: PathBuf,
+        command: String,
+    },
+    /// A row rendered by a running extension. Enter runs the first action,
+    /// Shift+Enter the second.
+    Extension {
+        actions: Vec<ExtAction>,
+        detail: String,
+    },
+    /// Resolve a pending `confirmAlert` RPC.
+    ExtensionConfirm {
+        confirmed: bool,
+    },
+    /// Edit a Form field (list-row subset).
+    ExtensionFormField {
+        node: u64,
+        prop: String,
+        kind: String,
+        value: String,
+        field_id: String,
+    },
+    Confetti,
+    SaveQuicklink {
+        name: String,
+        target: String,
+    },
+    Layout {
+        name: String,
+        address: Option<String>,
+    },
+    SaveLayout {
+        name: String,
+    },
+    CloseWindow {
+        address: String,
+    },
+    KillPid {
+        pid: i32,
+    },
+    QuitClass {
+        class: String,
+    },
+    QuitAll,
+    ConfirmQuitAll,
+    Uninstall {
+        manager: String,
+        package: String,
+    },
+    Capture {
+        kind: String,
+    },
+    SetResolution {
+        spec: String,
+    },
+    /// `None` reads a PNG from the clipboard into a temp file first.
+    Ocr {
+        path: Option<PathBuf>,
+    },
+    Qr {
+        path: Option<PathBuf>,
+    },
+    /// Hide Flint, record, transcribe, then `wtype --` into the focused app.
+    DictateFocused,
+    /// Type `text` with `wtype --` (argv). Missing wtype copies instead.
+    TypeText(String),
+    /// Create a note from primary selection (`wl-paste --primary`), clipboard fallback.
+    NoteFromSelection,
+    StartFocus {
+        seconds: u32,
+        label: String,
+    },
+    StopFocus,
+}
+
+/// Callback identity for an action rendered by a running extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtAction {
+    pub title: String,
+    pub node: u64,
+    /// Host callback name (`onAction` or `onSubmit`).
+    pub prop: String,
 }
 
 /// What a result *shows* — not what happens when you press Enter.
@@ -222,10 +334,11 @@ pub struct Item {
     pub action: Action,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Icon {
     Name(String),
     Path(PathBuf),
+    #[default]
     None,
 }
 

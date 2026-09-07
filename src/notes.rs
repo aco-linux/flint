@@ -1,9 +1,8 @@
-use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::item::{Action, Icon, Item, Kind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,35 +45,45 @@ impl Note {
     }
 }
 
+pub fn from_selection_item() -> Item {
+    Item {
+        id: "cmd:note-selection".into(),
+        title: "Note from selection".into(),
+        subtitle: "Primary selection (wl-paste --primary), then clipboard".into(),
+        keywords: "note selection primary capture selected text".into(),
+        kind: Kind::Note,
+        icon: Icon::Name("edit-select-all".into()),
+        action: Action::NoteFromSelection,
+    }
+}
+
 pub fn load() -> Vec<Note> {
-    let path = path();
-    let mut notes: Vec<Note> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    notes.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
-            .then_with(|| b.updated.cmp(&a.updated))
-    });
-    notes
+    db::notes_load().unwrap_or_default()
 }
 
 pub fn get(id: &str) -> Option<Note> {
-    load().into_iter().find(|n| n.id == id)
+    db::note_get(id)
 }
 
 pub fn upsert(note: Note) {
-    let mut notes = load();
-    if let Some(existing) = notes.iter_mut().find(|n| n.id == note.id) {
-        *existing = note;
-    } else {
-        notes.push(note);
-    }
-    save(&notes);
+    let _ = db::note_upsert(&note);
 }
 
 pub fn create(title: &str) -> Note {
+    from_parts(title, "")
+}
+
+/// Title is the first non-empty line; body is the original text.
+pub fn from_text(text: &str) -> Note {
+    let title = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Untitled");
+    let title: String = title.chars().take(64).collect();
+    from_parts(&title, text)
+}
+
+fn from_parts(title: &str, body: &str) -> Note {
     let now = now();
     let title = {
         let t = title.trim();
@@ -83,7 +92,7 @@ pub fn create(title: &str) -> Note {
     let note = Note {
         id: format!("{now:x}"),
         title: title.to_string(),
-        body: String::new(),
+        body: body.to_string(),
         pinned: false,
         updated: now,
     };
@@ -92,29 +101,16 @@ pub fn create(title: &str) -> Note {
 }
 
 pub fn save_body(id: &str, title: &str, body: &str) -> Option<Note> {
-    let mut notes = load();
-    let note = notes.iter_mut().find(|n| n.id == id)?;
+    let mut note = get(id)?;
     note.title = if title.trim().is_empty() {
-        note.title.clone()
+        note.title
     } else {
         title.trim().to_string()
     };
     note.body = body.to_string();
     note.updated = now();
-    let out = note.clone();
-    save(&notes);
-    Some(out)
-}
-
-fn save(notes: &[Note]) {
-    crate::paths::ensure();
-    if let Ok(raw) = serde_json::to_string_pretty(notes) {
-        let _ = crate::paths::write_private(&path(), raw);
-    }
-}
-
-fn path() -> PathBuf {
-    crate::paths::data_dir().join("notes.json")
+    let _ = db::note_upsert(&note);
+    Some(note)
 }
 
 fn now() -> u64 {
@@ -138,5 +134,19 @@ mod tests {
             updated: 1,
         };
         assert_eq!(note.to_item().subtitle, "Buy milk");
+    }
+
+    #[test]
+    fn from_text_uses_first_line_as_title() {
+        crate::db::with_temp(|dir| {
+            crate::db::open_path(&dir.join("flint.db")).expect("open");
+            let note = super::from_text("Ship it\nMore body");
+            assert_eq!(note.title, "Ship it");
+            assert_eq!(note.body, "Ship it\nMore body");
+            assert_eq!(
+                crate::notes::get(&note.id).expect("saved").body,
+                "Ship it\nMore body"
+            );
+        });
     }
 }

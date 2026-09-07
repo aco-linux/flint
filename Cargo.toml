@@ -27,6 +27,7 @@ sha2 = "0.10.9"
 subtle = "2.6.1"
 url = "2.5.8"
 md-5 = "0.10"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [profile.release]
 lto = true

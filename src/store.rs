@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{McpServer, Settings};
 use crate::item::{Action, Icon, Item, Kind};
-use crate::mode::Mode;
 use crate::scripts;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +68,9 @@ pub fn items(settings: &Settings) -> Vec<Item> {
             let mut item = cmd.to_item();
             if !settings.general.allow_script_commands {
                 item.subtitle = format!("{} · off until Settings", item.subtitle);
-                item.action = Action::EnterMode(Mode::Settings);
+                item.action = Action::OpenPrefs {
+                    page: Some("extensions".into()),
+                };
             }
             items.push(item);
         }
@@ -370,9 +371,16 @@ fn install_vicinae(name: &str) -> Result<String, String> {
             .stderr(Stdio::null())
             .status();
     }
-    Ok(format!(
-        "Installed {name}. Open it from Vicinae, or run its scripts from the folder."
-    ))
+    let commands = crate::extension::read_manifest(&dest)
+        .map(|m| m.commands.len())
+        .unwrap_or(0);
+    Ok(if commands > 0 {
+        format!(
+            "Installed {name} · {commands} command(s) now in root search. Enable “Run installed extensions” in Settings to launch them."
+        )
+    } else {
+        format!("Installed {name}, but it has no launchable commands")
+    })
 }
 
 fn git_clone_or_pull(dest: &Path, url: &str) -> Result<(), String> {

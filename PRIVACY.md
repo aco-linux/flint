@@ -5,9 +5,10 @@ advertising SDK, or maintainer-operated cloud service.
 
 ## Data kept on this computer
 
-Flint stores settings, notes, snippets, clipboard history, usage ranking, and
-extension data under the standard user config/data directories. Private data
-files are written with mode `600` inside directories with mode `700`.
+Flint stores settings under the standard user config directory and user data
+(clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks,
+layouts) in `~/.local/share/flint/flint.db`. Private data files are written with
+mode `600` inside directories with mode `700`.
 
 OAuth and API credentials are stored in the Linux desktop Secret Service when
 `secret-tool` and a keyring are available. If the desktop has no usable Secret
@@ -24,8 +25,10 @@ Flint sends data only when a feature requires it:
 - OAuth opens the provider's authorization page and exchanges the returned code
   with the configured token endpoint.
 - Store sync contacts the public repositories listed in the app.
-- MCP and unsigned script commands can start third-party programs only after the
-  user enables the corresponding setting.
+- MCP, unsigned script commands, and installed extensions can start third-party
+  programs only after the user enables the corresponding setting. Enabling
+  extensions also lets Flint run `npm install` for the pinned runtime packages
+  and for each extension's own dependencies.
 
 Those third parties apply their own privacy and retention terms. Flint does not
 proxy those requests and the maintainer does not receive their contents.

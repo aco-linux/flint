@@ -9,7 +9,32 @@ pub fn instant_items(query: &str) -> Vec<Item> {
     if let Some(item) = hex_color(query) {
         items.push(item);
     }
+    if let Some(item) = rgb_color(query) {
+        items.push(item);
+    }
     items
+}
+
+pub fn picker_item(which: impl Fn(&str) -> bool) -> Option<Item> {
+    let (program, args) = if which("hyprpicker") {
+        ("hyprpicker", vec!["-a".into()])
+    } else if which("wl-color-picker") {
+        ("wl-color-picker", Vec::new())
+    } else {
+        return None;
+    };
+    Some(Item {
+        id: "cmd:pick-color".into(),
+        title: "Pick color".into(),
+        subtitle: format!("Eyedropper via {program}"),
+        keywords: "color picker hex rgb hsl hyprpicker".into(),
+        kind: Kind::Command,
+        icon: Icon::Name("applications-graphics".into()),
+        action: Action::Spawn {
+            program: program.into(),
+            args,
+        },
+    })
 }
 
 pub fn path_command(query: &str) -> Option<Item> {
@@ -79,15 +104,75 @@ fn hex_color(query: &str) -> Option<Item> {
     }
     let normalized = normalize_hex(hex);
     let (r, g, b) = rgb(&normalized)?;
-    Some(Item {
-        id: format!("color:#{normalized}"),
-        title: format!("#{normalized}"),
-        subtitle: format!("RGB {r}, {g}, {b}  ·  copy hex"),
-        keywords: "color hex rgb css".into(),
+    Some(color_item(r, g, b))
+}
+
+fn rgb_color(query: &str) -> Option<Item> {
+    let raw = query.trim();
+    let lower = raw.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("rgba")
+        .or_else(|| lower.strip_prefix("rgb"))?;
+    if rest.is_empty() {
+        return None;
+    }
+    let prefix_len = raw.len() - rest.len();
+    let body = raw[prefix_len..]
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    let parts: Vec<&str> = body
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let r: u8 = parts[0].parse().ok()?;
+    let g: u8 = parts[1].parse().ok()?;
+    let b: u8 = parts[2].parse().ok()?;
+    Some(color_item(r, g, b))
+}
+
+fn color_item(r: u8, g: u8, b: u8) -> Item {
+    let hex = format!("#{r:02x}{g:02x}{b:02x}");
+    let (h, s, l) = rgb_to_hsl(r, g, b);
+    Item {
+        id: format!("color:{hex}"),
+        title: hex.clone(),
+        subtitle: format!("RGB {r}, {g}, {b}  ·  HSL {h}, {s}%, {l}%  ·  copy hex"),
+        keywords: "color hex rgb hsl css".into(),
         kind: Kind::Calc,
         icon: Icon::Name("applications-graphics".into()),
-        action: Action::Copy(format!("#{normalized}")),
-    })
+        action: Action::Copy(hex),
+    }
+}
+
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (i32, i32, i32) {
+    let r = r as f64 / 255.0;
+    let g = g as f64 / 255.0;
+    let b = b as f64 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let lightness = (max + min) / 2.0;
+    let delta = max - min;
+    if delta < 1e-9 {
+        return (0, 0, (lightness * 100.0).round() as i32);
+    }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if (max - r).abs() < 1e-9 {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if (max - g).abs() < 1e-9 {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (
+        (hue * 60.0).round() as i32,
+        (saturation * 100.0).round() as i32,
+        (lightness * 100.0).round() as i32,
+    )
 }
 
 fn parse_conversion(query: &str) -> Option<(f64, String, String)> {
@@ -332,7 +417,7 @@ fn command_exists(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_color, parse_conversion, unit_conversion};
+    use super::{hex_color, parse_conversion, picker_item, rgb_color, unit_conversion};
 
     #[test]
     fn converts_length_and_temp() {
@@ -365,8 +450,28 @@ mod tests {
     fn hex_colors_normalize() {
         let color = hex_color("#Ff5A1F").expect("hex");
         assert_eq!(color.title, "#ff5a1f");
+        assert!(color.subtitle.contains("HSL"));
         assert!(hex_color("fff").is_none());
         assert!(hex_color("#fff").is_some());
         assert!(hex_color("not-a-color").is_none());
+    }
+
+    #[test]
+    fn rgb_converts_to_hex_and_hsl() {
+        let color = rgb_color("rgb(255, 90, 31)").expect("rgb");
+        assert_eq!(color.title, "#ff5a1f");
+        assert!(color.subtitle.contains("HSL"));
+        assert!(rgb_color("rgb 255 90 31").is_some());
+        assert!(rgb_color("rgb").is_none());
+        assert!(picker_item(|_| false).is_none());
+        assert_eq!(
+            picker_item(|bin| bin == "hyprpicker")
+                .and_then(|item| match item.action {
+                    crate::item::Action::Spawn { program, .. } => Some(program),
+                    _ => None,
+                })
+                .as_deref(),
+            Some("hyprpicker")
+        );
     }
 }

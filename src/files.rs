@@ -121,7 +121,7 @@ pub const ROOT_FILE_LIMIT: usize = 80;
 /// Dedicated Search Files mode — Raycast's Search Files is a long, scrollable list.
 pub const FILES_MODE_LIMIT: usize = 250;
 
-const EXCLUDES: &[&str] = &[
+pub(crate) const EXCLUDES: &[&str] = &[
     ".git",
     "node_modules",
     "target",

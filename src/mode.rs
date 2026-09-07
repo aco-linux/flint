@@ -10,6 +10,13 @@ pub enum Mode {
     Voice,
     Settings,
     Store,
+    Quicklink,
+    Calc,
+    Emoji,
+    Gif,
+    Content,
+    /// A running extension owns the list. Never parsed from text.
+    Extension,
 }
 
 impl Mode {
@@ -62,6 +69,33 @@ impl Mode {
         if let Some(rest) = strip_kw(q, &["store ", "extensions ", "ext "]) {
             return (Mode::Store, rest);
         }
+        if let Some(rest) = strip_kw(q, &["link ", "links "]) {
+            return (Mode::Quicklink, rest);
+        }
+        if q == "=" {
+            return (Mode::Calc, String::new());
+        }
+        if let Some(rest) = q.strip_prefix('=') {
+            return (Mode::Calc, rest.trim_start().to_string());
+        }
+        if let Some(rest) = strip_kw(q, &["calc "]) {
+            return (Mode::Calc, rest);
+        }
+        if q.eq_ignore_ascii_case("emoji") || q.eq_ignore_ascii_case("emojis") {
+            return (Mode::Emoji, String::new());
+        }
+        if let Some(rest) = strip_kw(q, &["emoji ", "emojis "]) {
+            return (Mode::Emoji, rest);
+        }
+        if q.eq_ignore_ascii_case("gif") || q.eq_ignore_ascii_case("gifs") {
+            return (Mode::Gif, String::new());
+        }
+        if let Some(rest) = strip_kw(q, &["gif ", "gifs "]) {
+            return (Mode::Gif, rest);
+        }
+        if let Some(rest) = strip_content(q) {
+            return (Mode::Content, rest);
+        }
         (Mode::Root, q.to_string())
     }
 
@@ -77,6 +111,12 @@ impl Mode {
             Mode::Voice => Some("VOICE"),
             Mode::Settings => Some("SETTINGS"),
             Mode::Store => Some("STORE"),
+            Mode::Quicklink => Some("LINKS"),
+            Mode::Calc => Some("CALC"),
+            Mode::Emoji => Some("EMOJI"),
+            Mode::Gif => Some("GIF"),
+            Mode::Content => Some("CONTENT"),
+            Mode::Extension => Some("EXT"),
         }
     }
 
@@ -88,10 +128,16 @@ impl Mode {
             Mode::Clipboard => "Search clipboard history…",
             Mode::Snippets => "Snippets — type +name to save clipboard",
             Mode::Notes => "Search notes — type +title to create",
-            Mode::Ask => "Ask anything… Enter to send",
-            Mode::Voice => "Enter starts dictation. Speak, then Enter again.",
+            Mode::Ask => "Ask anything… empty lists chats · Enter to send",
+            Mode::Voice => "Enter starts. Empty query is history. Speak, then Enter.",
             Mode::Settings => "Search settings…",
             Mode::Store => "Browse extensions, MCP servers, Script Commands",
+            Mode::Quicklink => "Quicklinks — type +name url to create",
+            Mode::Calc => "Calculation history — type math, dates, or percents",
+            Mode::Emoji => "Search emoji — smile, :smile:, or a keyword",
+            Mode::Gif => "Search GIFs — cats, wow, shipit",
+            Mode::Content => "Search file contents — ripgrep, cancelled on the next key",
+            Mode::Extension => "Search…",
         }
     }
 
@@ -107,6 +153,12 @@ impl Mode {
             Mode::Voice => "Ready when you are.",
             Mode::Settings => "No matching setting.",
             Mode::Store => "Store is empty.",
+            Mode::Quicklink => "No quicklinks yet.",
+            Mode::Calc => "No calculations yet.",
+            Mode::Emoji => "No matching emoji.",
+            Mode::Gif => "Type a search — cats, wow, shipit.",
+            Mode::Content => "No matching file contents.",
+            Mode::Extension => "Nothing to show.",
         }
     }
 
@@ -118,10 +170,18 @@ impl Mode {
             Mode::Clipboard => "Copy text anywhere and it lands here.",
             Mode::Snippets => "Type +email to save the current clipboard as “email”.",
             Mode::Notes => "Type +ship checklist to create a note.",
-            Mode::Ask => "Local models first. Sign in with OAuth for a cloud subscription.",
-            Mode::Voice => "Enter starts. Speak. Enter again fills the search box.",
+            Mode::Ask => "Empty lists chats. Esc or New chat starts another. Local models first.",
+            Mode::Voice => "Enter starts in-bar. “Dictate to focused app” types with wtype.",
             Mode::Settings => "OAuth, local models, MCP servers, autostart.",
             Mode::Store => "Vicinae extensions, MCP servers, or Raycast Script Commands.",
+            Mode::Quicklink => "Type +gh https://github.com/search?q={argument} to save a link.",
+            Mode::Calc => "Try 20% of 80, today + 7d, or 2+2. History stays on this machine.",
+            Mode::Emoji => "Type smile or :fire:. Enter pastes the glyph.",
+            Mode::Gif => {
+                "Add a Tenor API key in Settings for in-launcher GIFs, or Enter opens Tenor."
+            }
+            Mode::Content => "Type a phrase. Flint runs rg over $HOME, never /.",
+            Mode::Extension => "Esc goes back.",
         }
     }
 
@@ -137,8 +197,28 @@ impl Mode {
             Mode::Voice => "voice ",
             Mode::Settings => "set ",
             Mode::Store => "store ",
+            Mode::Quicklink => "link ",
+            Mode::Calc => "calc ",
+            Mode::Emoji => "emoji ",
+            Mode::Gif => "gif ",
+            Mode::Content => "content ",
+            Mode::Extension => "",
         }
     }
+}
+
+fn strip_content(query: &str) -> Option<String> {
+    let lower = query.to_ascii_lowercase();
+    if lower == "content" {
+        return Some(String::new());
+    }
+    if lower.starts_with("content:") {
+        return Some(query["content:".len()..].trim_start().to_string());
+    }
+    if lower.starts_with("content ") {
+        return Some(query["content ".len()..].trim_start().to_string());
+    }
+    None
 }
 
 fn strip_kw(query: &str, prefixes: &[&str]) -> Option<String> {
@@ -180,5 +260,31 @@ mod tests {
         assert_eq!(Mode::parse("f invoices").0, Mode::Files);
         assert_eq!(Mode::parse("firefox").0, Mode::Root);
         assert_eq!(Mode::parse("find notes.md").0, Mode::Files);
+        assert_eq!(Mode::parse("link gh"), (Mode::Quicklink, "gh".into()));
+        assert_eq!(Mode::parse("links"), (Mode::Quicklink, "".into()));
+        assert_eq!(Mode::parse("linkedin").0, Mode::Root);
+        assert_eq!(Mode::parse("calc"), (Mode::Calc, "".into()));
+        assert_eq!(Mode::parse("calc 2+2"), (Mode::Calc, "2+2".into()));
+        assert_eq!(Mode::parse("="), (Mode::Calc, "".into()));
+        assert_eq!(Mode::parse("= 20% of 80"), (Mode::Calc, "20% of 80".into()));
+        assert_eq!(Mode::parse("calculator").0, Mode::Root);
+        assert_eq!(Mode::parse("emoji smile"), (Mode::Emoji, "smile".into()));
+        assert_eq!(Mode::parse("emoji"), (Mode::Emoji, "".into()));
+        assert_eq!(Mode::parse("emojis"), (Mode::Emoji, "".into()));
+        assert_eq!(Mode::parse("gif cats"), (Mode::Gif, "cats".into()));
+        assert_eq!(Mode::parse("gif"), (Mode::Gif, "".into()));
+        assert_eq!(
+            Mode::parse("content invoices"),
+            (Mode::Content, "invoices".into())
+        );
+        assert_eq!(
+            Mode::parse("content:api_key"),
+            (Mode::Content, "api_key".into())
+        );
+        assert_eq!(Mode::parse("contentment").0, Mode::Root);
+        assert_eq!(Mode::parse("tr fr hello").0, Mode::Root);
+        assert_eq!(Mode::parse("translate es hola").0, Mode::Root);
+        assert_eq!(Mode::parse("try firefox").0, Mode::Root);
+        assert_eq!(Mode::parse("in:secret").0, Mode::Root);
     }
 }

@@ -1,6 +1,79 @@
 # Changelog
 
-## Unreleased
+## Unreleased — store and desktop glue (Wave 6)
+
+- Extension `confirmAlert` shows Confirm / Cancel rows; Enter resolves the RPC (no longer cancel-always)
+- `Form` is an honest list of fields: Enter edits with the clipboard-rename / TextView pattern and calls `onChange`; checkbox toggles; Submit is a row (`onSubmit` gets current values). Grid still renders as a list
+- `getSelectedText` is `wl-paste --primary`, then clipboard — never AT-SPI. Job 88 (focused-app menu search) is not implemented
+- Settings lists one row per installed extension (manifest defaults). Editing preferences is not implemented
+- Optional Hyprland binds in `share/flint-binds.conf`, copied to `~/.config/hypr/flint-binds.conf` only if missing. Source it yourself. Caps Lock as Hyper: `share/keyd-hyper.conf` (keyd/kanata); Flint does not ship a remapper
+- Idle-kill the extension Node process ~5 minutes after the last message. No extra timer when extensions are off
+- Calendar, meetings, Notion, OpenClaw, typing: Store / extensions, not core
+
+## Unreleased — AI threads, memory, skills (Wave 5)
+
+- Threaded Ask AI in SQLite (`ai_threads` / `ai_messages`). First Ask creates a chat; follow-ups append user+assistant. Empty Ask lists recent chats (LIKE search on title/text). Enter resumes. Esc or **New chat** starts another
+- Attachments: clipboard text (secrets skipped), selected file (Ctrl+K or a copied path), share screen / region — hide, capture once with grim/slurp, attach a local path plus optional tesseract OCR. Images are never uploaded
+- Prompt templates on `{selection}` (primary, then clipboard): **Fix grammar**, **Quick Fix**, **Translate selection**, **Explain selection**
+- Memory: **Remember …** / **Show memory** / **Forget …** as user-visible SQLite rows, injected into the system prompt (cap 2 KiB)
+- Skills: `~/.config/flint/skills/*.md` appended to the system prompt (cap 12 KiB). Missing directory is fine
+- MCP stays a prompt primer behind `allow_mcp`. Flint does not run model-chosen tools
+- **Open OpenClaw** only if `openclaw` / `open-claw` is on PATH. The default local model name still mentions Hermes; that is not an agent runtime
+
+## Unreleased — dictation, notes, focus (Wave 4)
+
+- **Dictate to focused app:** hide Flint, record, transcribe; `wtype --` types the text as argv (never ydotool). Missing wtype copies and the status says to install it. In-bar dictation is unchanged; Ctrl+K **Paste with wtype** on a transcript
+- Dictation history in SQLite (`dictation` table, cap 100). Voice mode empty query lists it; Enter pastes. Root command **Voice history**
+- Language/style are Ask AI prompt templates on the last transcript (email, formal, concise, bullets, translate) — not a second STT engine
+- **Note from selection:** `wl-paste --primary` (then clipboard). Empty primary → status. Job 29 is primary selection, not AT-SPI
+- Focus timer: **Start focus 25m**, **Start break 5m**, **Stop focus**, **Unfocus**. glib 1s timeout only while a session is running. `status.json` (`{text,class,tooltip}`) for Waybar. Root shows remaining time from an in-process mutex, not a file poll
+
+## Unreleased — in-bar content tools (Wave 3)
+
+- Content search: explicit `content:` / `in:` (or Files mode `content <q>`). One cancellable `rg --max-count 1` over `$HOME` and `search_roots`, never `/`. Ordinary root typing stays in-memory
+- Built-in emoji table (~200) with keywords and `:shortcode:`; `emoji ` mode; Enter pastes. Ranks above `omarchy-menu-emoji` when the query looks like emoji
+- Timezones: static city table (`time in tokyo`, `nyc vs london`) with fixed UTC offsets. Subtitle says standard offset, not DST
+- Colors: hex still instant; `rgb()` converts to hex + HSL; **Pick color** only if `hyprpicker` or `wl-color-picker` is on PATH
+- Translate / define are Ask AI prompt templates (`tr fr hello`, `translate es …`, `en:de thanks`, `define widget`). No new HTTP. Currency skipped
+- OCR (`tesseract`) and QR (`zbarimg`) as argv, only if found: action panel on image files, plus clipboard PNG via `wl-paste` into a mode-600 temp file that is deleted after
+
+## Unreleased — lightness (Wave 2.5)
+
+- User data (clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts, quit-keep) lives in one `~/.local/share/flint/flint.db` (mode 600) with incremental writes
+- Existing JSON files are imported once and renamed to `*.json.bak`; config, auth, and API keys stay JSON / Secret Service
+- Snippets and quicklinks share one placeholder engine (`{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, `{cursor}`, `{argument}` / `{Query}`, `{selection}`)
+- Clipboard ingest is GDK `changed` only — the 1s `wl-paste` poll is gone
+- Unpinned clips are trimmed by size (512 KiB of UTF-8) and the existing row ceiling; pinned clips are kept
+
+## Unreleased — windows and system (Wave 2)
+
+- Window layouts: left/right/top/bottom halves, four quarters, maximize, center, almost-maximize (48px inset), next/previous display
+- Custom named layouts in `~/.config/flint/layouts.json`; `layout +name` (or `win +name`) saves the current arrangement and applies by class
+- Quit / force-quit a window or app; quit all except Flint and `~/.config/flint/quit-keep.json` (confirm step)
+- Uninstall via Flatpak (`--user` preferred) or `pkexec pacman -Rns` when the desktop file maps to a package; unknown packages are not guessed
+- Screenshot, region, record, and annotate commands wrap grim / slurp / wf-recorder / satty (or swappy); Omarchy capture helpers remain if grim is missing
+- Display resolution commands from `hyprctl monitors` plus 720p/1080p/1440p/4K
+
+## Unreleased — command-bar parity (Wave 1)
+
+- Clipboard entries can be pinned, renamed, and edited; pinned clips survive the 80-item trim; paste-as-plain is in the action panel
+- Aliases (nicknames) for any result: Ctrl+K → Set alias uses the action-filter text, or prompts with `alias:`
+- Favorites pin to the top of an empty root list and get a ranking boost
+- Snippet placeholders: `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, `{cursor}`
+- Date and percent answers next to the existing calculator (`today + 7d`, `days until YYYY-MM-DD`, `20% of 80`, `20% off 80`, `80 + 20%`)
+- Calculation history (`calc` / `=`) stored privately; empty root does not dump it
+- Quicklinks (`link`): URL, folder, or file targets with `{argument}` / `{Query}`; `+name url` creates; javascript: rejected
+- Ctrl+K action panel (copy path, open with, show in files, pin, paste, set alias). Ctrl+? is Ask AI
+- Throw confetti command (accent + cream overlay, ~1.2s)
+
+## Unreleased — launcher map
+
+- Stop the open animation that tiles Flint large then shrinks it: Hyprland now floats, sizes, and centers on the first frame (`no_anim`), and Flint no longer re-dispatches float/resize after map
+
+- Opt-in Node host for installed Vicinae / Raycast-style extensions (`general.allow_extensions`, off by default). Each command is one Node process with real `react` 19 and `@vicinae/api`; List/Detail/Form-as-list rows render in Flint's result list
+- Enter runs the first action, Shift+Enter the second; Esc pops a pushed view then leaves. Clipboard, open, terminal, LocalStorage, toasts, confirm, selected-text, and no-view commands work
+- Runtime (`~/.local/share/flint/runtime/`) is installed with pinned `npm` packages on first launch; command sources are bundled with `esbuild`. Config is sent on stdin, not argv
+- Not yet: Grid layout, menu-bar, extension OAuth, preference editing, or file-search RPC
 
 ## 0.4.0 — floating window and media thumbs
 

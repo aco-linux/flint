@@ -31,11 +31,7 @@ pub fn run(action: &Action) {
         Action::Copy(text) => copy_text(text),
         Action::Paste(text) => paste_text(text),
         Action::OpenUri(uri) => {
-            if !is_safe_uri(uri) {
-                return;
-            }
-            let _ =
-                gtk4::gio::AppInfo::launch_default_for_uri(uri, gtk4::gio::AppLaunchContext::NONE);
+            let _ = open_uri(uri);
         }
         Action::OpenPath(path) => open_path(path),
         Action::PlayMedia { path } => play_media(path),
@@ -51,20 +47,61 @@ pub fn run(action: &Action) {
             }
         }
         Action::RunScript { path } => run_script(path),
+        Action::TypeText(text) => {
+            let _ = type_text(text);
+        }
         Action::EnterMode(_)
         | Action::SaveSnippet { .. }
         | Action::CreateNote { .. }
         | Action::OpenNote { .. }
         | Action::AskAi { .. }
+        | Action::AskSelection { .. }
+        | Action::ResumeThread { .. }
+        | Action::NewChat
+        | Action::Remember { .. }
+        | Action::ForgetMemory { .. }
+        | Action::ShowMemory
+        | Action::AttachClipboard
+        | Action::AttachSelected
+        | Action::AttachPath { .. }
+        | Action::ShareRegion
+        | Action::ShareScreen
         | Action::ToggleVoice
+        | Action::DictateFocused
+        | Action::NoteFromSelection
+        | Action::StartFocus { .. }
+        | Action::StopFocus
         | Action::SaveSettings
+        | Action::OpenPrefs { .. }
         | Action::InstallExt { .. }
         | Action::SyncScriptCommands
         | Action::SyncVicinae
         | Action::UseModel { .. }
         | Action::SignIn { .. }
+        | Action::ImportGrok
+        | Action::ConnectorFetch { .. }
         | Action::SignOut
-        | Action::RefreshModels => {}
+        | Action::RefreshModels
+        | Action::LaunchExtension { .. }
+        | Action::Extension { .. }
+        | Action::ExtensionConfirm { .. }
+        | Action::ExtensionFormField { .. }
+        | Action::SaveQuicklink { .. }
+        | Action::SaveLayout { .. }
+        | Action::QuitAll
+        | Action::Confetti => {}
+        Action::Layout { name, address } => crate::layout::apply(name, address.as_deref()),
+        Action::CloseWindow { address } => crate::quit::close_window(address),
+        Action::KillPid { pid } => crate::quit::kill_pid(*pid),
+        Action::QuitClass { class } => crate::quit::quit_class(class),
+        Action::ConfirmQuitAll => crate::quit::quit_all(),
+        Action::Uninstall { manager, package } => crate::pkg::uninstall(manager, package),
+        Action::Capture { kind } => crate::capture::run(kind),
+        Action::SetResolution { spec } => {
+            let _ = crate::hypr::keyword(&format!("monitor {spec}"));
+        }
+        Action::Ocr { path } => crate::ocr::run_ocr(path.as_deref()),
+        Action::Qr { path } => crate::ocr::run_qr(path.as_deref()),
     }
 }
 
@@ -138,13 +175,41 @@ fn play_media(path: &Path) {
 fn open_path(path: &Path) {
     match glib::filename_to_uri(path, None) {
         Ok(uri) => {
-            let _ =
-                gtk4::gio::AppInfo::launch_default_for_uri(&uri, gtk4::gio::AppLaunchContext::NONE);
+            let _ = open_uri(&uri);
         }
         Err(_) => {
             let _ = detach("xdg-open", &[path.to_string_lossy().as_ref()]);
         }
     }
+}
+
+/// Open https/http/file URLs from the GTK main thread. GTK portals first,
+/// then `gio open`, then `xdg-open`. The URI is always an argv, never a shell.
+pub fn open_uri(uri: &str) -> Result<(), String> {
+    if !is_safe_uri(uri) {
+        return Err("Refusing to open an unsafe URL".into());
+    }
+    if gtk4::gio::AppInfo::launch_default_for_uri(uri, gtk4::gio::AppLaunchContext::NONE).is_ok() {
+        return Ok(());
+    }
+    if run_status("gio", &["open", uri]) {
+        return Ok(());
+    }
+    if run_status("xdg-open", &[uri]) {
+        return Ok(());
+    }
+    Err(format!("Could not open the browser. Copy this URL: {uri}"))
+}
+
+fn run_status(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub fn copy_text(text: &str) {
@@ -173,6 +238,32 @@ fn paste_text(text: &str) {
                 .status();
         }
     });
+}
+
+pub fn wtype_available() -> bool {
+    which("wtype")
+}
+
+/// Type `text` with `wtype --` as argv (never a shell, never ydotool).
+/// Returns false when wtype is missing; the text is copied instead.
+pub fn type_text(text: &str) -> bool {
+    if !which("wtype") {
+        copy_text(text);
+        return false;
+    }
+    let args = wtype_args(text);
+    let _ = Command::new("wtype")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    true
+}
+
+/// `wtype -- <text>` so a leading dash in the transcript cannot be an option.
+pub(crate) fn wtype_args(text: &str) -> [&str; 2] {
+    ["--", text]
 }
 
 fn run_in_terminal(command: &str) {
@@ -212,7 +303,7 @@ fn which(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_safe_uri(uri: &str) -> bool {
+pub(crate) fn is_safe_uri(uri: &str) -> bool {
     let uri = uri.trim();
     if uri.is_empty() || uri.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return false;
@@ -242,6 +333,14 @@ mod tests {
     use super::{is_safe_uri, spacebar_play};
     use crate::item::{Action, Icon, Item, Kind};
     use std::path::PathBuf;
+
+    #[test]
+    fn open_uri_rejects_javascript_and_allows_https() {
+        assert!(!is_safe_uri("javascript:alert(1)"));
+        assert!(!is_safe_uri(""));
+        assert!(is_safe_uri("https://accounts.x.ai/oauth2/device"));
+        assert!(is_safe_uri("http://127.0.0.1:4242/callback"));
+    }
 
     #[test]
     fn spacebar_plays_audio_and_video_and_ignores_text() {
@@ -288,6 +387,14 @@ mod tests {
             spacebar_play(&note).is_none(),
             "space in a text query must still insert a space"
         );
+    }
+
+    #[test]
+    fn wtype_uses_argv_not_a_shell() {
+        let args = super::wtype_args("hello --world");
+        assert_eq!(args, ["--", "hello --world"]);
+        assert_ne!(args[0], "-c");
+        assert!(!args.iter().any(|a| a.contains('|')));
     }
 
     #[test]

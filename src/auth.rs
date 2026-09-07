@@ -109,8 +109,16 @@ pub fn load() -> Option<Tokens> {
 }
 
 pub fn load_for(provider: &str) -> Option<Tokens> {
+    if is_connector_id(provider) {
+        return load_connector(provider);
+    }
     let tokens = load()?;
     (tokens.provider == provider).then_some(tokens)
+}
+
+fn is_connector_id(provider: &str) -> bool {
+    crate::connectors::preset(provider).is_some()
+        || matches!(provider, "apple-calendar" | "proton-calendar" | "caldav")
 }
 
 fn load_persisted() -> Option<PersistedTokens> {
@@ -152,7 +160,14 @@ fn materialize(stored: PersistedTokens) -> Option<Tokens> {
     })
 }
 
-fn save(tokens: &Tokens) -> Result<&'static str, String> {
+pub fn save(tokens: &Tokens) -> Result<&'static str, String> {
+    if is_connector_id(&tokens.provider) {
+        return save_connector(tokens);
+    }
+    save_ai(tokens)
+}
+
+fn save_ai(tokens: &Tokens) -> Result<&'static str, String> {
     crate::paths::ensure();
     if let Some(previous) = load_persisted()
         && previous.provider != tokens.provider
@@ -199,12 +214,113 @@ fn save(tokens: &Tokens) -> Result<&'static str, String> {
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct ConnectorStore {
+    accounts: BTreeMap<String, PersistedTokens>,
+}
+
+fn connectors_path() -> PathBuf {
+    crate::paths::config_dir().join("connectors-auth.json")
+}
+
+fn load_connector_store() -> ConnectorStore {
+    fs::read_to_string(connectors_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn upsert_connector_account(mut store: ConnectorStore, stored: PersistedTokens) -> ConnectorStore {
+    store.accounts.insert(stored.provider.clone(), stored);
+    store
+}
+
+fn save_connector(tokens: &Tokens) -> Result<&'static str, String> {
+    crate::paths::ensure();
+    let secret = serde_json::to_string(&TokenSecret {
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token.clone(),
+    })
+    .map_err(|error| error.to_string())?;
+    let keyring_saved = keyring_store("oauth", &tokens.provider, &secret).is_ok();
+    let stored = PersistedTokens {
+        version: AUTH_VERSION,
+        provider: tokens.provider.clone(),
+        account: tokens.account.clone(),
+        expires_at: tokens.expires_at,
+        token_url: tokens.token_url.clone(),
+        client_id: tokens.client_id.clone(),
+        api_origin: tokens.api_origin.clone(),
+        storage: if keyring_saved {
+            "secret-service".into()
+        } else {
+            "private-file".into()
+        },
+        access_token: if keyring_saved {
+            String::new()
+        } else {
+            tokens.access_token.clone()
+        },
+        refresh_token: if keyring_saved {
+            String::new()
+        } else {
+            tokens.refresh_token.clone()
+        },
+    };
+    let store = upsert_connector_account(load_connector_store(), stored);
+    let raw = serde_json::to_string_pretty(&store).map_err(|error| error.to_string())?;
+    crate::paths::write_private(&connectors_path(), raw).map_err(|error| error.to_string())?;
+    Ok(if keyring_saved {
+        "desktop keyring"
+    } else {
+        "private file (mode 600)"
+    })
+}
+
+fn load_connector(provider: &str) -> Option<Tokens> {
+    let stored = load_connector_store().accounts.remove(provider)?;
+    materialize(stored)
+}
+
 pub fn clear() -> Result<(), String> {
-    let keyring_result = load_persisted()
-        .filter(|stored| stored.storage == "secret-service")
-        .map(|stored| keyring_clear("oauth", &stored.provider));
+    let mut first_error = None;
+    if let Some(stored) = load_persisted().filter(|stored| stored.storage == "secret-service")
+        && let Err(err) = keyring_clear("oauth", &stored.provider)
+    {
+        first_error = Some(err);
+    }
     let _ = fs::remove_file(path());
-    keyring_result.unwrap_or(Ok(()))
+    for (id, stored) in load_connector_store().accounts {
+        if stored.storage == "secret-service"
+            && let Err(err) = keyring_clear("oauth", &id)
+        {
+            first_error = first_error.or(Some(err));
+        }
+    }
+    let _ = fs::remove_file(connectors_path());
+    let _ = clear_api_key("apple-calendar");
+    let _ = clear_api_key("proton-calendar");
+    first_error.map_or(Ok(()), Err)
+}
+
+pub fn access_token(provider: &str) -> Result<String, String> {
+    let Some(mut tokens) = load_for(provider) else {
+        return Err(format!(
+            "Not connected to {provider}. Run Connect {provider} in Settings."
+        ));
+    };
+    if tokens.access_token.is_empty() {
+        return Err("Saved connector token is empty. Connect again.".into());
+    }
+    if !is_expired(&tokens) {
+        return Ok(tokens.access_token);
+    }
+    if tokens.refresh_token.is_empty() {
+        return Err("OAuth access expired. Connect again.".into());
+    }
+    refresh(&mut tokens)?;
+    Ok(tokens.access_token)
 }
 
 pub fn bearer(settings: &Settings) -> Result<Option<String>, String> {
@@ -304,11 +420,85 @@ fn remove_fallback_api_key(provider: &str) -> Result<(), String> {
     write_fallback_api_keys(&keys)
 }
 
-pub fn login(provider_id: &str, settings: &Settings) -> Result<String, String> {
+pub struct BrowserJob {
+    pub url: String,
+    pub message: String,
+    pub user_code: Option<String>,
+}
+
+pub enum PendingLogin {
+    Loopback(LoopbackPending),
+    XaiDevice(crate::xai::DevicePending),
+    Notice(String),
+}
+
+pub struct LoopbackPending {
+    listener: TcpListener,
+    port: u16,
+    state: String,
+    verifier: String,
+    token_url: Url,
+    client_id: String,
+    provider_id: String,
+    api_origin: String,
+    redirect: String,
+}
+
+/// Start OAuth without opening a browser. The UI must open `BrowserJob.url`
+/// on the GTK main thread, then call [`finish_login`] on a worker.
+pub fn start_login(
+    provider_id: &str,
+    settings: &Settings,
+) -> Result<(BrowserJob, PendingLogin), String> {
+    if provider_id == "xai" || provider_id == "grok" {
+        let pending = crate::xai::start_device()?;
+        let job = BrowserJob {
+            url: pending.verification_url.clone(),
+            message: format!(
+                "Opening xAI in your browser. Confirm the code {} if asked.",
+                pending.user_code
+            ),
+            user_code: Some(pending.user_code.clone()),
+        };
+        return Ok((job, PendingLogin::XaiDevice(pending)));
+    }
+    if provider_id == "cursor" {
+        return Err(
+            "Cursor does not offer third-party OAuth. Flint cannot sign into Cursor. Use Connect Grok with your xAI subscription, or a custom provider you registered."
+                .into(),
+        );
+    }
+    if let Some(notice) = crate::connectors::browser_notice(provider_id) {
+        let job = BrowserJob {
+            url: notice.url.clone(),
+            message: notice.message.clone(),
+            user_code: None,
+        };
+        return Ok((job, PendingLogin::Notice(notice.message)));
+    }
+    if let Some(connector) = crate::connectors::preset(provider_id) {
+        if matches!(provider_id, "notion" | "todoist")
+            && api_key(&format!("{provider_id}-secret")).is_none()
+        {
+            return Err(format!(
+                "Set the {provider_id} OAuth client secret in Settings first. This provider does not support a public PKCE client."
+            ));
+        }
+        let client_id = crate::connectors::client_id_for(provider_id, settings);
+        return start_loopback(
+            provider_id,
+            connector.authorize,
+            connector.token,
+            connector.scopes,
+            &client_id,
+            connector.api_origin,
+            provider_id == "google-calendar",
+        );
+    }
     let preset = PROVIDERS.iter().find(|provider| provider.id == provider_id);
     if provider_id != "custom" && preset.is_none() {
         return Err(format!(
-            "{provider_id} does not expose a supported API OAuth flow. Use an API key or a custom standards-compatible provider."
+            "{provider_id} does not expose a supported API OAuth flow. Use Connect Grok, an API key, or a custom provider."
         ));
     }
     let authorize = if provider_id == "custom" {
@@ -330,15 +520,44 @@ pub fn login(provider_id: &str, settings: &Settings) -> Result<String, String> {
     };
     let client_id = settings.ai.client_id.trim();
     if client_id.is_empty() {
-        return Err("Add a desktop OAuth client ID in Settings first".into());
+        return Err("Add a desktop OAuth client ID in Settings first — Flint cannot open a provider that has not issued you a client.".into());
     }
     if client_id.len() > 2048 || client_id.chars().any(char::is_control) {
         return Err("OAuth client ID is invalid".into());
     }
+    if authorize.is_empty() {
+        return Err("Set the OAuth authorize URL in Settings first".into());
+    }
+    if token_url.is_empty() {
+        return Err("Set the OAuth token URL in Settings first".into());
+    }
+    start_loopback(
+        provider_id,
+        authorize,
+        token_url,
+        scopes,
+        client_id,
+        &api_origin(&settings.ai.endpoint)?,
+        provider_id == "google",
+    )
+}
+
+fn start_loopback(
+    provider_id: &str,
+    authorize: &str,
+    token_url: &str,
+    scopes: &str,
+    client_id: &str,
+    api_origin: &str,
+    google_offline: bool,
+) -> Result<(BrowserJob, PendingLogin), String> {
+    if client_id.is_empty() {
+        return Err("Add a desktop OAuth client ID in Settings first — Flint cannot open a provider that has not issued you a client.".into());
+    }
     let mut authorize_url = secure_url(authorize, "OAuth authorize URL")?;
     let token_url = secure_url(token_url, "OAuth token URL")?;
     reject_reserved_authorize_parameters(&authorize_url)?;
-    let api_origin = api_origin(&settings.ai.endpoint)?;
+    let api_origin = api_origin.to_string();
 
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
     listener
@@ -365,40 +584,80 @@ pub fn login(provider_id: &str, settings: &Settings) -> Result<String, String> {
         if !scopes.is_empty() {
             query.append_pair("scope", scopes);
         }
-        if provider_id == "google" {
+        if google_offline {
             query
                 .append_pair("access_type", "offline")
                 .append_pair("prompt", "consent");
         }
+        if provider_id == "notion" {
+            query.append_pair("owner", "user");
+        }
     }
 
-    open_browser(authorize_url.as_str())?;
-    let code = wait_for_code(&listener, port, &state)?;
-    let body = form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("code", &code)
-        .append_pair("redirect_uri", &redirect)
-        .append_pair("client_id", client_id)
-        .append_pair("code_verifier", &verifier)
-        .finish();
-    let response = token_request(&token_url, &body)?;
+    let job = BrowserJob {
+        url: authorize_url.to_string(),
+        message: format!("Opening {provider_id} sign-in in your browser…"),
+        user_code: None,
+    };
+    Ok((
+        job,
+        PendingLogin::Loopback(LoopbackPending {
+            listener,
+            port,
+            state,
+            verifier,
+            token_url,
+            client_id: client_id.to_string(),
+            provider_id: provider_id.to_string(),
+            api_origin,
+            redirect,
+        }),
+    ))
+}
+
+pub fn finish_login(pending: PendingLogin) -> Result<String, String> {
+    match pending {
+        PendingLogin::XaiDevice(device) => crate::xai::finish_device(device),
+        PendingLogin::Loopback(loopback) => finish_loopback(loopback),
+        PendingLogin::Notice(message) => Ok(message),
+    }
+}
+
+fn finish_loopback(pending: LoopbackPending) -> Result<String, String> {
+    let code = wait_for_code(&pending.listener, pending.port, &pending.state)?;
+    let response = match pending.provider_id.as_str() {
+        "notion" => notion_token(&pending, &code)?,
+        "todoist" => todoist_token(&pending, &code)?,
+        _ => {
+            let body = form_urlencoded::Serializer::new(String::new())
+                .append_pair("grant_type", "authorization_code")
+                .append_pair("code", &code)
+                .append_pair("redirect_uri", &pending.redirect)
+                .append_pair("client_id", &pending.client_id)
+                .append_pair("code_verifier", &pending.verifier)
+                .finish();
+            token_request(&pending.token_url, &body)?
+        }
+    };
     validate_token_response(&response)?;
     let now = unix_now();
     let storage = save(&Tokens {
-        provider: provider_id.to_string(),
+        provider: pending.provider_id.clone(),
         access_token: response.access_token,
         refresh_token: response.refresh_token,
         expires_at: expiry(now, response.expires_in),
         account: String::new(),
-        token_url: token_url.to_string(),
-        client_id: client_id.to_string(),
-        api_origin,
+        token_url: pending.token_url.to_string(),
+        client_id: pending.client_id,
+        api_origin: pending.api_origin,
     })?;
     Ok(format!(
         "Signed in with {} · credentials stored in {storage}",
-        preset
+        PROVIDERS
+            .iter()
+            .find(|provider| provider.id == pending.provider_id)
             .map(|provider| provider.title)
-            .unwrap_or("custom OAuth")
+            .unwrap_or(&pending.provider_id)
     ))
 }
 
@@ -411,6 +670,8 @@ pub fn apply_provider_defaults(settings: &mut Settings, provider_id: &str) {
     } else if provider_id == "custom" {
         settings.ai.provider = "custom".into();
         settings.save();
+    } else if provider_id == "xai" || provider_id == "grok" {
+        crate::xai::apply_defaults(settings);
     }
 }
 
@@ -581,6 +842,103 @@ fn send_callback_page(stream: &mut TcpStream, success: bool, message: &str) {
     let _ = stream.write_all(response.as_bytes());
 }
 
+fn notion_token(pending: &LoopbackPending, code: &str) -> Result<TokenResponse, String> {
+    let secret = api_key("notion-secret").ok_or_else(|| {
+        "Notion client secret is missing. Set it in Settings and connect again.".to_string()
+    })?;
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": pending.redirect,
+    })
+    .to_string();
+    token_request_with(
+        &pending.token_url,
+        &body,
+        "application/json",
+        Some((&pending.client_id, &secret)),
+    )
+}
+
+fn todoist_token(pending: &LoopbackPending, code: &str) -> Result<TokenResponse, String> {
+    let secret = api_key("todoist-secret").ok_or_else(|| {
+        "Todoist client secret is missing. Set it in Settings and connect again.".to_string()
+    })?;
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", &pending.client_id)
+        .append_pair("client_secret", &secret)
+        .append_pair("code", code)
+        .append_pair("redirect_uri", &pending.redirect)
+        .finish();
+    token_request(&pending.token_url, &body)
+}
+
+fn token_request_with(
+    url: &Url,
+    body: &str,
+    content_type: &str,
+    basic: Option<(&str, &str)>,
+) -> Result<TokenResponse, String> {
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-sS",
+        "--fail-with-body",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "30",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "-X",
+        "POST",
+        "-H",
+        &format!("Content-Type: {content_type}"),
+        "-H",
+        "Accept: application/json",
+        "--data-binary",
+        "@-",
+        url.as_str(),
+    ]);
+    let cfg_path = crate::paths::runtime_dir().join(format!(
+        "oauth-curl-{}-{}.cfg",
+        std::process::id(),
+        unix_now()
+    ));
+    let _guard = if let Some((user, pass)) = basic {
+        let escaped = format!("{user}:{pass}")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        crate::paths::write_private(&cfg_path, format!("user = \"{escaped}\"\n"))
+            .map_err(|e| e.to_string())?;
+        cmd.arg("-K").arg(&cfg_path);
+        Some(RemoveFile(cfg_path))
+    } else {
+        None
+    };
+    let output = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(body.as_bytes())?;
+            }
+            child.wait_with_output()
+        })
+        .map_err(|error| format!("Token exchange failed: {error}"))?;
+    parse_token_output(output)
+}
+
+struct RemoveFile(PathBuf);
+impl Drop for RemoveFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 fn token_request(url: &Url, body: &str) -> Result<TokenResponse, String> {
     let output = Command::new("curl")
         .args([
@@ -615,6 +973,10 @@ fn token_request(url: &Url, body: &str) -> Result<TokenResponse, String> {
             child.wait_with_output()
         })
         .map_err(|error| format!("Token exchange failed: {error}"))?;
+    parse_token_output(output)
+}
+
+fn parse_token_output(output: std::process::Output) -> Result<TokenResponse, String> {
     if output.stdout.len() > MAX_TOKEN_RESPONSE_BYTES {
         return Err("Token endpoint response was too large".into());
     }
@@ -657,15 +1019,12 @@ fn validate_token_response(response: &TokenResponse) -> Result<(), String> {
     Ok(())
 }
 
-fn open_browser(url: &str) -> Result<(), String> {
-    Command::new("xdg-open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Could not open browser: {error}"))
+/// Open an https (or loopback) URL from the GTK main thread.
+pub fn open_browser(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://127.0.0.1")) {
+        return Err("Refusing to open a non-HTTPS sign-in URL".into());
+    }
+    crate::action::open_uri(url)
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -899,6 +1258,102 @@ mod tests {
         assert!(secure_url("https://user@example.com/oauth", "test").is_err());
         assert!(secure_url("https://example.com/oauth#fragment", "test").is_err());
         assert!(secure_url("https://example.com/oauth", "test").is_ok());
+    }
+
+    #[test]
+    fn custom_oauth_without_urls_does_not_claim_to_open_a_browser() {
+        let settings = crate::config::Settings::default();
+        let err = match super::start_login("custom", &settings) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(
+            err.contains("client ID") || err.contains("authorize"),
+            "{err}"
+        );
+        assert!(!err.to_ascii_lowercase().contains("opening"));
+    }
+
+    #[test]
+    fn unknown_provider_is_rejected() {
+        let settings = crate::config::Settings::default();
+        let err = match super::start_login("cursor", &settings) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(err.contains("Cursor"), "{err}");
+        assert!(err.contains("Grok"), "{err}");
+    }
+
+    #[test]
+    fn connector_accounts_do_not_share_one_slot() {
+        let mut store = super::ConnectorStore::default();
+        store = super::upsert_connector_account(
+            store,
+            super::PersistedTokens {
+                version: 2,
+                provider: "google-calendar".into(),
+                account: "a@b.c".into(),
+                ..super::PersistedTokens::default()
+            },
+        );
+        store = super::upsert_connector_account(
+            store,
+            super::PersistedTokens {
+                version: 2,
+                provider: "notion".into(),
+                account: "n@b.c".into(),
+                ..super::PersistedTokens::default()
+            },
+        );
+        assert_eq!(store.accounts.len(), 2);
+        assert_eq!(
+            store.accounts.get("google-calendar").unwrap().account,
+            "a@b.c"
+        );
+        assert_eq!(store.accounts.get("notion").unwrap().account, "n@b.c");
+    }
+
+    #[test]
+    fn open_browser_refuses_javascript_urls() {
+        let err = super::open_browser("javascript:alert(1)").unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("https"), "{err}");
+    }
+
+    #[test]
+    fn notion_without_secret_does_not_open_a_browser() {
+        let mut settings = crate::config::Settings::default();
+        settings.connectors.notion_client_id = "client".into();
+        let err = match super::start_login("notion", &settings) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn google_calendar_without_client_id_does_not_open_a_browser() {
+        let settings = crate::config::Settings::default();
+        let err = match super::start_login("google-calendar", &settings) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(err.contains("client ID"), "{err}");
+    }
+
+    #[test]
+    fn apple_calendar_starts_by_opening_appleid() {
+        let settings = crate::config::Settings::default();
+        let (job, pending) = super::start_login("apple-calendar", &settings).expect("notice");
+        assert!(
+            job.url.starts_with("https://appleid.apple.com"),
+            "{}",
+            job.url
+        );
+        match pending {
+            super::PendingLogin::Notice(msg) => assert!(msg.contains("app-specific")),
+            _ => panic!("expected a notice login, not a 180s wait"),
+        }
     }
 
     #[test]

@@ -84,7 +84,7 @@ fn list_tools(server: &McpServer) -> Result<Vec<String>, String> {
     Ok(tools)
 }
 
-fn is_safe_mcp_command(command: &str) -> bool {
+pub(crate) fn is_safe_mcp_command(command: &str) -> bool {
     matches!(command, "npx")
 }
 
