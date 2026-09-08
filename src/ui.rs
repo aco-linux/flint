@@ -18,13 +18,11 @@ use gtk4::{
 
 use crate::action;
 use crate::ai;
-use crate::alias;
 use crate::auth;
 use crate::calc;
 use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
 use crate::extension;
-use crate::favorites;
 use crate::files;
 use crate::hypr;
 use crate::item::{Action, Icon, Item, Kind, Live};
@@ -716,16 +714,12 @@ impl Shell {
                 st.results
                     .retain(|row| !row.item.id.starts_with("files:searching:"));
             }
-            merge_live(&mut st.results, live.files);
-            merge_live(&mut st.results, live.gifs);
-            merge_live(&mut st.results, live.calendar);
-            merge_live(&mut st.results, live.mail);
-            merge_live(&mut st.results, live.web);
-            st.results.sort_by(|a, b| {
-                b.score
-                    .cmp(&a.score)
-                    .then_with(|| a.item.title.cmp(&b.item.title))
-            });
+            catalog::insert_live_stable(&mut st.results, live.files, &selected);
+            catalog::insert_live_stable(&mut st.results, live.gifs, &selected);
+            catalog::insert_live_stable(&mut st.results, live.calendar, &selected);
+            catalog::insert_live_stable(&mut st.results, live.mail, &selected);
+            catalog::insert_live_stable(&mut st.results, live.web, &selected);
+            catalog::pin_weather_row_zero(&mut st.results);
             st.results.dedup_by(|a, b| a.item.id == b.item.id);
             if let Some(idx) = st.results.iter().position(|row| row.item.id == selected) {
                 st.selected = idx;
@@ -1360,6 +1354,7 @@ impl Shell {
                 match quicklinks::create(&name, &target) {
                     Ok(link) => {
                         quicklinks::upsert(link);
+                        self.state.borrow().catalog.reload_quicklinks();
                         self.set_status(format!("Saved quicklink {name}"));
                     }
                     Err(_) => {
@@ -1373,6 +1368,7 @@ impl Shell {
             }
             Action::SaveLayout { name } => match crate::layout::save_current(&name) {
                 Some(_) => {
+                    self.state.borrow().catalog.reload_layouts();
                     self.set_status(format!("Saved layout {name}"));
                     self.refresh();
                 }
@@ -1605,9 +1601,7 @@ impl Shell {
     }
 
     fn apply_alias(&self, id: &str, name: &str) {
-        let mut store = alias::Store::load();
-        store.set(id, name);
-        store.persist();
+        self.state.borrow().catalog.set_alias(id, name);
         self.state.borrow_mut().pending_alias = None;
         self.set_status(format!("Alias “{name}” set"));
         self.refresh();
@@ -1772,9 +1766,7 @@ impl Shell {
         let filter = self.entry.text().to_string();
         match action.kind {
             PanelKind::ToggleFavorite => {
-                let mut store = favorites::Store::load();
-                let pinned = store.toggle(&item.id);
-                store.persist();
+                let pinned = self.state.borrow().catalog.toggle_favorite(&item.id);
                 self.close_actions();
                 self.set_status(if pinned {
                     format!("Pinned {}", item.title)
@@ -1922,7 +1914,10 @@ impl Shell {
                 self.show_oneshot(crate::quit::confirm_item(), "Enter to confirm quit all");
             }
             Action::SaveLayout { name } => match crate::layout::save_current(&name) {
-                Some(_) => self.set_status(format!("Saved layout {name}")),
+                Some(_) => {
+                    self.state.borrow().catalog.reload_layouts();
+                    self.set_status(format!("Saved layout {name}"))
+                }
                 None => self.set_status("Could not save layout"),
             },
             other => {
@@ -2864,13 +2859,6 @@ fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>, cancel: Arc<files::Cancel>) {
 fn start_hypr_watch() {
     let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
     hypr::watch(move |windows| push_ui(&inbox, UiMsg::Windows(windows)));
-}
-
-fn merge_live(results: &mut Vec<Scored>, incoming: Vec<Scored>) {
-    let ids: std::collections::HashSet<String> =
-        incoming.iter().map(|row| row.item.id.clone()).collect();
-    results.retain(|row| !ids.contains(&row.item.id));
-    results.extend(incoming);
 }
 
 fn rebuild_rows(shell: &Shell) {
@@ -3818,8 +3806,7 @@ fn kind_icon(kind: Kind) -> &'static str {
 
 fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
     let mut out = Vec::new();
-    let favs = favorites::Store::load();
-    let pinned = favs.is_pinned(&item.id);
+    let pinned = st.catalog.is_favorite(&item.id);
     out.push(PanelAction {
         title: if pinned {
             "Unpin favorite".into()

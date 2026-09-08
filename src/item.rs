@@ -356,9 +356,3 @@ pub enum Icon {
     #[default]
     None,
 }
-
-impl Item {
-    pub fn haystack(&self) -> String {
-        format!("{} {} {}", self.title, self.subtitle, self.keywords)
-    }
-}

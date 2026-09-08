@@ -36,7 +36,7 @@ pub struct Connectors {
 pub struct General {
     pub autostart: bool,
     pub attach_clipboard_to_ai: bool,
-    /// Mixed root-search cap (apps, commands, fallbacks). File lists use `files.max_results`.
+    /// Mixed root-search cap (apps, commands, fallbacks). Honored as written.
     pub max_results: usize,
     /// Third-party script-commands run as sh/python3/node with no signature.
     /// Off until the user opts in.

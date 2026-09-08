@@ -102,9 +102,11 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Screenshot, region, record, and annotate (grim / slurp / wf-recorder / satty). Switch display resolution from `hyprctl` modes.
 - Snippets expand `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, and strip `{cursor}` on paste.
 - Quicklinks (`link`) open URLs, folders, or files. `{argument}` / `{Query}` is the rest of the query after the keyword. `+gh https://github.com/search?q={argument}` saves one. Defaults: Downloads, Documents, GitHub search.
-- Aliases: in the action panel, type a nickname then run **Set alias**. If the filter is empty, Flint puts `alias:` in the search box — finish the name and Enter. Aliases boost root ranking and match in the haystack.
+- Aliases: in the action panel, type a nickname then run **Set alias**. If the filter is empty, Flint puts `alias:` in the search box — finish the name and Enter. Aliases boost root ranking and match as keywords.
 - Pin favorites from the action panel; they float to the top of an empty root list.
-- Result caps live in Settings (`max-results`) and `~/.config/flint/config.json` under `general.max_results` and `files.max_results`. Extra folders go in `files.search_roots`.
+- Result caps live in Settings (`max-results`) and `~/.config/flint/config.json` under `general.max_results` and `files.max_results`. Root search uses `general.max_results` as written (no hidden floor of 24). Extra folders go in `files.search_roots`.
+- Aliases, favorites, quicklinks, and custom layouts are loaded into memory with the catalog. Typing does not re-read `flint.db`; changing an alias or pin from the action panel updates the in-memory index on the same frame.
+- Live file / GIF / calendar / mail / web rows never reshuffle the list you are already looking at. They insert at their scored position only when that is at or below the current selection; otherwise they append. Weather stays on row 0 while that intent is active.
 
 ## Honest status
 

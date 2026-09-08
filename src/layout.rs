@@ -144,6 +144,9 @@ pub fn custom_items() -> Vec<Item> {
         .collect()
 }
 
+/// Builtin presets plus saved custom layouts. Prefer Catalog's cache on the
+/// keystroke path; this helper still hits SQLite for custom rows.
+#[allow(dead_code)]
 pub fn all_items() -> Vec<Item> {
     let mut items = builtin_items();
     items.extend(custom_items());

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — keystroke pipeline (Wave B)
+
+- Root search no longer reads SQLite on every keystroke. Aliases, favorites, quicklinks, and custom layouts live in `Catalog` (`RefCell`) and load with `Catalog::load` / `reload_installed`. Action-panel alias, pin, quicklink, and layout mutators invalidate that cache.
+- Ranking reads a precomputed `IndexEntry` (`title_lc`, words, initials, `keywords_lc` including alias, `subtitle_lc`). Alias changes rebuild that entry. The nucleo `Pattern` stays one-per-keystroke; a shared `Vec<char>` buffer is reused across items.
+- Live rows (files, GIFs, calendar, mail, web) do not reorder what is already on screen. They insert at the scored index only when that index is at or below the current selection; otherwise they append. Weather stays at row 0 when the weather intent fired.
+- `general.max_results` is the actual root mix cap. The hidden `.max(24)` floor is gone.
+- Bench (ignored): `cargo test --bins --release -- --ignored --nocapture bench_root_search_p95` — 500-item pool, 50 queries. Release p50 **1.02 ms**, p95 **1.61 ms** (target p95 < 2 ms).
+
 ## Unreleased — root ranking (Wave A)
 
 - Query→item memory: launching a root (or window) result records the typed query and its prefixes in `choices`. Next time that query is typed, the picked item is row 0 (115k, under an explicit alias). Prefixes (`s` after `sl` → Slack) get a smaller 20k boost. Not recorded from Files, Clipboard, or extension-internal actions. **Clear learned choices** (root + Settings, keyword `forget`) wipes the table. `FLINT_RANK_DEBUG=1` logs the top 10 scores.
