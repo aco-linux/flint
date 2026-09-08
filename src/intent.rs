@@ -379,14 +379,22 @@ where
     best.map(|(rank, word)| (word, rank))
 }
 
+/// Like [`title_typo_score_lc`], but lowercases `query` and `title` first.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn title_typo_score(query: &str, title: &str) -> Option<u32> {
-    let q = query.trim().to_ascii_lowercase();
-    let title = title.trim().to_ascii_lowercase();
+    title_typo_score_lc(
+        &query.trim().to_ascii_lowercase(),
+        &title.trim().to_ascii_lowercase(),
+    )
+}
+
+/// Like [`title_typo_score`], but `q` and `title` must already be lowercased.
+pub fn title_typo_score_lc(q: &str, title: &str) -> Option<u32> {
     if q.len() < 4 || title.is_empty() {
         return None;
     }
-    let first = title.split_whitespace().next().unwrap_or(&title);
-    let distance = damerau(&q, first).min(damerau(&q, &title));
+    let first = title.split_whitespace().next().unwrap_or(title);
+    let distance = damerau(q, first).min(damerau(q, title));
     let allowed = allowed_distance(q.len());
     if distance == 0 || distance > allowed {
         return None;

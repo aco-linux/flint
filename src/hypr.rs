@@ -75,12 +75,12 @@ fn default_true() -> bool {
 
 /// Hyprland pushes open / close / focus / title on `.socket2.sock`.
 /// We keep `Catalog` current from those events and never poll on a keystroke.
-pub fn watch(on_change: impl Fn(Vec<Item>) + Send + 'static) {
+pub fn watch(on_change: impl Fn(Option<String>, Vec<Item>) + Send + 'static) {
     thread::spawn(move || listen(on_change));
 }
 
-fn listen(on_change: impl Fn(Vec<Item>)) {
-    on_change(load_windows());
+fn listen(on_change: impl Fn(Option<String>, Vec<Item>)) {
+    on_change(None, load_windows());
     let Some(path) = socket2_path() else {
         return;
     };
@@ -98,7 +98,7 @@ fn listen(on_change: impl Fn(Vec<Item>)) {
             if !wait.is_zero() {
                 thread::sleep(wait);
             }
-            on_change(load_windows());
+            on_change(Some(line.trim().to_string()), load_windows());
             last = Instant::now();
         }
         line.clear();
@@ -280,6 +280,12 @@ pub(crate) fn target_client<'a>(
     ranked.into_iter().next()
 }
 
+/// Class and title of the window that had focus before Flint (skip the launcher).
+pub fn focused_window() -> Option<(String, String)> {
+    let clients = clients();
+    target_client(&clients, None).map(|c| (c.class.clone(), c.title.clone()))
+}
+
 pub fn resize_launcher(width: i32, height: i32) {
     let width = width.max(320);
     let height = height.max(240);
@@ -428,9 +434,8 @@ fn command_socket_json(command: &str) -> Option<Vec<u8>> {
 }
 
 pub fn is_window_event(line: &str) -> bool {
-    let name = line.split(">>").next().unwrap_or("").trim();
     matches!(
-        name,
+        event_name(line),
         "openwindow"
             | "closewindow"
             | "activewindow"
@@ -446,6 +451,25 @@ pub fn is_window_event(line: &str) -> bool {
             | "moveintogroup"
             | "moveoutofgroup"
     )
+}
+
+pub fn event_name(line: &str) -> &str {
+    line.split(">>").next().unwrap_or("").trim()
+}
+
+/// closewindow always; activewindow only when the focused class is Flint.
+pub fn should_restore_media(line: &str) -> bool {
+    match event_name(line) {
+        "closewindow" => true,
+        "activewindow" => active_class(line).is_some_and(is_launcher_class),
+        _ => false,
+    }
+}
+
+fn active_class(line: &str) -> Option<&str> {
+    let rest = line.split_once(">>")?.1;
+    let class = rest.split(',').next()?.trim();
+    (!class.is_empty()).then_some(class)
 }
 
 fn instance_dir() -> Option<PathBuf> {
@@ -491,7 +515,8 @@ fn guess_icon(class: &str) -> String {
 mod tests {
     use super::{
         format_monitor_keyword, is_launcher_class, is_window_event, neighbor_monitor,
-        parse_clients, parse_mode, parse_monitors, resolution_items_from, target_client,
+        parse_clients, parse_mode, parse_monitors, resolution_items_from, should_restore_media,
+        target_client,
     };
 
     #[test]
@@ -573,6 +598,17 @@ mod tests {
         assert!(!is_window_event("workspace>>2"));
         assert!(!is_window_event("ready>>"));
         assert!(!is_window_event(""));
+    }
+
+    #[test]
+    fn media_restore_on_closewindow_or_flint_focus() {
+        assert!(should_restore_media("closewindow>>0x1"));
+        assert!(should_restore_media(
+            "activewindow>>dev.flint.launcher,Flint"
+        ));
+        assert!(!should_restore_media("activewindow>>mpv,clip.mp4"));
+        assert!(!should_restore_media("openwindow>>0x2,1,mpv,clip"));
+        assert!(!should_restore_media("activewindowv2>>0x1"));
     }
 
     const MONITORS: &str = r#"[

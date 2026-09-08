@@ -357,6 +357,61 @@ fn page_general(settings: &Rc<RefCell<Settings>>) -> Box {
             }
         },
     ));
+    card.append(&switch_row(
+        "Context-aware search",
+        "Use the focused Hyprland window (class and title) when Flint opens. Empty query also offers Paste / Search / Ask on clipboard copied in the last 10 seconds. Off stores nothing about the focused app.",
+        settings.borrow().general.context_aware,
+        {
+            let s = s.clone();
+            move |on| {
+                s.borrow_mut().general.context_aware = on;
+                s.borrow().save();
+            }
+        },
+    ));
+    let names = [
+        "DuckDuckGo HTML",
+        "Instant Answer JSON",
+        "Off (no web fetch)",
+    ];
+    let ids = ["ddg-html", "instant", "off"];
+    let current = settings.borrow().web.provider.clone();
+    let selected = ids.iter().position(|id| *id == current).unwrap_or(0) as u32;
+    let drop = DropDown::from_strings(&names);
+    drop.set_selected(selected);
+    drop.connect_selected_notify({
+        let s = s.clone();
+        move |dd| {
+            let idx = dd.selected() as usize;
+            if let Some(id) = ids.get(idx) {
+                let _ = s.borrow_mut().apply("set:web", id);
+            }
+        }
+    });
+    let lab = Label::new(Some("Web search"));
+    lab.add_css_class("prefs-row-title");
+    lab.set_xalign(0.0);
+    let hint = Label::new(Some(
+        "In-app results from DuckDuckGo. searxng and brave are documented fallbacks and currently use DuckDuckGo HTML. Off never leaves this computer.",
+    ));
+    hint.add_css_class("prefs-row-sub");
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    card.append(&lab);
+    card.append(&hint);
+    card.append(&drop);
+    card.append(&switch_row(
+        "Hide when playing media externally",
+        "Enter still opens the default player. On: hide Flint. Off (default): stay open, and restore the query plus selection after Hyprland closewindow or when Flint is focused again.",
+        settings.borrow().media.hide_on_external_play,
+        {
+            let s = s.clone();
+            move |on| {
+                s.borrow_mut().media.hide_on_external_play = on;
+                s.borrow().save();
+            }
+        },
+    ));
     page.append(&card);
     page
 }

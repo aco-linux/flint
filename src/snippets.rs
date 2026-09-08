@@ -12,6 +12,9 @@ pub struct Snippet {
     pub text: String,
     #[serde(default)]
     pub increment: u32,
+    /// Optional Hyprland class this snippet is for; empty means any app.
+    #[serde(default)]
+    pub app: String,
 }
 
 impl Snippet {
@@ -83,6 +86,7 @@ pub fn upsert(keyword: &str, text: &str) {
         title: keyword.to_string(),
         text: text.to_string(),
         increment: 0,
+        app: String::new(),
     }]);
 }
 
@@ -98,18 +102,21 @@ pub(crate) fn default_snippets() -> Vec<Snippet> {
             title: "Shrug".into(),
             text: r"¯\_(ツ)_/¯".into(),
             increment: 0,
+            app: String::new(),
         },
         Snippet {
             keyword: "tableflip".into(),
             title: "Table flip".into(),
             text: "(╯°□°）╯︵ ┻━┻".into(),
             increment: 0,
+            app: String::new(),
         },
         Snippet {
             keyword: "date".into(),
             title: "ISO date".into(),
             text: "{date}".into(),
             increment: 0,
+            app: String::new(),
         },
     ]
 }
@@ -126,6 +133,7 @@ mod tests {
             title: String::new(),
             text: "hi".into(),
             increment: 0,
+            app: String::new(),
         };
         assert_eq!(snip.display_title(), "em");
         let item = snip.to_item();

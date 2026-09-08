@@ -349,16 +349,29 @@ pub struct Item {
     pub action: Action,
 }
 
+impl Item {
+    /// Right-aligned preview on a result row (calc/tz/convert/color). Cap 120.
+    pub fn inline_answer(&self) -> Option<String> {
+        let text = match &self.action {
+            Action::Copy(text)
+                if matches!(self.kind, Kind::Calc | Kind::Weather) && !text.is_empty() =>
+            {
+                text.as_str()
+            }
+            _ => return None,
+        };
+        let mut out: String = text.chars().take(120).collect();
+        if text.chars().count() > 120 {
+            out.push('…');
+        }
+        Some(out)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub enum Icon {
     Name(String),
     Path(PathBuf),
     #[default]
     None,
-}
-
-impl Item {
-    pub fn haystack(&self) -> String {
-        format!("{} {} {}", self.title, self.subtitle, self.keywords)
-    }
 }

@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS snippets (
     keyword TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     text TEXT NOT NULL,
-    increment INTEGER NOT NULL DEFAULT 0
+    increment INTEGER NOT NULL DEFAULT 0,
+    app TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS aliases (
     id TEXT PRIMARY KEY NOT NULL,
@@ -77,15 +78,26 @@ CREATE TABLE IF NOT EXISTS choices (
     PRIMARY KEY(query, item_id)
 );
 CREATE INDEX IF NOT EXISTS choices_query ON choices(query);
+CREATE TABLE IF NOT EXISTS choice_context (
+    query TEXT NOT NULL,
+    context_class TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    last INTEGER NOT NULL,
+    PRIMARY KEY(query, context_class, item_id)
+);
+CREATE INDEX IF NOT EXISTS choice_context_lookup ON choice_context(query, context_class);
 CREATE TABLE IF NOT EXISTS quicklinks (
     name TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     target TEXT NOT NULL,
-    tags TEXT NOT NULL DEFAULT '[]'
+    tags TEXT NOT NULL DEFAULT '[]',
+    app TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS layouts (
     name TEXT PRIMARY KEY NOT NULL,
-    slots TEXT NOT NULL DEFAULT '[]'
+    slots TEXT NOT NULL DEFAULT '[]',
+    app TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS quit_keep (
     class TEXT PRIMARY KEY NOT NULL
@@ -185,6 +197,7 @@ fn open_at_locked(
     {
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA)?;
+        ensure_app_columns(&tx)?;
         if meta_get(&tx, "schema_version")?.is_none() {
             meta_set(&tx, "schema_version", SCHEMA_VERSION)?;
         }
@@ -199,6 +212,17 @@ fn open_at_locked(
     paths::tighten_private_file(path);
     *state = Some(Db { conn });
     retire_all(data_dir, config_dir);
+    Ok(())
+}
+
+fn ensure_app_columns(conn: &Connection) -> rusqlite::Result<()> {
+    for sql in [
+        "ALTER TABLE snippets ADD COLUMN app TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE quicklinks ADD COLUMN app TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE layouts ADD COLUMN app TEXT NOT NULL DEFAULT ''",
+    ] {
+        let _ = conn.execute(sql, []);
+    }
     Ok(())
 }
 
@@ -523,16 +547,18 @@ fn note_upsert_conn(conn: &Connection, note: &Note) -> rusqlite::Result<()> {
 
 fn snippet_upsert_conn(conn: &Connection, snippet: &Snippet) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO snippets (keyword, title, text, increment) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO snippets (keyword, title, text, increment, app) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(keyword) DO UPDATE SET
             title = excluded.title,
             text = excluded.text,
-            increment = excluded.increment",
+            increment = excluded.increment,
+            app = excluded.app",
         params![
             snippet.keyword,
             snippet.title,
             snippet.text,
-            snippet.increment as i64
+            snippet.increment as i64,
+            snippet.app
         ],
     )?;
     Ok(())
@@ -589,12 +615,13 @@ fn calc_insert_conn(conn: &Connection, expr: &str, result: &str, at: u64) -> rus
 fn quicklink_upsert_conn(conn: &Connection, link: &Link) -> rusqlite::Result<()> {
     let tags = serde_json::to_string(&link.tags).unwrap_or_else(|_| "[]".into());
     conn.execute(
-        "INSERT INTO quicklinks (name, title, target, tags) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO quicklinks (name, title, target, tags, app) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(name) DO UPDATE SET
             title = excluded.title,
             target = excluded.target,
-            tags = excluded.tags",
-        params![link.name, link.title, link.target, tags],
+            tags = excluded.tags,
+            app = excluded.app",
+        params![link.name, link.title, link.target, tags, link.app],
     )?;
     Ok(())
 }
@@ -602,9 +629,9 @@ fn quicklink_upsert_conn(conn: &Connection, link: &Link) -> rusqlite::Result<()>
 fn layout_upsert_conn(conn: &Connection, layout: &NamedLayout) -> rusqlite::Result<()> {
     let slots = serde_json::to_string(&layout.slots).unwrap_or_else(|_| "[]".into());
     conn.execute(
-        "INSERT INTO layouts (name, slots) VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET slots = excluded.slots",
-        params![layout.name, slots],
+        "INSERT INTO layouts (name, slots, app) VALUES (?1, ?2, ?3)
+         ON CONFLICT(name) DO UPDATE SET slots = excluded.slots, app = excluded.app",
+        params![layout.name, slots, layout.app],
     )?;
     Ok(())
 }
@@ -669,14 +696,16 @@ pub fn note_upsert(note: &Note) -> Option<()> {
 
 pub fn snippets_load() -> Option<Vec<Snippet>> {
     with_conn(|conn| {
-        let mut stmt =
-            conn.prepare("SELECT keyword, title, text, increment FROM snippets ORDER BY keyword")?;
+        let mut stmt = conn.prepare(
+            "SELECT keyword, title, text, increment, app FROM snippets ORDER BY keyword",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok(Snippet {
                 keyword: row.get(0)?,
                 title: row.get(1)?,
                 text: row.get(2)?,
                 increment: row.get::<_, i64>(3)? as u32,
+                app: row.get::<_, String>(4).unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -686,7 +715,7 @@ pub fn snippets_load() -> Option<Vec<Snippet>> {
 pub fn snippet_get(keyword: &str) -> Option<Snippet> {
     with_conn(|conn| {
         conn.query_row(
-            "SELECT keyword, title, text, increment FROM snippets WHERE keyword = ?1",
+            "SELECT keyword, title, text, increment, app FROM snippets WHERE keyword = ?1",
             params![keyword],
             |row| {
                 Ok(Snippet {
@@ -694,6 +723,7 @@ pub fn snippet_get(keyword: &str) -> Option<Snippet> {
                     title: row.get(1)?,
                     text: row.get(2)?,
                     increment: row.get::<_, i64>(3)? as u32,
+                    app: row.get::<_, String>(4).unwrap_or_default(),
                 })
             },
         )
@@ -872,14 +902,82 @@ fn choices_bump_prefix(
 pub fn choices_clear() -> Option<()> {
     with_conn(|conn| {
         conn.execute("DELETE FROM choices", [])?;
+        conn.execute("DELETE FROM choice_context", [])?;
         Ok(())
     })
+}
+
+pub fn choice_context_load() -> Option<crate::choices::ContextMap> {
+    with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT query, context_class, item_id, count, last FROM choice_context")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                Record {
+                    count: row.get::<_, i64>(3)? as u32,
+                    last: row.get::<_, i64>(4)? as u64,
+                },
+            ))
+        })?;
+        let mut map = crate::choices::ContextMap::new();
+        for row in rows {
+            let (query, class, item_id, rec) = row?;
+            map.entry(class)
+                .or_default()
+                .entry(query)
+                .or_default()
+                .insert(item_id, rec);
+        }
+        Ok(map)
+    })
+}
+
+pub fn choice_context_record(
+    class: &str,
+    query: &str,
+    item_id: &str,
+    now: u64,
+    prefixes: &[String],
+) -> Option<()> {
+    with_conn(|conn| {
+        choice_context_bump(conn, class, query, item_id, now, true)?;
+        for prefix in prefixes {
+            if prefix.is_empty() || prefix == query {
+                continue;
+            }
+            choice_context_bump(conn, class, prefix, item_id, now, false)?;
+        }
+        Ok(())
+    })
+}
+
+fn choice_context_bump(
+    conn: &Connection,
+    class: &str,
+    query: &str,
+    item_id: &str,
+    now: u64,
+    full: bool,
+) -> rusqlite::Result<()> {
+    let count = i64::from(full);
+    conn.execute(
+        "INSERT INTO choice_context (query, context_class, item_id, count, last)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(query, context_class, item_id) DO UPDATE SET
+            count = CASE WHEN ?4 = 1 THEN choice_context.count + 1 ELSE choice_context.count END,
+            last = excluded.last",
+        params![query, class, item_id, count, now as i64],
+    )?;
+    Ok(())
 }
 
 pub fn quicklinks_load() -> Option<Vec<Link>> {
     with_conn(|conn| {
         let mut stmt =
-            conn.prepare("SELECT name, title, target, tags FROM quicklinks ORDER BY name")?;
+            conn.prepare("SELECT name, title, target, tags, app FROM quicklinks ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
             let tags: String = row.get(3)?;
             Ok(Link {
@@ -887,6 +985,7 @@ pub fn quicklinks_load() -> Option<Vec<Link>> {
                 title: row.get(1)?,
                 target: row.get(2)?,
                 tags: serde_json::from_str(&tags).unwrap_or_default(),
+                app: row.get::<_, String>(4).unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -899,13 +998,14 @@ pub fn quicklink_upsert(link: &Link) -> Option<()> {
 
 pub fn layouts_load() -> Option<Vec<NamedLayout>> {
     with_conn(|conn| {
-        let mut stmt = conn.prepare("SELECT name, slots FROM layouts ORDER BY name")?;
+        let mut stmt = conn.prepare("SELECT name, slots, app FROM layouts ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
             let slots: String = row.get(1)?;
             let slots: Vec<Slot> = serde_json::from_str(&slots).unwrap_or_default();
             Ok(NamedLayout {
                 name: row.get(0)?,
                 slots,
+                app: row.get::<_, String>(2).unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -1371,6 +1471,34 @@ mod tests {
             );
             super::choices_clear().expect("clear");
             assert!(super::choices_load().expect("empty").is_empty());
+        });
+    }
+
+    #[test]
+    fn choice_context_roundtrip_without_schema_bump() {
+        with_temp(|dir| {
+            open_path(&dir.join("flint.db")).expect("open");
+            let now = 1_800_000_000;
+            super::choice_context_record("kitty", "fox", "app:code", now, &["f".into()])
+                .expect("record");
+            let map = super::choice_context_load().expect("load");
+            assert_eq!(
+                map.get("kitty")
+                    .expect("class")
+                    .get("fox")
+                    .expect("query")
+                    .get("app:code")
+                    .expect("row")
+                    .count,
+                1
+            );
+            super::choices_clear().expect("clear");
+            assert!(super::choice_context_load().expect("empty").is_empty());
+            assert_eq!(
+                meta_get_for_test().as_deref(),
+                Some("1"),
+                "choice_context must not bump schema_version"
+            );
         });
     }
 }

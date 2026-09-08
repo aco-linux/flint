@@ -6,25 +6,23 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use gtk4::gdk::{Key, ModifierType, Texture};
+use gtk4::gdk::{Key, ModifierType, RGBA, Texture};
 use gtk4::gio::prelude::AppInfoExt;
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box, CssProvider, DrawingArea, Entry,
     EventControllerKey, GestureClick, HeaderBar, Image, Label, Orientation, Overflow, Overlay,
-    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, WrapMode,
+    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, Video, WrapMode,
 };
 
 use crate::action;
 use crate::ai;
-use crate::alias;
 use crate::auth;
 use crate::calc;
 use crate::catalog::{self, Catalog, LiveExtras, Scored};
 use crate::clipboard;
 use crate::extension;
-use crate::favorites;
 use crate::files;
 use crate::hypr;
 use crate::item::{Action, Icon, Item, Kind, Live};
@@ -80,6 +78,7 @@ pub struct Shell {
     results_scroll: ScrolledWindow,
     preview: Box,
     preview_image: Image,
+    preview_video: Video,
     preview_text: Label,
     empty: Box,
     status: Label,
@@ -92,6 +91,7 @@ pub struct Shell {
     state: Rc<RefCell<State>>,
     live_jobs: Sender<LiveJob>,
     live_cancel: Arc<files::Cancel>,
+    ask_cancel: Rc<RefCell<Arc<files::Cancel>>>,
     thumb_jobs: Sender<PathBuf>,
     thumb_cancel: Arc<files::Cancel>,
     prefs: Rc<RefCell<Option<prefs::Host>>>,
@@ -119,9 +119,26 @@ struct State {
     /// Bumped to cancel the 1s focus timeout when idle or replaced.
     focus_gen: u64,
     search_gen: u64,
+    ask_job: u64,
+    ask_preview: Option<(String, String)>,
+    ask_label: Option<Label>,
     thumbs: HashMap<PathBuf, CachedThumb>,
     captions: HashMap<PathBuf, String>,
     thumb_miss: HashSet<PathBuf>,
+    pane: Pane,
+    media_restore: Option<MediaRestore>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    List,
+    Media,
+    ImageZoom,
+}
+
+struct MediaRestore {
+    query: String,
+    selected_id: String,
 }
 
 struct CachedThumb {
@@ -196,6 +213,7 @@ struct LiveJob {
     mode: Mode,
     settings: crate::config::Settings,
     usage: usage::Map,
+    best_title_bonus: u32,
 }
 
 pub fn build(app: &Application, catalog: Catalog) -> Shell {
@@ -301,6 +319,13 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     preview_image.add_css_class("preview-image");
     preview_image.set_visible(false);
 
+    let preview_video = Video::new();
+    preview_video.add_css_class("preview-video");
+    preview_video.set_autoplay(false);
+    preview_video.set_hexpand(true);
+    preview_video.set_vexpand(true);
+    preview_video.set_visible(false);
+
     let preview_text = Label::new(None);
     preview_text.set_xalign(0.0);
     preview_text.set_yalign(0.0);
@@ -311,6 +336,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     let preview_inner = Box::new(Orientation::Vertical, 10);
     preview_inner.append(&preview_image);
+    preview_inner.append(&preview_video);
     preview_inner.append(&preview_text);
 
     let preview_scroll = ScrolledWindow::builder()
@@ -401,6 +427,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     let (live_tx, live_rx) = mpsc::channel();
     let live_cancel = files::Cancel::new();
+    let ask_cancel = files::Cancel::new();
     let (thumb_tx, thumb_rx) = mpsc::channel();
     let thumb_cancel = files::Cancel::new();
 
@@ -414,6 +441,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         results_scroll: scroll.clone(),
         preview: preview.clone(),
         preview_image: preview_image.clone(),
+        preview_video: preview_video.clone(),
         preview_text: preview_text.clone(),
         empty: empty.clone(),
         status: status.clone(),
@@ -443,12 +471,18 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             voice: VoiceSession::new(),
             focus_gen: 0,
             search_gen: 0,
+            ask_job: 0,
+            ask_preview: None,
+            ask_label: None,
             thumbs: HashMap::new(),
             captions: HashMap::new(),
             thumb_miss: HashSet::new(),
+            pane: Pane::List,
+            media_restore: None,
         })),
         live_jobs: live_tx,
         live_cancel: live_cancel.clone(),
+        ask_cancel: Rc::new(RefCell::new(ask_cancel)),
         thumb_jobs: thumb_tx,
         thumb_cancel: thumb_cancel.clone(),
         prefs: Rc::new(RefCell::new(None)),
@@ -459,6 +493,13 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     start_thumb_worker(thumb_rx, thumb_cancel);
     start_hypr_watch();
     hypr::install_float_rule();
+    clipboard::on_ingest(Rc::new(|| {
+        SHELL.with(|slot| {
+            if let Some(shell) = slot.borrow().as_ref() {
+                shell.on_clipboard_changed();
+            }
+        });
+    }));
 
     {
         let shell = shell.clone();
@@ -532,6 +573,7 @@ impl Clone for Shell {
             results_scroll: self.results_scroll.clone(),
             preview: self.preview.clone(),
             preview_image: self.preview_image.clone(),
+            preview_video: self.preview_video.clone(),
             preview_text: self.preview_text.clone(),
             empty: self.empty.clone(),
             status: self.status.clone(),
@@ -544,6 +586,7 @@ impl Clone for Shell {
             state: self.state.clone(),
             live_jobs: self.live_jobs.clone(),
             live_cancel: self.live_cancel.clone(),
+            ask_cancel: self.ask_cancel.clone(),
             thumb_jobs: self.thumb_jobs.clone(),
             thumb_cancel: self.thumb_cancel.clone(),
             prefs: self.prefs.clone(),
@@ -569,6 +612,7 @@ impl Shell {
     }
 
     pub fn open(&self, mode: Mode) {
+        self.capture_context();
         self.state.borrow_mut().visible = true;
         self.show_launcher();
         self.enter_mode(mode);
@@ -577,6 +621,7 @@ impl Shell {
     }
 
     fn restore(&self) {
+        self.capture_context();
         self.state.borrow_mut().visible = true;
         self.show_launcher();
         self.entry.grab_focus();
@@ -585,6 +630,23 @@ impl Shell {
         } else {
             self.refresh();
         }
+    }
+
+    fn capture_context(&self) {
+        let aware = self
+            .state
+            .borrow()
+            .catalog
+            .settings
+            .borrow()
+            .general
+            .context_aware;
+        let ctx = if aware {
+            crate::context::Context::capture()
+        } else {
+            crate::context::Context::default()
+        };
+        self.state.borrow().catalog.set_context(ctx);
     }
 
     fn show_launcher(&self) {
@@ -612,6 +674,11 @@ impl Shell {
         if cancel_voice && self.state.borrow().voice.state() != voice::State::Idle {
             self.state.borrow().voice.cancel();
         }
+        if self.state.borrow().pane != Pane::List
+            && let Some(stream) = self.preview_video.media_stream()
+        {
+            stream.pause();
+        }
         self.state.borrow_mut().visible = false;
         hypr::resize_launcher(crate::WINDOW_WIDTH, crate::WINDOW_HEIGHT);
         self.window.set_visible(false);
@@ -619,7 +686,7 @@ impl Shell {
 
     fn refresh(&self) {
         let query = self.entry.text().to_string();
-        let (generation, include_in_root) = {
+        let (generation, include_in_root, provider, bonus) = {
             let mut st = self.state.borrow_mut();
             if st.editing.is_some() || st.actions_open {
                 return;
@@ -666,20 +733,31 @@ impl Shell {
                 .and_then(|id| st.results.iter().position(|row| row.item.id == id))
                 .unwrap_or(0);
             let include_in_root = st.catalog.settings.borrow().files.include_in_root;
-            (st.search_gen, include_in_root)
+            let provider = st.catalog.settings.borrow().web.provider.clone();
+            let bonus =
+                crate::web::best_title_bonus(&query, st.results.iter().map(|row| &row.item));
+            (st.search_gen, include_in_root, provider, bonus)
         };
         self.sync_chrome();
         rebuild_rows(self);
         self.update_preview();
         self.request_visible_thumbs();
-        self.schedule_live(generation, query, include_in_root);
+        self.schedule_live(generation, query.clone(), include_in_root, provider, bonus);
+        self.schedule_ask_stream(generation, query);
         self.fit_window();
     }
 
-    fn schedule_live(&self, generation: u64, query: String, include_in_root: bool) {
+    fn schedule_live(
+        &self,
+        generation: u64,
+        query: String,
+        include_in_root: bool,
+        provider: String,
+        best_title_bonus: u32,
+    ) {
         let mode = self.state.borrow().mode;
         self.live_cancel.cancel();
-        if !catalog::live_needed(&query, mode, include_in_root) {
+        if !catalog::live_needed_for(&query, mode, include_in_root, &provider, best_title_bonus) {
             return;
         }
         let settings = self.state.borrow().catalog.settings.borrow().clone();
@@ -690,7 +768,114 @@ impl Shell {
             mode,
             settings,
             usage,
+            best_title_bonus,
         });
+    }
+
+    fn schedule_ask_stream(&self, generation: u64, query: String) {
+        self.ask_cancel.borrow().cancel();
+        let prompt = catalog::inline_ask_prompt(&query);
+        {
+            let mut st = self.state.borrow_mut();
+            st.ask_job = st.ask_job.wrapping_add(1);
+            if prompt.is_none() {
+                st.ask_preview = None;
+                st.ask_label = None;
+            }
+        }
+        let Some(prompt) = prompt else {
+            return;
+        };
+        let job = self.state.borrow().ask_job;
+        let item_id = format!("ask:{prompt}");
+        let settings = self.state.borrow().catalog.settings.borrow().clone();
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            if shell.state.borrow().search_gen != generation || shell.state.borrow().ask_job != job
+            {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            shell.spawn_ask_stream(
+                generation,
+                job,
+                item_id.clone(),
+                prompt.clone(),
+                settings.clone(),
+            );
+            gtk4::glib::ControlFlow::Break
+        });
+    }
+
+    fn spawn_ask_stream(
+        &self,
+        generation: u64,
+        job: u64,
+        item_id: String,
+        prompt: String,
+        settings: crate::config::Settings,
+    ) {
+        self.ask_cancel.borrow().cancel();
+        let token = files::Cancel::new();
+        *self.ask_cancel.borrow_mut() = token.clone();
+        thread::spawn(move || {
+            let id = item_id.clone();
+            let _ = ai::ask_stream(&prompt, &settings, |delta| {
+                if token.is_cancelled() {
+                    return false;
+                }
+                post_ask_delta(generation, job, id.clone(), delta.to_string(), false);
+                true
+            });
+            if !token.is_cancelled() {
+                post_ask_delta(generation, job, item_id, String::new(), true);
+            }
+        });
+    }
+
+    fn on_clipboard_changed(&self) {
+        if !self.state.borrow().visible
+            || self.state.borrow().editing.is_some()
+            || self.state.borrow().actions_open
+        {
+            return;
+        }
+        if self.state.borrow().mode != Mode::Root {
+            return;
+        }
+        if !self.entry.text().trim().is_empty() {
+            return;
+        }
+        self.refresh();
+    }
+
+    fn apply_ask_delta(&self, generation: u64, job: u64, item_id: &str, delta: &str, _done: bool) {
+        {
+            let st = self.state.borrow();
+            if st.search_gen != generation || st.ask_job != job {
+                return;
+            }
+        }
+        let mut need_rebuild = false;
+        {
+            let mut st = self.state.borrow_mut();
+            let mut text = match &st.ask_preview {
+                Some((id, text)) if id == item_id => text.clone(),
+                _ => String::new(),
+            };
+            text.push_str(delta);
+            let shown: String = text.chars().take(120).collect();
+            st.ask_preview = Some((item_id.to_string(), text));
+            if let Some(label) = &st.ask_label {
+                label.set_text(&shown);
+                label.set_visible(!shown.is_empty());
+            } else {
+                need_rebuild = true;
+            }
+        }
+        if need_rebuild {
+            rebuild_rows(self);
+            self.update_preview();
+        }
     }
 
     fn apply_live(&self, live: LiveExtras) {
@@ -716,16 +901,21 @@ impl Shell {
                 st.results
                     .retain(|row| !row.item.id.starts_with("files:searching:"));
             }
-            merge_live(&mut st.results, live.files);
-            merge_live(&mut st.results, live.gifs);
-            merge_live(&mut st.results, live.calendar);
-            merge_live(&mut st.results, live.mail);
-            merge_live(&mut st.results, live.web);
-            st.results.sort_by(|a, b| {
-                b.score
-                    .cmp(&a.score)
-                    .then_with(|| a.item.title.cmp(&b.item.title))
-            });
+            catalog::insert_live_stable(&mut st.results, live.files, &selected);
+            catalog::insert_live_stable(&mut st.results, live.gifs, &selected);
+            catalog::insert_live_stable(&mut st.results, live.calendar, &selected);
+            catalog::insert_live_stable(&mut st.results, live.mail, &selected);
+            if !live.web.is_empty() {
+                st.results.retain(|row| {
+                    let id = row.item.id.as_str();
+                    !(id.starts_with("search:")
+                        && !id.starts_with("search:hit:")
+                        && !id.starts_with("search:browser:")
+                        && !id.starts_with("search:empty:"))
+                });
+            }
+            catalog::insert_live_stable(&mut st.results, live.web, &selected);
+            catalog::pin_weather_row_zero(&mut st.results);
             st.results.dedup_by(|a, b| a.item.id == b.item.id);
             if let Some(idx) = st.results.iter().position(|row| row.item.id == selected) {
                 st.selected = idx;
@@ -758,6 +948,9 @@ impl Shell {
         if self.preview.is_visible() {
             height = height.max(520);
         }
+        if self.state.borrow().pane != Pane::List {
+            height = crate::WINDOW_HEIGHT_MAX;
+        }
         if self.detail.is_visible() {
             height += 180;
         }
@@ -769,7 +962,12 @@ impl Shell {
         hypr::resize_launcher(crate::WINDOW_WIDTH, height);
     }
 
-    fn apply_hypr_windows(&self, windows: Vec<crate::item::Item>) {
+    fn apply_hypr_windows(&self, event: Option<String>, windows: Vec<crate::item::Item>) {
+        let restore = event.as_deref().is_some_and(hypr::should_restore_media)
+            && self.state.borrow().media_restore.is_some();
+        if restore {
+            self.restore_media_session();
+        }
         let query = self.entry.text().to_string();
         let visible = {
             let st = self.state.borrow();
@@ -932,21 +1130,31 @@ impl Shell {
             return;
         };
         match crate::preview::for_item(&item) {
-            crate::preview::Preview::None => self.preview.set_visible(false),
+            crate::preview::Preview::None => {
+                self.preview_video.set_visible(false);
+                self.preview.set_visible(false);
+            }
             crate::preview::Preview::Text(text) => {
+                self.preview_video.set_visible(false);
                 self.preview_image.set_visible(false);
                 self.preview_text.set_text(&text);
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
             crate::preview::Preview::Image(path) => {
+                if self.state.borrow().pane != Pane::Media {
+                    self.preview_video.set_visible(false);
+                }
                 self.show_preview_image(&path);
                 self.preview_text.set_text(&path.to_string_lossy());
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
             crate::preview::Preview::Media { path, hint } => {
-                self.show_preview_image(&path);
+                if self.state.borrow().pane != Pane::Media {
+                    self.preview_video.set_visible(false);
+                    self.show_preview_image(&path);
+                }
                 let caption = self.state.borrow().captions.get(&path).cloned();
                 let body = match caption {
                     Some(extra) if !extra.is_empty() => format!("{hint}\n\n{extra}"),
@@ -956,6 +1164,127 @@ impl Shell {
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
+        }
+    }
+
+    fn snapshot_media_restore(&self) {
+        let query = self.entry.text().to_string();
+        let selected_id = self
+            .state
+            .borrow()
+            .results
+            .get(self.state.borrow().selected)
+            .map(|row| row.item.id.clone())
+            .unwrap_or_default();
+        self.state.borrow_mut().media_restore = Some(MediaRestore { query, selected_id });
+    }
+
+    fn restore_media_session(&self) {
+        let Some(snap) = self.state.borrow_mut().media_restore.take() else {
+            return;
+        };
+        self.exit_media_pane();
+        self.entry.set_text(&snap.query);
+        self.entry.set_position(-1);
+        {
+            let mut st = self.state.borrow_mut();
+            st.visible = true;
+        }
+        self.show_launcher();
+        self.refresh();
+        {
+            let mut st = self.state.borrow_mut();
+            if let Some(idx) = st
+                .results
+                .iter()
+                .position(|row| row.item.id == snap.selected_id)
+            {
+                st.selected = idx;
+            }
+        }
+        self.sync_chrome();
+        rebuild_rows(self);
+        self.update_preview();
+        self.fit_window();
+        self.entry.grab_focus();
+    }
+
+    fn exit_media_pane(&self) {
+        if self.state.borrow().pane == Pane::List {
+            return;
+        }
+        if let Some(stream) = self.preview_video.media_stream() {
+            stream.pause();
+        }
+        self.preview_video.set_filename(Option::<&str>::None);
+        self.preview_video.set_visible(false);
+        self.preview_image.set_pixel_size(240);
+        self.preview.remove_css_class("preview-expanded");
+        self.preview.set_hexpand(false);
+        self.preview.set_width_request(300);
+        self.results_scroll.set_visible(true);
+        self.state.borrow_mut().pane = Pane::List;
+        self.update_preview();
+        self.fit_window();
+    }
+
+    fn enter_media_pane(&self, path: &Path) -> bool {
+        if !crate::preview::gstreamer_available() {
+            return false;
+        }
+        let file = gtk4::gio::File::for_path(path);
+        self.preview_video.set_file(Some(&file));
+        self.preview_video.set_autoplay(true);
+        self.preview_video.set_visible(true);
+        self.preview_image.set_visible(false);
+        self.preview.add_css_class("preview-expanded");
+        self.preview.set_hexpand(true);
+        self.preview.set_width_request(560);
+        self.preview.set_visible(true);
+        self.results_scroll.set_visible(false);
+        self.state.borrow_mut().pane = Pane::Media;
+        if let Some(stream) = self.preview_video.media_stream() {
+            stream.play();
+        }
+        self.fit_window();
+        true
+    }
+
+    fn enter_image_zoom(&self) {
+        self.preview_image.set_pixel_size(520);
+        self.preview.add_css_class("preview-expanded");
+        self.preview.set_hexpand(true);
+        self.preview.set_width_request(560);
+        self.results_scroll.set_visible(false);
+        self.state.borrow_mut().pane = Pane::ImageZoom;
+        self.fit_window();
+    }
+
+    fn toggle_in_pane_media(&self) {
+        if let Some(stream) = self.preview_video.media_stream() {
+            if stream.is_playing() {
+                stream.pause();
+            } else {
+                stream.play();
+            }
+        }
+    }
+
+    fn play_external(&self, path: &Path) {
+        self.snapshot_media_restore();
+        let hide = self
+            .state
+            .borrow()
+            .catalog
+            .settings
+            .borrow()
+            .media
+            .hide_on_external_play;
+        action::run(&Action::PlayMedia {
+            path: path.to_path_buf(),
+        });
+        if hide {
+            self.hide();
         }
     }
 
@@ -1051,7 +1380,9 @@ impl Shell {
             Some(Shortcut::Save) => Propagation::Proceed,
             None => match key {
                 Key::Escape => {
-                    if self.state.borrow().actions_open {
+                    if self.state.borrow().pane != Pane::List {
+                        self.exit_media_pane();
+                    } else if self.state.borrow().actions_open {
                         self.close_actions();
                     } else if self.state.borrow().editing.is_some() {
                         let back = match self.state.borrow().editing {
@@ -1108,18 +1439,44 @@ impl Shell {
                 Key::space | Key::KP_Space => {
                     if self.state.borrow().editing.is_some() || self.state.borrow().actions_open {
                         Propagation::Proceed
+                    } else if self.state.borrow().pane == Pane::Media {
+                        self.toggle_in_pane_media();
+                        Propagation::Stop
+                    } else if self.state.borrow().pane == Pane::ImageZoom {
+                        Propagation::Stop
                     } else {
                         let item = {
                             let st = self.state.borrow();
                             st.results.get(st.selected).map(|row| row.item.clone())
                         };
-                        if let Some(item) = item
-                            && let Some(play) = action::spacebar_play(&item)
-                        {
-                            self.record_launch(&item);
-                            self.hide();
-                            action::run(&play);
-                            Propagation::Stop
+                        if let Some(item) = item {
+                            match crate::preview::for_item(&item) {
+                                crate::preview::Preview::Image(_) => {
+                                    self.enter_image_zoom();
+                                    Propagation::Stop
+                                }
+                                crate::preview::Preview::Media { path, .. }
+                                    if crate::preview::gstreamer_available()
+                                        && self.enter_media_pane(&path) =>
+                                {
+                                    Propagation::Stop
+                                }
+                                _ => {
+                                    if let Some(play) = action::spacebar_play(&item) {
+                                        self.record_launch(&item);
+                                        match play {
+                                            Action::PlayMedia { path } => self.play_external(&path),
+                                            other => {
+                                                self.hide();
+                                                action::run(&other);
+                                            }
+                                        }
+                                        Propagation::Stop
+                                    } else {
+                                        Propagation::Proceed
+                                    }
+                                }
+                            }
                         } else {
                             Propagation::Proceed
                         }
@@ -1292,6 +1649,7 @@ impl Shell {
                 self.sign_in(&provider);
             }
             Action::OpenUri(_) => self.hide_then(item.action),
+            Action::PlayMedia { path } => self.play_external(&path),
             Action::ConnectorFetch { id } => {
                 let settings = self.state.borrow().catalog.settings.borrow().clone();
                 match crate::connectors::fetch(&id, &settings) {
@@ -1360,6 +1718,7 @@ impl Shell {
                 match quicklinks::create(&name, &target) {
                     Ok(link) => {
                         quicklinks::upsert(link);
+                        self.state.borrow().catalog.reload_quicklinks();
                         self.set_status(format!("Saved quicklink {name}"));
                     }
                     Err(_) => {
@@ -1373,6 +1732,7 @@ impl Shell {
             }
             Action::SaveLayout { name } => match crate::layout::save_current(&name) {
                 Some(_) => {
+                    self.state.borrow().catalog.reload_layouts();
                     self.set_status(format!("Saved layout {name}"));
                     self.refresh();
                 }
@@ -1411,7 +1771,7 @@ impl Shell {
                 }
                 let stay = matches!(
                     item.kind,
-                    Kind::Calendar | Kind::Mail | Kind::Ai | Kind::Weather | Kind::Web
+                    Kind::Calendar | Kind::Mail | Kind::Ai | Kind::Weather | Kind::Web | Kind::Calc
                 );
                 if stay {
                     action::copy_text(&text);
@@ -1605,9 +1965,7 @@ impl Shell {
     }
 
     fn apply_alias(&self, id: &str, name: &str) {
-        let mut store = alias::Store::load();
-        store.set(id, name);
-        store.persist();
+        self.state.borrow().catalog.set_alias(id, name);
         self.state.borrow_mut().pending_alias = None;
         self.set_status(format!("Alias “{name}” set"));
         self.refresh();
@@ -1772,9 +2130,7 @@ impl Shell {
         let filter = self.entry.text().to_string();
         match action.kind {
             PanelKind::ToggleFavorite => {
-                let mut store = favorites::Store::load();
-                let pinned = store.toggle(&item.id);
-                store.persist();
+                let pinned = self.state.borrow().catalog.toggle_favorite(&item.id);
                 self.close_actions();
                 self.set_status(if pinned {
                     format!("Pinned {}", item.title)
@@ -1922,7 +2278,10 @@ impl Shell {
                 self.show_oneshot(crate::quit::confirm_item(), "Enter to confirm quit all");
             }
             Action::SaveLayout { name } => match crate::layout::save_current(&name) {
-                Some(_) => self.set_status(format!("Saved layout {name}")),
+                Some(_) => {
+                    self.state.borrow().catalog.reload_layouts();
+                    self.set_status(format!("Saved layout {name}"))
+                }
                 None => self.set_status("Could not save layout"),
             },
             other => {
@@ -2688,11 +3047,25 @@ enum UiMsg {
         text: String,
     },
     ThumbMiss(PathBuf),
-    Windows(Vec<Item>),
+    Windows {
+        event: Option<String>,
+        windows: Vec<Item>,
+    },
 }
 
 fn bind_shell(shell: &Shell) {
     SHELL.with(|slot| *slot.borrow_mut() = Some(shell.clone()));
+}
+
+fn post_ask_delta(generation: u64, job: u64, item_id: String, delta: String, done: bool) {
+    let _ = gtk4::glib::idle_add(move || {
+        SHELL.with(|slot| {
+            if let Some(shell) = slot.borrow().as_ref() {
+                shell.apply_ask_delta(generation, job, &item_id, &delta, done);
+            }
+        });
+        gtk4::glib::ControlFlow::Break
+    });
 }
 
 fn push_ui(inbox: &Arc<Mutex<Vec<UiMsg>>>, msg: UiMsg) {
@@ -2724,7 +3097,9 @@ fn push_ui(inbox: &Arc<Mutex<Vec<UiMsg>>>, msg: UiMsg) {
                         UiMsg::ThumbMiss(path) => {
                             shell.state.borrow_mut().thumb_miss.insert(path);
                         }
-                        UiMsg::Windows(windows) => shell.apply_hypr_windows(windows),
+                        UiMsg::Windows { event, windows } => {
+                            shell.apply_hypr_windows(event, windows)
+                        }
                     }
                 }
             }
@@ -2742,7 +3117,13 @@ fn start_live_worker(rx: mpsc::Receiver<LiveJob>, cancel: Arc<files::Cancel>) {
             }
             cancel.reset();
             let extras = files::with_cancel(cancel.clone(), || {
-                catalog::live_extras(&job.query, job.mode, &job.settings, &job.usage)
+                catalog::live_extras(
+                    &job.query,
+                    job.mode,
+                    &job.settings,
+                    &job.usage,
+                    job.best_title_bonus,
+                )
             });
             if cancel.is_cancelled() {
                 continue;
@@ -2863,14 +3244,7 @@ fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>, cancel: Arc<files::Cancel>) {
 
 fn start_hypr_watch() {
     let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
-    hypr::watch(move |windows| push_ui(&inbox, UiMsg::Windows(windows)));
-}
-
-fn merge_live(results: &mut Vec<Scored>, incoming: Vec<Scored>) {
-    let ids: std::collections::HashSet<String> =
-        incoming.iter().map(|row| row.item.id.clone()).collect();
-    results.retain(|row| !ids.contains(&row.item.id));
-    results.extend(incoming);
+    hypr::watch(move |event, windows| push_ui(&inbox, UiMsg::Windows { event, windows }));
 }
 
 fn rebuild_rows(shell: &Shell) {
@@ -2882,6 +3256,7 @@ fn rebuild_rows(shell: &Shell) {
     {
         let mut st = shell.state.borrow_mut();
         st.rows.clear();
+        st.ask_label = None;
         if st.editing.is_some() {
             return;
         }
@@ -2890,6 +3265,7 @@ fn rebuild_rows(shell: &Shell) {
             return;
         }
         let selected = st.selected;
+        let stream = st.ask_preview.clone();
         let rows: Vec<(Item, Live)> = st
             .results
             .iter()
@@ -2905,7 +3281,28 @@ fn rebuild_rows(shell: &Shell) {
             .collect();
         let mut st = shell.state.borrow_mut();
         for (idx, ((item, live), thumb)) in rows.into_iter().zip(thumbs).enumerate() {
-            let row = result_row(&item, &live, idx == selected, thumb.as_ref());
+            let streamed = stream.as_ref().and_then(|(id, text)| {
+                if id == &item.id {
+                    let mut shown: String = text.chars().take(120).collect();
+                    if text.chars().count() > 120 {
+                        shown.push('…');
+                    }
+                    Some(shown)
+                } else {
+                    None
+                }
+            });
+            let answer = streamed.clone().or_else(|| item.inline_answer());
+            let (row, answer_label) = result_row(
+                &item,
+                &live,
+                idx == selected,
+                thumb.as_ref(),
+                answer.as_deref(),
+            );
+            if streamed.is_some() {
+                st.ask_label = answer_label;
+            }
             host.append(&row);
             st.rows.push(row);
         }
@@ -3599,7 +3996,13 @@ fn paint_selection(state: &State) {
     }
 }
 
-fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>) -> Box {
+fn result_row(
+    item: &Item,
+    live: &Live,
+    selected: bool,
+    thumb: Option<&Texture>,
+    answer: Option<&str>,
+) -> (Box, Option<Label>) {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("row");
     if selected {
@@ -3614,6 +4017,28 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
     accent.add_css_class("accent");
     accent.set_valign(Align::Center);
     row.append(&accent);
+
+    if item.id.starts_with("color:")
+        && let Action::Copy(hex) = &item.action
+        && let Ok(rgba) = RGBA::parse(hex)
+    {
+        let swatch = DrawingArea::new();
+        swatch.set_content_width(16);
+        swatch.set_content_height(16);
+        swatch.add_css_class("color-swatch");
+        swatch.set_draw_func(move |_, cr, w, h| {
+            cr.set_source_rgba(
+                f64::from(rgba.red()),
+                f64::from(rgba.green()),
+                f64::from(rgba.blue()),
+                f64::from(rgba.alpha()),
+            );
+            cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
+            let _ = cr.fill();
+        });
+        swatch.set_valign(Align::Center);
+        row.append(&swatch);
+    }
 
     let icon = if live.thumb_path().is_some() {
         let image = if let Some(texture) = thumb {
@@ -3700,12 +4125,25 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
     }
     row.append(&text);
 
+    let mut answer_label = None;
+    if let Some(answer) = answer.filter(|s| !s.is_empty()) {
+        let label = Label::new(Some(answer));
+        label.set_xalign(1.0);
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_max_width_chars(28);
+        label.add_css_class("answer");
+        label.set_valign(Align::Center);
+        label.set_hexpand(false);
+        row.append(&label);
+        answer_label = Some(label);
+    }
+
     let pill = Label::new(Some(item.kind.label()));
     pill.add_css_class("pill");
     pill.set_valign(Align::Center);
     row.append(&pill);
 
-    row
+    (row, answer_label)
 }
 
 fn empty_state(entry: &Entry) -> (Box, Label, Label) {
@@ -3818,8 +4256,7 @@ fn kind_icon(kind: Kind) -> &'static str {
 
 fn panel_actions(item: &Item, st: &State) -> Vec<PanelAction> {
     let mut out = Vec::new();
-    let favs = favorites::Store::load();
-    let pinned = favs.is_pinned(&item.id);
+    let pinned = st.catalog.is_favorite(&item.id);
     out.push(PanelAction {
         title: if pinned {
             "Unpin favorite".into()

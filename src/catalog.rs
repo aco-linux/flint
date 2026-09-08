@@ -20,7 +20,7 @@ use crate::item::{Action, Icon, Item, Kind, Live};
 use crate::mode::Mode;
 use crate::models;
 use crate::notes;
-use crate::quicklinks;
+use crate::quicklinks::{self, Link};
 use crate::smart;
 use crate::snippets;
 use crate::store;
@@ -78,17 +78,72 @@ const TITLE_WORD_OR_INITIALS: u32 = 2_500;
 const KEYWORD_PREFIX: u32 = 1_500;
 const TYPO_CAP: u32 = 2_400;
 
+/// Precomputed lowercase fields so `rank` never calls `to_lowercase` per keystroke.
+#[derive(Clone, Debug)]
+struct IndexEntry {
+    title_lc: String,
+    words: Vec<String>,
+    initials: String,
+    keywords: String,
+    keywords_lc: String,
+    subtitle_lc: String,
+    alias_lc: String,
+}
+
+impl IndexEntry {
+    fn from_item(item: &Item, alias: Option<&str>) -> Self {
+        let title_lc = item.title.to_lowercase();
+        let words: Vec<String> = title_lc
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect();
+        let initials: String = words
+            .iter()
+            .filter_map(|word| word.chars().next())
+            .collect();
+        let alias_lc = alias
+            .map(str::trim)
+            .filter(|alias| !alias.is_empty())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let keywords = if alias_lc.is_empty() {
+            item.keywords.clone()
+        } else {
+            format!("{} {alias_lc}", item.keywords)
+        };
+        let keywords_lc = keywords.to_lowercase();
+        Self {
+            title_lc,
+            words,
+            initials,
+            keywords,
+            keywords_lc,
+            subtitle_lc: item.subtitle.to_lowercase(),
+            alias_lc,
+        }
+    }
+}
+
 pub struct Catalog {
     apps: Vec<Item>,
     commands: Vec<Item>,
     extensions: Vec<Item>,
     installed: RefCell<Vec<Item>>,
     lexicon: Vec<String>,
-    haystacks: RefCell<HashMap<String, String>>,
+    index: RefCell<HashMap<String, IndexEntry>>,
+    aliases: RefCell<alias::Store>,
+    favorites: RefCell<favorites::Store>,
+    quicklinks: RefCell<Vec<Link>>,
+    custom_layouts: RefCell<Vec<Item>>,
     windows: RefCell<Vec<Item>>,
     matcher: RefCell<Matcher>,
+    nucleo_buf: RefCell<Vec<char>>,
+    context: RefCell<crate::context::Context>,
+    app_tags: RefCell<HashMap<String, String>>,
     pub(crate) usage: usage::Map,
     pub(crate) choices: choices::Map,
+    pub(crate) choice_ctx: choices::ContextMap,
     pub(crate) clips: Rc<RefCell<ClipStore>>,
     pub settings: Rc<RefCell<Settings>>,
 }
@@ -127,15 +182,25 @@ impl Catalog {
         let commands = system_commands();
         let extensions = extension_items();
         let installed = crate::extension::command_items();
-        let mut haystacks = HashMap::new();
+        let aliases = alias::Store::load();
+        let favorites = favorites::Store::load();
+        let quicklinks = quicklinks::load();
+        let custom_layouts = crate::layout::custom_items();
+        let windows = hypr::load_windows();
+        let mut index = HashMap::new();
         let mut lexicon = files::type_words();
         for item in apps
             .iter()
             .chain(commands.iter())
             .chain(extensions.iter())
             .chain(installed.iter())
+            .chain(windows.iter())
+            .chain(custom_layouts.iter())
         {
-            haystacks.insert(item.id.clone(), item.haystack());
+            index.insert(
+                item.id.clone(),
+                IndexEntry::from_item(item, aliases.get(&item.id)),
+            );
             lexicon.push(item.title.clone());
             for part in item
                 .title
@@ -147,21 +212,33 @@ impl Catalog {
                 }
             }
         }
-        let windows = hypr::load_windows();
-        for item in &windows {
-            haystacks.insert(item.id.clone(), item.haystack());
+        for link in &quicklinks {
+            let item = link.to_item("");
+            index.insert(
+                item.id.clone(),
+                IndexEntry::from_item(&item, aliases.get(&item.id)),
+            );
         }
+        let app_tags = build_app_tags(&quicklinks);
         Self {
             apps,
             commands,
             extensions,
             installed: RefCell::new(installed),
             lexicon,
-            haystacks: RefCell::new(haystacks),
+            index: RefCell::new(index),
+            aliases: RefCell::new(aliases),
+            favorites: RefCell::new(favorites),
+            quicklinks: RefCell::new(quicklinks),
+            custom_layouts: RefCell::new(custom_layouts),
             windows: RefCell::new(windows),
             matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
+            nucleo_buf: RefCell::new(Vec::new()),
+            context: RefCell::new(crate::context::Context::default()),
+            app_tags: RefCell::new(app_tags),
             usage: usage::load(),
             choices: choices::load(),
+            choice_ctx: choices::load_context(),
             clips,
             settings,
         }
@@ -169,22 +246,132 @@ impl Catalog {
 
     /// Re-scan installed extension commands after a store install.
     pub fn reload_installed(&self) {
+        *self.aliases.borrow_mut() = alias::Store::load();
+        *self.favorites.borrow_mut() = favorites::Store::load();
+        self.reload_quicklinks();
+        self.reload_layouts();
         let installed = crate::extension::command_items();
-        let mut cache = self.haystacks.borrow_mut();
-        cache.retain(|id, _| !id.starts_with("vx:"));
-        for item in &installed {
-            cache.insert(item.id.clone(), item.haystack());
+        {
+            let aliases = self.aliases.borrow();
+            let mut index = self.index.borrow_mut();
+            index.retain(|id, _| !id.starts_with("vx:"));
+            for item in &installed {
+                index.insert(
+                    item.id.clone(),
+                    IndexEntry::from_item(item, aliases.get(&item.id)),
+                );
+            }
         }
         *self.installed.borrow_mut() = installed;
     }
 
     pub fn adopt_windows(&self, windows: Vec<Item>) {
-        let mut cache = self.haystacks.borrow_mut();
-        cache.retain(|id, _| !id.starts_with("win:"));
-        for item in &windows {
-            cache.insert(item.id.clone(), item.haystack());
+        {
+            let aliases = self.aliases.borrow();
+            let mut index = self.index.borrow_mut();
+            index.retain(|id, _| !id.starts_with("win:"));
+            for item in &windows {
+                index.insert(
+                    item.id.clone(),
+                    IndexEntry::from_item(item, aliases.get(&item.id)),
+                );
+            }
         }
         *self.windows.borrow_mut() = windows;
+    }
+
+    pub fn set_alias(&self, id: &str, name: &str) {
+        {
+            let mut store = self.aliases.borrow_mut();
+            store.set(id, name);
+            store.persist();
+        }
+        self.reindex_id(id);
+    }
+
+    pub fn toggle_favorite(&self, id: &str) -> bool {
+        let mut store = self.favorites.borrow_mut();
+        let pinned = store.toggle(id);
+        store.persist();
+        pinned
+    }
+
+    pub fn is_favorite(&self, id: &str) -> bool {
+        self.favorites.borrow().is_pinned(id)
+    }
+
+    pub fn reload_quicklinks(&self) {
+        let links = quicklinks::load();
+        {
+            let aliases = self.aliases.borrow();
+            let mut index = self.index.borrow_mut();
+            index.retain(|id, _| !id.starts_with("link:"));
+            for link in &links {
+                let item = link.to_item("");
+                index.insert(
+                    item.id.clone(),
+                    IndexEntry::from_item(&item, aliases.get(&item.id)),
+                );
+            }
+        }
+        *self.quicklinks.borrow_mut() = links;
+        self.refresh_app_tags();
+    }
+
+    pub fn reload_layouts(&self) {
+        let next = crate::layout::custom_items();
+        let old_ids: Vec<String> = self
+            .custom_layouts
+            .borrow()
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        {
+            let aliases = self.aliases.borrow();
+            let mut index = self.index.borrow_mut();
+            for id in &old_ids {
+                index.remove(id);
+            }
+            for item in &next {
+                index.insert(
+                    item.id.clone(),
+                    IndexEntry::from_item(item, aliases.get(&item.id)),
+                );
+            }
+        }
+        *self.custom_layouts.borrow_mut() = next;
+        self.refresh_app_tags();
+    }
+
+    pub fn set_context(&self, ctx: crate::context::Context) {
+        *self.context.borrow_mut() = ctx;
+    }
+
+    fn context_aware(&self) -> bool {
+        self.settings.borrow().general.context_aware
+    }
+
+    fn context_class(&self) -> String {
+        if self.context_aware() {
+            self.context.borrow().class.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    fn refresh_app_tags(&self) {
+        *self.app_tags.borrow_mut() = build_app_tags(&self.quicklinks.borrow());
+    }
+
+    fn reindex_id(&self, id: &str) {
+        let Some(item) = self.lookup_item(id) else {
+            return;
+        };
+        let alias = self.aliases.borrow().get(id).map(str::to_string);
+        self.index.borrow_mut().insert(
+            item.id.clone(),
+            IndexEntry::from_item(&item, alias.as_deref()),
+        );
     }
 
     pub fn score_windows(&self, query: &str) -> Vec<Scored> {
@@ -221,7 +408,8 @@ impl Catalog {
         let settings = self.settings.borrow();
         let include_in_root = settings.files.include_in_root;
         let file_limit = settings.files.max_results.min(files::ROOT_FILE_LIMIT);
-        let mix_limit = settings.general.max_results.max(24);
+        let mix_limit = settings.general.max_results;
+        let web_off = crate::web::normalize_provider(&settings.web.provider) == "off";
         drop(settings);
 
         if query.is_empty() {
@@ -243,8 +431,8 @@ impl Catalog {
             }
         }
 
-        if let Some(id) = alias::Store::load().lookup(query)
-            && let Some(item) = self.lookup_item(id)
+        if let Some(id) = self.aliases.borrow().lookup(query).map(str::to_string)
+            && let Some(item) = self.lookup_item(&id)
         {
             results.push(Scored::new(item, TIER_ALIAS));
         }
@@ -302,10 +490,12 @@ impl Catalog {
                     ));
                 }
                 IntentKind::Web => {
-                    results.push(Scored::new(
-                        crate::web::search_item(query),
-                        TIER_WEB_INTENT + hit.score,
-                    ));
+                    let item = if web_off {
+                        crate::web::browser_fallback(query)
+                    } else {
+                        crate::web::search_item(query)
+                    };
+                    results.push(Scored::new(item, TIER_WEB_INTENT + hit.score));
                 }
                 IntentKind::Ask => {
                     if !query.is_empty() {
@@ -370,14 +560,21 @@ impl Catalog {
         let windows = self.windows.borrow();
         let installed = self.installed.borrow();
         let mut matcher = self.matcher.borrow_mut();
+        let mut nucleo_buf = self.nucleo_buf.borrow_mut();
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-        let aliases = alias::Store::load();
-        let favs = favorites::Store::load();
-        let qlinks: Vec<Item> = quicklinks::load()
+        let aliases = self.aliases.borrow();
+        let favs = self.favorites.borrow();
+        let qlinks: Vec<Item> = self
+            .quicklinks
+            .borrow()
             .iter()
             .map(|link| link.to_item(&link.argument_for(query)))
             .collect();
-        let custom_layouts = crate::layout::custom_items();
+        let custom_layouts = self.custom_layouts.borrow();
+        let index = self.index.borrow();
+        let app_tags = self.app_tags.borrow();
+        let ctx_class = self.context_class();
+        let q_lc = query.to_lowercase();
 
         let mut pool: Vec<&Item> = Vec::new();
         pool.extend(self.apps.iter());
@@ -390,31 +587,34 @@ impl Catalog {
 
         let mut ranked: Vec<(u32, &Item)> = Vec::new();
         for item in pool {
+            let owned;
+            let entry = match index.get(&item.id) {
+                Some(entry) => entry,
+                None => {
+                    owned = IndexEntry::from_item(item, aliases.get(&item.id));
+                    &owned
+                }
+            };
+            let app_bonus = crate::context::app_bonus(
+                app_tags.get(&item.id).map(String::as_str).unwrap_or(""),
+                &ctx_class,
+            );
             let input = RankInput {
                 query,
+                q_lc: &q_lc,
                 item,
+                entry,
                 usage: &self.usage,
                 now,
                 file_heavy,
-                alias: aliases.get(&item.id),
                 favorite: favs.is_pinned(&item.id),
             };
-            if let Some(score) = rank(&mut matcher, &pattern, input) {
-                ranked.push((score, item));
-            } else if let Some(score) = rank_expansions(
-                &mut matcher,
-                &meaning.expansions,
-                RankInput {
-                    query,
-                    item,
-                    usage: &self.usage,
-                    now,
-                    file_heavy,
-                    alias: aliases.get(&item.id),
-                    favorite: favs.is_pinned(&item.id),
-                },
-            ) {
-                ranked.push((score, item));
+            if let Some(score) = rank(&mut matcher, &pattern, &mut nucleo_buf, input) {
+                ranked.push((score.saturating_add(app_bonus), item));
+            } else if let Some(score) =
+                rank_expansions(&mut matcher, &mut nucleo_buf, &meaning.expansions, input)
+            {
+                ranked.push((score.saturating_add(app_bonus), item));
             }
         }
 
@@ -422,16 +622,19 @@ impl Catalog {
 
         if include_in_root && file_query.wants_files() {
             for item in files::well_known_folders(query) {
+                let owned = IndexEntry::from_item(&item, aliases.get(&item.id));
                 let score = rank(
                     &mut matcher,
                     &pattern,
+                    &mut nucleo_buf,
                     RankInput {
                         query,
+                        q_lc: &q_lc,
                         item: &item,
+                        entry: &owned,
                         usage: &self.usage,
                         now,
                         file_heavy,
-                        alias: aliases.get(&item.id),
                         favorite: favs.is_pinned(&item.id),
                     },
                 )
@@ -440,6 +643,11 @@ impl Catalog {
             }
         }
 
+        drop(index);
+        drop(custom_layouts);
+        drop(favs);
+        drop(aliases);
+        drop(nucleo_buf);
         drop(matcher);
         drop(windows);
 
@@ -458,7 +666,8 @@ impl Catalog {
             self.apply_learned_choice(query, now, &mut results);
         }
 
-        if !query.starts_with(['>', '$', '=', '/', '~', ';'])
+        if !web_off
+            && !query.starts_with(['>', '$', '=', '/', '~', ';'])
             && !meaning.tool_intent()
             && !meaning.has(IntentKind::Web)
         {
@@ -496,14 +705,22 @@ impl Catalog {
 
     pub(crate) fn learn_choice(&mut self, query: &str, id: &str) {
         choices::bump(&mut self.choices, query, id);
+        let class = self.context_class();
+        if !class.is_empty() {
+            choices::bump_class(&mut self.choice_ctx, &class, query, id);
+        }
     }
 
     pub(crate) fn clear_choices(&mut self) {
         choices::clear(&mut self.choices);
+        choices::clear_context(&mut self.choice_ctx);
     }
 
     fn apply_learned_choice(&self, query: &str, now: u64, results: &mut Vec<Scored>) {
-        let Some((id, rec)) = choices::best(&self.choices, query) else {
+        let class = self.context_class();
+        let hit = choices::best_class(&self.choice_ctx, &class, query)
+            .or_else(|| choices::best(&self.choices, query));
+        let Some((id, rec)) = hit else {
             return;
         };
         let id = id.to_string();
@@ -561,7 +778,8 @@ impl Catalog {
         {
             results.push(Scored::new(crate::layout::save_item(&name), 100_000));
         }
-        let layouts = crate::layout::all_items();
+        let mut layouts = crate::layout::builtin_items();
+        layouts.extend(self.custom_layouts.borrow().iter().cloned());
         if q.is_empty() {
             for (i, item) in layouts.iter().enumerate() {
                 results.push(Scored::new(
@@ -578,14 +796,28 @@ impl Catalog {
     }
 
     fn score_pool(&self, items: &[Item], query: &str, limit: usize) -> Vec<Scored> {
-        score_pool(
+        let mut rows = score_pool(
             items,
             query,
             &self.usage,
             limit,
             &mut self.matcher.borrow_mut(),
-            &self.haystacks.borrow(),
-        )
+            &mut self.nucleo_buf.borrow_mut(),
+            &self.index.borrow(),
+            &self.aliases.borrow(),
+            &self.favorites.borrow(),
+        );
+        if self.context_aware() {
+            let class = self.context_class();
+            let tags = self.app_tags.borrow();
+            for row in &mut rows {
+                row.score = row.score.saturating_add(crate::context::app_bonus(
+                    tags.get(&row.item.id).map(String::as_str).unwrap_or(""),
+                    &class,
+                ));
+            }
+        }
+        rows
     }
 
     fn search_clipboard(&self, query: &str) -> Vec<Scored> {
@@ -850,6 +1082,24 @@ impl Catalog {
                 "Allow MCP tool listing",
                 s.general.allow_mcp,
                 "mcp npx spawn tools",
+            ),
+            setting_toggle(
+                "context",
+                "Context-aware search",
+                s.general.context_aware,
+                "hyprland focused window class clipboard",
+            ),
+            setting_cycle(
+                "web",
+                "Web search provider",
+                &s.web.provider,
+                "ddg duckduckgo html instant off searxng brave privacy",
+            ),
+            setting_toggle(
+                "media-hide",
+                "Hide when playing media externally",
+                s.media.hide_on_external_play,
+                "player mpv video hide restore",
             ),
             setting_toggle(
                 "files-root",
@@ -1233,7 +1483,9 @@ impl Catalog {
                 100_000,
             ));
         }
-        let items: Vec<Item> = quicklinks::load()
+        let items: Vec<Item> = self
+            .quicklinks
+            .borrow()
             .iter()
             .map(|link| {
                 let rest = q.strip_prefix('+').unwrap_or(q).trim();
@@ -1308,6 +1560,14 @@ impl Catalog {
         if let Some(item) = self.windows.borrow().iter().find(|item| item.id == id) {
             return Some(item.clone());
         }
+        if let Some(item) = self
+            .custom_layouts
+            .borrow()
+            .iter()
+            .find(|item| item.id == id)
+        {
+            return Some(item.clone());
+        }
         if let Some(clip) = id.strip_prefix("clip:") {
             return self.clips.borrow().get(clip).map(|e| e.to_item());
         }
@@ -1318,8 +1578,10 @@ impl Catalog {
                 .map(|s| s.to_item());
         }
         if let Some(name) = id.strip_prefix("link:") {
-            return quicklinks::load()
-                .into_iter()
+            return self
+                .quicklinks
+                .borrow()
+                .iter()
                 .find(|link| link.name == name)
                 .map(|link| link.to_item(""));
         }
@@ -1337,11 +1599,37 @@ impl Catalog {
 
     fn empty_state(&self) -> Vec<Scored> {
         let mut out = Vec::new();
+        let now = usage::now_secs();
         if let Some(item) = crate::focus::live_item() {
             out.push(Scored::new(item, 40_000));
         }
-        let now = usage::now_secs();
-        let favs = favorites::Store::load();
+        if self.context_aware() {
+            let ctx = self.context.borrow().clone();
+            if ctx.is_fresh(now) {
+                let mut text = None;
+                if let Some(entry) = self.clips.borrow().entries.first()
+                    && now.saturating_sub(entry.copied_at) < crate::context::FRESH_SECS
+                    && !clipboard::looks_secret(&entry.text)
+                {
+                    text = Some(entry.text.clone());
+                }
+                if text.is_none() {
+                    text = ctx.primary.clone();
+                }
+                if let Some(text) = text {
+                    for (i, item) in crate::context::fresh_clipboard_items(&text)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        out.push(Scored::new(item, 38_000u32.saturating_sub(i as u32 * 10)));
+                    }
+                }
+                for path in crate::context::editor_paths(&ctx.title) {
+                    out.push(Scored::new(files::file_item(path, None), 36_000));
+                }
+            }
+        }
+        let favs = self.favorites.borrow();
         for id in favs.all() {
             if let Some(item) = self.lookup_item(id) {
                 out.push(Scored::new(item, 32_000));
@@ -1408,7 +1696,26 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
     }
 }
 
-pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
+/// Inline Ask AI streaming: `?` / `ask ` mode with a prompt, or a root Ask intent.
+pub fn inline_ask_prompt(query: &str) -> Option<String> {
+    let (mode, rest) = Mode::parse(query);
+    let rest = rest.trim();
+    match mode {
+        Mode::Ask if !rest.is_empty() => Some(rest.to_string()),
+        Mode::Root if intent::resolve(rest).has(IntentKind::Ask) && !rest.is_empty() => {
+            Some(rest.to_string())
+        }
+        _ => None,
+    }
+}
+
+pub fn live_needed_for(
+    query: &str,
+    mode: Mode,
+    include_in_root: bool,
+    provider: &str,
+    best_title_bonus: u32,
+) -> bool {
     let (_, rest) = Mode::parse(query);
     if crate::content::term_from_query(query).is_some() {
         return true;
@@ -1417,15 +1724,17 @@ pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
         return true;
     }
     let meaning = intent::resolve(&rest);
-    if mode == Mode::Root && meaning.has(IntentKind::Weather) && weather::cached().is_none() {
+    if mode == Mode::Root && meaning.has(IntentKind::Weather) {
         return true;
     }
     if mode == Mode::Root
         && (meaning.has(IntentKind::Calendar)
             || meaning.has(IntentKind::Email)
-            || meaning.has(IntentKind::Web)
             || (meaning.has(IntentKind::Gif) && !intent::gif_terms(&rest).is_empty()))
     {
+        return true;
+    }
+    if mode == Mode::Root && crate::web::should_fetch_web(query, best_title_bonus, provider) {
         return true;
     }
     asked_for_files(&rest, mode, include_in_root)
@@ -1436,6 +1745,7 @@ pub fn live_extras(
     mode: Mode,
     settings: &crate::config::Settings,
     usage: &usage::Map,
+    best_title_bonus: u32,
 ) -> LiveExtras {
     let (parsed, rest) = Mode::parse(query);
     let mode = if mode == Mode::Root { parsed } else { mode };
@@ -1467,8 +1777,10 @@ pub fn live_extras(
     if meaning.has(IntentKind::Email) {
         extras.mail = live_mail(settings);
     }
-    if meaning.has(IntentKind::Web) && !meaning.tool_intent() {
-        extras.web = live_web(&q);
+    if mode == Mode::Root
+        && crate::web::should_fetch_web(query, best_title_bonus, &settings.web.provider)
+    {
+        extras.web = live_web(&q, settings, best_title_bonus);
     }
 
     if let Some(term) = crate::content::term_from_query(query) {
@@ -1528,6 +1840,7 @@ pub fn live_extras(
         settings.files.max_results.min(files::ROOT_FILE_LIMIT)
     };
     let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut nucleo_buf = Vec::new();
     let pattern = Pattern::parse(
         if q.is_empty() { "file" } else { &q },
         CaseMatching::Smart,
@@ -1554,7 +1867,15 @@ pub fn live_extras(
         if let Action::OpenPath(path) | Action::PlayMedia { path } = &item.action {
             live.fill_snippet(path);
         }
-        let score = rank_file(&mut matcher, &pattern, &q, &item, usage, now);
+        let score = rank_file(
+            &mut matcher,
+            &pattern,
+            &mut nucleo_buf,
+            &q,
+            &item,
+            usage,
+            now,
+        );
         extras.files.push(Scored::with_live(item, score, live));
     }
     extras
@@ -1741,17 +2062,19 @@ fn setting_value(id: &str, title: &str, current: &str, typed: &str, keywords: &s
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_pool(
     items: &[Item],
     query: &str,
     usage_map: &usage::Map,
     limit: usize,
     matcher: &mut Matcher,
-    _haystacks: &HashMap<String, String>,
+    buf: &mut Vec<char>,
+    index: &HashMap<String, IndexEntry>,
+    aliases: &alias::Store,
+    favs: &favorites::Store,
 ) -> Vec<Scored> {
     let query = query.trim();
-    let aliases = alias::Store::load();
-    let favs = favorites::Store::load();
     if query.is_empty() {
         return items
             .iter()
@@ -1771,21 +2094,31 @@ fn score_pool(
     let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
     let meaning = intent::resolve_with(query, &titles);
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let q_lc = query.to_lowercase();
     let now = usage::now_secs();
     let mut ranked: Vec<(u32, &Item)> = Vec::new();
     for item in items {
+        let owned;
+        let entry = match index.get(&item.id) {
+            Some(entry) => entry,
+            None => {
+                owned = IndexEntry::from_item(item, aliases.get(&item.id));
+                &owned
+            }
+        };
         let input = RankInput {
             query,
+            q_lc: &q_lc,
             item,
+            entry,
             usage: usage_map,
             now,
             file_heavy: false,
-            alias: aliases.get(&item.id),
             favorite: favs.is_pinned(&item.id),
         };
-        if let Some(score) = rank(matcher, &pattern, input) {
+        if let Some(score) = rank(matcher, &pattern, buf, input) {
             ranked.push((score, item));
-        } else if let Some(score) = rank_expansions(matcher, &meaning.expansions, input) {
+        } else if let Some(score) = rank_expansions(matcher, buf, &meaning.expansions, input) {
             ranked.push((score, item));
         }
     }
@@ -1826,27 +2159,96 @@ fn finish_limited(mut results: Vec<Scored>, limit: usize, usage: &usage::Map) ->
     results
 }
 
+fn build_app_tags(links: &[crate::quicklinks::Link]) -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    for link in links {
+        if !link.app.is_empty() {
+            tags.insert(format!("link:{}", link.name), link.app.clone());
+        }
+    }
+    for layout in crate::layout::load() {
+        if !layout.app.is_empty() {
+            tags.insert(format!("cmd:layout-{}", layout.name), layout.app);
+        }
+    }
+    for snip in snippets::load() {
+        if !snip.app.is_empty() {
+            tags.insert(format!("snip:{}", snip.keyword), snip.app);
+        }
+    }
+    tags
+}
+
+/// Insert live rows without reordering already-visible results.
+/// New ids insert at their scored position only when that index is at or below
+/// the current selection; otherwise they append. Existing ids update in place.
+pub(crate) fn insert_live_stable(
+    results: &mut Vec<Scored>,
+    incoming: Vec<Scored>,
+    selected_id: &str,
+) {
+    for row in incoming {
+        if let Some(existing) = results
+            .iter_mut()
+            .find(|existing| existing.item.id == row.item.id)
+        {
+            *existing = row;
+            continue;
+        }
+        let selected = results
+            .iter()
+            .position(|existing| existing.item.id == selected_id)
+            .unwrap_or(0);
+        let pos = scored_insert_pos(results, &row);
+        if pos >= selected {
+            results.insert(pos.min(results.len()), row);
+        } else {
+            results.push(row);
+        }
+    }
+}
+
+fn scored_insert_pos(results: &[Scored], row: &Scored) -> usize {
+    results.partition_point(|existing| {
+        existing.score > row.score
+            || (existing.score == row.score && existing.item.title <= row.item.title)
+    })
+}
+
+pub(crate) fn pin_weather_row_zero(results: &mut Vec<Scored>) {
+    if let Some(idx) = results.iter().position(|row| row.item.id == "live:weather")
+        && idx != 0
+    {
+        let row = results.remove(idx);
+        results.insert(0, row);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RankInput<'a> {
     query: &'a str,
+    q_lc: &'a str,
     item: &'a Item,
+    entry: &'a IndexEntry,
     usage: &'a usage::Map,
     now: u64,
     file_heavy: bool,
-    alias: Option<&'a str>,
     favorite: bool,
 }
 
 fn rank_expansions(
     matcher: &mut Matcher,
+    buf: &mut Vec<char>,
     expansions: &[String],
     input: RankInput<'_>,
 ) -> Option<u32> {
     for expansion in expansions {
         let expanded = Pattern::parse(expansion, CaseMatching::Smart, Normalization::Smart);
+        let exp_lc = expansion.to_lowercase();
         let mut next = input;
         next.query = expansion;
-        if let Some(score) = rank(matcher, &expanded, next) {
+        next.q_lc = &exp_lc;
+        if let Some(score) = rank(matcher, &expanded, buf, next) {
             return Some(score.saturating_sub(600));
         }
     }
@@ -1858,62 +2260,48 @@ fn nucleo_norm(raw: u32, text: &str) -> u32 {
     raw / len
 }
 
-fn nucleo_field(matcher: &mut Matcher, pattern: &Pattern, text: &str) -> u32 {
+fn nucleo_field(matcher: &mut Matcher, pattern: &Pattern, buf: &mut Vec<char>, text: &str) -> u32 {
     if text.is_empty() {
         return 0;
     }
-    let mut buf = Vec::new();
+    buf.clear();
     let raw = pattern
-        .score(Utf32Str::new(text, &mut buf), matcher)
+        .score(Utf32Str::new(text, buf), matcher)
         .unwrap_or(0);
     nucleo_norm(raw, text)
 }
 
-fn title_initials(title: &str) -> String {
-    title
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .filter_map(|word| word.chars().next())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
+fn rank(
+    matcher: &mut Matcher,
+    pattern: &Pattern,
+    buf: &mut Vec<char>,
+    input: RankInput<'_>,
+) -> Option<u32> {
+    let q_lc = input.q_lc;
+    let entry = input.entry;
 
-fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Option<u32> {
-    let title = input.item.title.as_str();
-    let title_lc = title.to_lowercase();
-    let q_lc = input.query.trim().to_lowercase();
-    let alias_lc = input.alias.map(|a| a.to_ascii_lowercase());
-    let keywords = match alias_lc.as_deref() {
-        Some(alias) if !alias.is_empty() => format!("{} {alias}", input.item.keywords),
-        _ => input.item.keywords.clone(),
-    };
-
-    let title_score = nucleo_field(matcher, pattern, title);
-    let keyword_score = nucleo_field(matcher, pattern, &keywords).saturating_mul(3) / 5;
+    let title_score = nucleo_field(matcher, pattern, buf, &input.item.title);
+    let keyword_score = nucleo_field(matcher, pattern, buf, &entry.keywords).saturating_mul(3) / 5;
     let subtitle_score =
-        nucleo_field(matcher, pattern, &input.item.subtitle).saturating_mul(3) / 10;
+        nucleo_field(matcher, pattern, buf, &entry.subtitle_lc).saturating_mul(3) / 10;
     let nucleo = title_score.max(keyword_score).max(subtitle_score);
 
-    let typo = typo_score(input.query, input.item).map(|s| s.min(TYPO_CAP));
-    let alias_hit = alias_lc
-        .as_deref()
-        .is_some_and(|alias| !q_lc.is_empty() && (alias == q_lc || alias.starts_with(&q_lc)));
+    let typo = typo_score(q_lc, entry).map(|s| s.min(TYPO_CAP));
+    let alias_hit = !entry.alias_lc.is_empty()
+        && !q_lc.is_empty()
+        && (entry.alias_lc == q_lc || entry.alias_lc.starts_with(q_lc));
 
-    let exact_title = !q_lc.is_empty() && title_lc == q_lc;
-    let title_prefix = !q_lc.is_empty() && title_lc.starts_with(&q_lc);
-    let word_prefix = !q_lc.is_empty()
-        && title_lc
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|word| word.starts_with(&q_lc));
-    let initials = !q_lc.is_empty() && {
-        let init = title_initials(title);
-        init == q_lc || (!init.is_empty() && init.starts_with(&q_lc))
-    };
-    let keyword_lc = keywords.to_lowercase();
+    let exact_title = !q_lc.is_empty() && entry.title_lc == q_lc;
+    let title_prefix = !q_lc.is_empty() && entry.title_lc.starts_with(q_lc);
+    let word_prefix = !q_lc.is_empty() && entry.words.iter().any(|word| word.starts_with(q_lc));
+    let initials = !q_lc.is_empty()
+        && (entry.initials == q_lc
+            || (!entry.initials.is_empty() && entry.initials.starts_with(q_lc)));
     let keyword_hit = !q_lc.is_empty()
-        && keyword_lc
+        && entry
+            .keywords_lc
             .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|word| word == q_lc || word.starts_with(&q_lc));
+            .any(|word| word == q_lc || word.starts_with(q_lc));
 
     let title_tier = if exact_title {
         TITLE_EXACT
@@ -1951,10 +2339,10 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
         Kind::File => 30,
         Kind::Calc | Kind::Web | Kind::Shell => 10,
     });
-    if let Some(alias) = alias_lc.as_deref() {
-        if !q_lc.is_empty() && alias == q_lc {
+    if !entry.alias_lc.is_empty() {
+        if !q_lc.is_empty() && entry.alias_lc == q_lc {
             score = score.saturating_add(50_000);
-        } else if !q_lc.is_empty() && alias.starts_with(&q_lc) {
+        } else if !q_lc.is_empty() && entry.alias_lc.starts_with(q_lc) {
             score = score.saturating_add(40_000);
         }
     }
@@ -1964,29 +2352,29 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
     Some(score)
 }
 
-fn typo_score(query: &str, item: &Item) -> Option<u32> {
-    if let Some(score) = intent::title_typo_score(query, &item.title) {
+fn typo_score(q_lc: &str, entry: &IndexEntry) -> Option<u32> {
+    if let Some(score) = intent::title_typo_score_lc(q_lc, &entry.title_lc) {
         return Some(score.min(TYPO_CAP));
     }
-    let q = query.trim().to_ascii_lowercase();
-    let title = item.title.to_ascii_lowercase();
-    if intent::is_adjacent_swap(&q, &title)
-        || title
-            .split_whitespace()
-            .next()
-            .is_some_and(|word| intent::is_adjacent_swap(&q, word))
+    if intent::is_adjacent_swap(q_lc, &entry.title_lc)
+        || entry
+            .words
+            .first()
+            .is_some_and(|word| intent::is_adjacent_swap(q_lc, word))
     {
         return Some(2_400);
     }
-    item.keywords
+    entry
+        .keywords_lc
         .split_whitespace()
-        .find_map(|word| intent::title_typo_score(query, word))
+        .find_map(|word| intent::title_typo_score_lc(q_lc, word))
         .map(|score| score.min(TYPO_CAP))
 }
 
 fn rank_file(
     matcher: &mut Matcher,
     pattern: &Pattern,
+    buf: &mut Vec<char>,
     query: &str,
     item: &Item,
     usage_map: &usage::Map,
@@ -1994,16 +2382,20 @@ fn rank_file(
 ) -> u32 {
     let path = std::path::Path::new(item.id.trim_start_matches("file:"));
     let type_search = files::parse_query(query).is_type_search();
+    let q_lc = query.to_lowercase();
+    let entry = IndexEntry::from_item(item, None);
     let nucleo = rank(
         matcher,
         pattern,
+        buf,
         RankInput {
             query,
+            q_lc: &q_lc,
             item,
+            entry: &entry,
             usage: usage_map,
             now,
             file_heavy: true,
-            alias: None,
             favorite: false,
         },
     )
@@ -2196,22 +2588,28 @@ fn live_mail(settings: &crate::config::Settings) -> Vec<Scored> {
     }
 }
 
-fn live_web(query: &str) -> Vec<Scored> {
-    match crate::web::fetch(query) {
+fn live_web(query: &str, settings: &Settings, best_title_bonus: u32) -> Vec<Scored> {
+    if !crate::web::should_fetch_web(query, best_title_bonus, &settings.web.provider) {
+        return Vec::new();
+    }
+    crate::web::debounce_live();
+    if crate::files::cancelled() {
+        return Vec::new();
+    }
+    match crate::web::fetch_with(query, &settings.web.provider) {
         Ok(rows) => {
-            let mut out: Vec<Scored> = rows
-                .into_iter()
+            let rows = crate::web::with_browser_fallback(query, rows);
+            rows.into_iter()
                 .enumerate()
                 .map(|(i, (item, live))| {
-                    Scored::with_live(item, 40_000u32.saturating_sub(i as u32 * 10), live)
+                    let score = if item.id.starts_with("search:browser:") {
+                        if i == 0 { 500 } else { 300 }
+                    } else {
+                        40_000u32.saturating_sub(i as u32 * 10)
+                    };
+                    Scored::with_live(item, score, live)
                 })
-                .collect();
-            if out.is_empty() {
-                out.push(Scored::new(crate::web::browser_fallback(query), 500));
-            } else {
-                out.push(Scored::new(crate::web::browser_fallback(query), 300));
-            }
-            out
+                .collect()
         }
         Err(_) => vec![Scored::new(crate::web::browser_fallback(query), 500)],
     }
@@ -2345,6 +2743,10 @@ mod tests {
     use crate::item::{Action, Icon, Item, Kind};
     use crate::mode::Mode;
 
+    fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
+        super::live_needed_for(query, mode, include_in_root, "ddg-html", 0)
+    }
+
     #[test]
     fn math_detection() {
         assert!(crate::calc::looks_like_math("2+2"));
@@ -2402,55 +2804,47 @@ mod tests {
             "calendar questions must stay in Flint"
         );
         assert!(
-            !super::live_needed("firefox", crate::mode::Mode::Root, true),
+            !live_needed("firefox", crate::mode::Mode::Root, true),
             "an app name must not schedule a worker"
         );
         assert!(
-            !super::live_needed("smile", crate::mode::Mode::Root, true),
+            !live_needed("smile", crate::mode::Mode::Root, true),
             "emoji keywords stay in-memory"
         );
         assert!(
-            !super::live_needed("we", crate::mode::Mode::Windows, true),
+            !live_needed("we", crate::mode::Mode::Windows, true),
             "window mode is in-memory now — no live pass"
         );
     }
 
     #[test]
     fn live_needed_is_files_or_uncached_weather() {
-        assert!(super::live_needed(
-            "markdown",
-            crate::mode::Mode::Root,
-            true
-        ));
-        assert!(super::live_needed("", crate::mode::Mode::Files, false));
-        assert!(!super::live_needed(
+        assert!(live_needed("markdown", crate::mode::Mode::Root, true));
+        assert!(live_needed("", crate::mode::Mode::Files, false));
+        assert!(!live_needed(
             "clip rust",
             crate::mode::Mode::Clipboard,
             true
         ));
         if crate::weather::cached().is_none() {
-            assert!(super::live_needed("we", crate::mode::Mode::Root, false));
+            assert!(live_needed("we", crate::mode::Mode::Root, false));
         }
-        assert!(super::live_needed(
+        assert!(
+            live_needed("weather", crate::mode::Mode::Root, false),
+            "weather intent refreshes while the launcher is open, even with a cache"
+        );
+        assert!(live_needed(
             "content:needle",
             crate::mode::Mode::Root,
             false
         ));
-        assert!(super::live_needed(
-            "in:secret",
-            crate::mode::Mode::Root,
-            false
-        ));
-        assert!(super::live_needed(
+        assert!(live_needed("in:secret", crate::mode::Mode::Root, false));
+        assert!(live_needed(
             "file content invoices",
             crate::mode::Mode::Files,
             false
         ));
-        assert!(!super::live_needed(
-            "contentment",
-            crate::mode::Mode::Root,
-            false
-        ));
+        assert!(!live_needed("contentment", crate::mode::Mode::Root, false));
     }
 
     #[test]
@@ -2661,40 +3055,8 @@ mod tests {
                 last: now - 2 * 365 * 24 * 3600,
             },
         );
-        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
-        let pattern = nucleo_matcher::pattern::Pattern::parse(
-            "we",
-            nucleo_matcher::pattern::CaseMatching::Smart,
-            nucleo_matcher::pattern::Normalization::Smart,
-        );
-        let weather_score = super::rank(
-            &mut matcher,
-            &pattern,
-            super::RankInput {
-                query: "we",
-                item: &weather,
-                usage: &usage,
-                now,
-                file_heavy: false,
-                alias: None,
-                favorite: false,
-            },
-        )
-        .unwrap();
-        let web_score = super::rank(
-            &mut matcher,
-            &pattern,
-            super::RankInput {
-                query: "we",
-                item: &web,
-                usage: &usage,
-                now,
-                file_heavy: false,
-                alias: None,
-                favorite: false,
-            },
-        )
-        .unwrap();
+        let weather_score = rank_item("we", &weather, &usage, now);
+        let web_score = rank_item("we", &web, &usage, now);
         assert!(
             weather_score > web_score,
             "yesterday's Weather ({weather_score}) should beat 200 ancient Web uses ({web_score})"
@@ -2714,28 +3076,10 @@ mod tests {
             icon: Icon::None,
             action: Action::Copy(String::new()),
         };
-        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
-        let pattern = nucleo_matcher::pattern::Pattern::parse(
-            "weahter",
-            nucleo_matcher::pattern::CaseMatching::Smart,
-            nucleo_matcher::pattern::Normalization::Smart,
-        );
         let usage = crate::usage::Map::new();
-        let score = super::rank(
-            &mut matcher,
-            &pattern,
-            super::RankInput {
-                query: "weahter",
-                item: &item,
-                usage: &usage,
-                now: 1_800_000_000,
-                file_heavy: false,
-                alias: None,
-                favorite: false,
-            },
-        );
+        let score = rank_item("weahter", &item, &usage, 1_800_000_000);
         assert!(
-            score.is_some(),
+            score > 0,
             "weahter must match Weather (transposition), not only missing letters"
         );
     }
@@ -2800,11 +3144,7 @@ mod tests {
                 .map(|r| (&r.item.title, format!("{:?}", r.item.action)))
                 .collect::<Vec<_>>()
         );
-        assert!(super::live_needed(
-            "gif cats",
-            crate::mode::Mode::Gif,
-            false
-        ));
+        assert!(live_needed("gif cats", crate::mode::Mode::Gif, false));
     }
 
     #[test]
@@ -2867,9 +3207,9 @@ mod tests {
     }
 
     fn test_catalog(apps: Vec<Item>) -> super::Catalog {
-        let mut haystacks = std::collections::HashMap::new();
+        let mut index = std::collections::HashMap::new();
         for item in &apps {
-            haystacks.insert(item.id.clone(), item.haystack());
+            index.insert(item.id.clone(), super::IndexEntry::from_item(item, None));
         }
         super::Catalog {
             apps,
@@ -2877,13 +3217,21 @@ mod tests {
             extensions: Vec::new(),
             installed: std::cell::RefCell::new(Vec::new()),
             lexicon: Vec::new(),
-            haystacks: std::cell::RefCell::new(haystacks),
+            index: std::cell::RefCell::new(index),
+            aliases: std::cell::RefCell::new(crate::alias::Store::default()),
+            favorites: std::cell::RefCell::new(crate::favorites::Store::default()),
+            quicklinks: std::cell::RefCell::new(Vec::new()),
+            custom_layouts: std::cell::RefCell::new(Vec::new()),
             windows: std::cell::RefCell::new(Vec::new()),
             matcher: std::cell::RefCell::new(nucleo_matcher::Matcher::new(
                 nucleo_matcher::Config::DEFAULT,
             )),
+            nucleo_buf: std::cell::RefCell::new(Vec::new()),
+            context: std::cell::RefCell::new(crate::context::Context::default()),
+            app_tags: std::cell::RefCell::new(std::collections::HashMap::new()),
             usage: crate::usage::Map::new(),
             choices: crate::choices::Map::new(),
+            choice_ctx: crate::choices::ContextMap::new(),
             clips: std::rc::Rc::new(std::cell::RefCell::new(crate::clipboard::Store::default())),
             settings: std::rc::Rc::new(std::cell::RefCell::new(crate::config::Settings::default())),
         }
@@ -2896,16 +3244,21 @@ mod tests {
             nucleo_matcher::pattern::CaseMatching::Smart,
             nucleo_matcher::pattern::Normalization::Smart,
         );
+        let entry = super::IndexEntry::from_item(item, None);
+        let q_lc = query.trim().to_lowercase();
+        let mut buf = Vec::new();
         super::rank(
             &mut matcher,
             &pattern,
+            &mut buf,
             super::RankInput {
                 query,
+                q_lc: &q_lc,
                 item,
+                entry: &entry,
                 usage,
                 now,
                 file_heavy: false,
-                alias: None,
                 favorite: false,
             },
         )
@@ -3108,6 +3461,303 @@ mod tests {
     }
 
     #[test]
+    fn mix_limit_honors_max_results() {
+        let apps: Vec<Item> = (0..40)
+            .map(|i| test_item(&format!("app:{i}"), &format!("Widget{i:02}"), "app"))
+            .collect();
+        let catalog = test_catalog(apps);
+        catalog.settings.borrow_mut().general.max_results = 8;
+        let rows = catalog.search_root("wid");
+        assert!(
+            rows.len() <= 8,
+            "max_results=8 must not floor at 24, got {} rows: {:?}",
+            rows.len(),
+            rows.iter().map(|r| &r.item.id).collect::<Vec<_>>()
+        );
+        assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn alias_is_indexed_into_keywords() {
+        crate::db::with_temp(|_| {
+            let slack = test_item("app:slack", "Slack", "");
+            let catalog = test_catalog(vec![slack]);
+            catalog.set_alias("app:slack", "slx");
+            let entry = catalog.index.borrow().get("app:slack").cloned().unwrap();
+            assert!(
+                entry.keywords_lc.split_whitespace().any(|w| w == "slx"),
+                "alias must land in keywords_lc, got {:?}",
+                entry.keywords_lc
+            );
+            let rows = catalog.search_root("slx");
+            assert_eq!(rows[0].item.id, "app:slack");
+            assert!(rows[0].score >= super::TIER_ALIAS);
+        });
+    }
+
+    fn scored(item: Item, score: u32) -> super::Scored {
+        super::Scored::new(item, score)
+    }
+
+    #[test]
+    fn live_rows_do_not_jump_above_selection() {
+        let mut results = vec![
+            scored(test_item("app:a", "A", ""), 10_000),
+            scored(test_item("app:b", "B", ""), 9_000),
+            scored(test_item("app:c", "C", ""), 8_000),
+        ];
+        let incoming = vec![scored(test_item("file:hot", "Hot", ""), 20_000)];
+        super::insert_live_stable(&mut results, incoming, "app:b");
+        assert_eq!(results[0].item.id, "app:a");
+        assert_eq!(results[1].item.id, "app:b");
+        assert_eq!(
+            results.last().map(|r| r.item.id.as_str()),
+            Some("file:hot"),
+            "a higher-score live row must append when it would land above the selection"
+        );
+    }
+
+    #[test]
+    fn live_rows_insert_at_or_below_selection() {
+        let mut results = vec![
+            scored(test_item("app:a", "A", ""), 10_000),
+            scored(test_item("app:b", "B", ""), 9_000),
+            scored(test_item("app:c", "C", ""), 1_000),
+        ];
+        let incoming = vec![scored(test_item("file:mid", "Mid", ""), 5_000)];
+        super::insert_live_stable(&mut results, incoming, "app:b");
+        let ids: Vec<&str> = results.iter().map(|r| r.item.id.as_str()).collect();
+        assert_eq!(ids, vec!["app:a", "app:b", "file:mid", "app:c"]);
+    }
+
+    #[test]
+    fn live_weather_stays_at_row_zero() {
+        let mut results = vec![
+            scored(
+                Item {
+                    id: "live:weather".into(),
+                    title: "Weather".into(),
+                    subtitle: "Detecting…".into(),
+                    keywords: String::new(),
+                    kind: Kind::Weather,
+                    icon: Icon::None,
+                    action: Action::Copy(String::new()),
+                },
+                super::TIER_WEATHER,
+            ),
+            scored(test_item("app:a", "A", ""), 10_000),
+        ];
+        let incoming = vec![scored(test_item("file:hot", "Hot", ""), 200_000)];
+        super::insert_live_stable(&mut results, incoming, "live:weather");
+        super::pin_weather_row_zero(&mut results);
+        assert_eq!(results[0].item.id, "live:weather");
+    }
+
+    #[test]
+    fn empty_query_offers_fresh_clipboard_actions() {
+        let catalog = test_catalog(Vec::new());
+        catalog.settings.borrow_mut().general.context_aware = true;
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "firefox".into(),
+            title: String::new(),
+            primary: Some("hello world".into()),
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("");
+        let ids: Vec<&str> = rows.iter().map(|r| r.item.id.as_str()).collect();
+        assert!(ids.contains(&"ctx:paste"), "paste chip: {ids:?}");
+        assert!(
+            ids.iter().any(|id| id.starts_with("ctx:web:")),
+            "web chip: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.starts_with("ctx:ask:")),
+            "ask chip: {ids:?}"
+        );
+
+        catalog.settings.borrow_mut().general.context_aware = false;
+        let rows = catalog.search_root("");
+        let ids: Vec<&str> = rows.iter().map(|r| r.item.id.as_str()).collect();
+        assert!(
+            !ids.iter().any(|id| id.starts_with("ctx:")),
+            "context off hides clipboard chips: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn empty_query_prefers_fresh_clipboard_over_primary() {
+        let catalog = test_catalog(Vec::new());
+        catalog
+            .clips
+            .borrow_mut()
+            .entries
+            .push(crate::clipboard::Entry {
+                id: "c1".into(),
+                text: "from clip".into(),
+                copied_at: crate::usage::now_secs(),
+                pinned: false,
+                label: String::new(),
+            });
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "code".into(),
+            title: String::new(),
+            primary: Some("from primary".into()),
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("");
+        let paste = rows
+            .iter()
+            .find(|r| r.item.id == "ctx:paste")
+            .expect("paste");
+        assert_eq!(paste.item.subtitle, "from clip");
+    }
+
+    #[test]
+    fn empty_query_seeds_editor_path_from_title() {
+        let dir = std::env::temp_dir().join(format!(
+            "flint-ctx-cat-{}-{}",
+            std::process::id(),
+            crate::usage::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.rs");
+        std::fs::write(&file, b"fn").unwrap();
+        let catalog = test_catalog(Vec::new());
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "code".into(),
+            title: format!("{} — Visual Studio Code", file.display()),
+            primary: None,
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("");
+        let _ = std::fs::remove_dir_all(&dir);
+        let want = format!("file:{}", file.display());
+        assert!(
+            rows.iter().any(|r| r.item.id == want),
+            "editor file missing from {ids:?}",
+            ids = rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn context_class_choice_beats_global() {
+        let firefox = test_item("app:firefox", "Firefox", "browser");
+        let code = test_item("app:code", "Code", "editor");
+        let mut catalog = test_catalog(vec![firefox, code]);
+        let rec = crate::usage::Record {
+            count: 2,
+            last: crate::usage::now_secs() - 60,
+        };
+        catalog
+            .choices
+            .entry("ed".into())
+            .or_default()
+            .insert("app:firefox".into(), rec);
+        catalog
+            .choice_ctx
+            .entry("kitty".into())
+            .or_default()
+            .entry("ed".into())
+            .or_default()
+            .insert("app:code".into(), rec);
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "kitty".into(),
+            title: String::new(),
+            primary: None,
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("ed");
+        assert_eq!(
+            rows[0].item.id,
+            "app:code",
+            "(query, class) must beat global (query, \"\"): {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+
+        catalog.settings.borrow_mut().general.context_aware = false;
+        let rows = catalog.search_root("ed");
+        assert_eq!(
+            rows[0].item.id, "app:firefox",
+            "context off falls back to global choice"
+        );
+    }
+
+    #[test]
+    fn matching_app_tag_boosts_item() {
+        let a = test_item("app:alpha", "Alpha Helper", "");
+        let b = test_item("app:beta", "Alpha Tools", "");
+        let catalog = test_catalog(vec![a, b]);
+        catalog
+            .app_tags
+            .borrow_mut()
+            .insert("app:beta".into(), "firefox".into());
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "Firefox".into(),
+            title: String::new(),
+            primary: None,
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("alpha");
+        assert_eq!(
+            rows[0].item.id,
+            "app:beta",
+            "app tag matching focused class should win: {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_root_search_p95() {
+        let apps: Vec<Item> = (0..500)
+            .map(|i| {
+                test_item(
+                    &format!("app:{i}"),
+                    &format!("App Title {i} Extra Words"),
+                    "launcher desktop command",
+                )
+            })
+            .collect();
+        let catalog = test_catalog(apps);
+        let queries: Vec<String> = (0..50)
+            .map(|i| match i % 10 {
+                0 => "app".into(),
+                1 => "ti".into(),
+                2 => format!("App Title {i}"),
+                3 => "zzzmissing".into(),
+                4 => "extra".into(),
+                5 => "command".into(),
+                6 => "ap".into(),
+                7 => format!("title {i}"),
+                8 => "desk".into(),
+                _ => "a".into(),
+            })
+            .collect();
+        for q in &queries {
+            let _ = catalog.search_root(q);
+        }
+        let mut times: Vec<std::time::Duration> = Vec::with_capacity(queries.len());
+        for q in &queries {
+            let start = std::time::Instant::now();
+            let _ = catalog.search_root(q);
+            times.push(start.elapsed());
+        }
+        times.sort();
+        let p50 = times[times.len() / 2];
+        let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)];
+        println!(
+            "root search 500 items × 50 queries: p50={:?} p95={:?}",
+            p50, p95
+        );
+        if !cfg!(debug_assertions) {
+            assert!(
+                p95.as_secs_f64() * 1000.0 < 2.0,
+                "p95 {p95:?} exceeds 2 ms target"
+            );
+        }
+    }
+
+    #[test]
     fn today_file_beats_old_better_name() {
         use std::fs;
         use std::time::{Duration, SystemTime};
@@ -3140,8 +3790,25 @@ mod tests {
         );
         let usage = crate::usage::Map::new();
         let now = crate::usage::now_secs();
-        let old_score = super::rank_file(&mut matcher, &pattern, "video", &old_item, &usage, now);
-        let new_score = super::rank_file(&mut matcher, &pattern, "video", &new_item, &usage, now);
+        let mut buf = Vec::new();
+        let old_score = super::rank_file(
+            &mut matcher,
+            &pattern,
+            &mut buf,
+            "video",
+            &old_item,
+            &usage,
+            now,
+        );
+        let new_score = super::rank_file(
+            &mut matcher,
+            &pattern,
+            &mut buf,
+            "video",
+            &new_item,
+            &usage,
+            now,
+        );
         let _ = fs::remove_dir_all(&dir);
         assert!(
             new_score > old_score,
@@ -3164,5 +3831,109 @@ mod tests {
         unsafe {
             libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0);
         }
+    }
+
+    #[test]
+    fn inline_ask_only_on_ask_intent_or_prefix() {
+        assert_eq!(
+            super::inline_ask_prompt("? what is rust"),
+            Some("what is rust".into())
+        );
+        assert_eq!(
+            super::inline_ask_prompt("ask summarize this"),
+            Some("summarize this".into())
+        );
+        assert!(super::inline_ask_prompt("?").is_none());
+        assert!(super::inline_ask_prompt("firefox").is_none());
+        assert!(super::inline_ask_prompt("1+1").is_none());
+        assert!(super::inline_ask_prompt("what is rust?").is_some());
+    }
+
+    #[test]
+    fn calc_and_color_rows_expose_inline_answers() {
+        let catalog = test_catalog(Vec::new());
+        let plus = catalog.search_root("1+1");
+        let calc = plus
+            .iter()
+            .find(|r| r.item.kind == Kind::Calc)
+            .expect("calc");
+        assert_eq!(calc.item.inline_answer().as_deref(), Some("2"));
+        let rgb = catalog.search_root("rgb(255, 90, 31)");
+        let color = rgb
+            .iter()
+            .find(|r| r.item.id.starts_with("color:"))
+            .expect("color");
+        assert_eq!(color.item.inline_answer().as_deref(), Some("#ff5a1f"));
+        assert!(matches!(
+            color.item.action,
+            Action::Copy(ref hex) if hex == "#ff5a1f"
+        ));
+    }
+
+    #[test]
+    fn web_catalog_trigger_rules() {
+        use crate::mode::Mode;
+        assert!(
+            !live_needed("firefox", Mode::Root, true),
+            "single-token app names must not schedule web"
+        );
+        assert!(live_needed("search rust", Mode::Root, true));
+        assert!(live_needed("best pizza berlin", Mode::Root, true));
+        assert!(live_needed("install rustc?", Mode::Root, true));
+        assert!(!crate::web::should_fetch_web("search rust", 0, "off"));
+        assert!(!super::live_needed_for(
+            "search rust",
+            Mode::Root,
+            false,
+            "off",
+            0
+        ));
+        assert!(!crate::web::should_fetch_web(
+            "best pizza berlin",
+            crate::web::TITLE_PREFIX_BONUS,
+            "ddg-html"
+        ));
+
+        // Unique title so CI images with `firefox` on PATH cannot inject `path:firefox`.
+        let app = test_item("app:flintwebtrigger", "FlintWebTrigger", "browser");
+        let catalog = test_catalog(vec![app]);
+        let rows = catalog.search_root("flintwebtrigger");
+        assert_eq!(
+            rows[0].item.id,
+            "app:flintwebtrigger",
+            "app match stays above web placeholder, got {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+        let web_at = rows
+            .iter()
+            .position(|row| row.item.id.starts_with("search:"));
+        if let Some(web_at) = web_at {
+            assert!(web_at > 0, "web fallback must stay below the app match");
+        }
+
+        let hits = vec![
+            crate::web::Hit {
+                title: "First".into(),
+                snippet: "one".into(),
+                url: "https://example.com/a".into(),
+            },
+            crate::web::Hit {
+                title: "Second".into(),
+                snippet: "two".into(),
+                url: "https://example.com/b".into(),
+            },
+        ];
+        let ordered: Vec<Item> =
+            crate::web::with_browser_fallback("best pizza berlin", crate::web::hits_to_rows(&hits))
+                .into_iter()
+                .map(|(item, _)| item)
+                .collect();
+        assert_eq!(ordered[0].title, "First");
+        assert_eq!(ordered[1].title, "Second");
+        assert!(
+            ordered.last().unwrap().id.starts_with("search:browser:"),
+            "browser fallback last"
+        );
+        assert!(ordered.iter().all(|item| item.kind == Kind::Web));
     }
 }

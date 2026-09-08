@@ -10,7 +10,7 @@ Flint stays resident: the first launch keeps a daemon so clipboard history, note
 
 Flint opens as a normal desktop window. Under Hyprland it floats centered at
 980×400 on the first frame (`no_anim` so it does not tile large then shrink),
-then grows with the results (weather card, agenda, GIFs, Instant Answers, Ask
+then grows with the results (weather card, agenda, GIFs, web results, Ask
 transcript) up to about 980×900. It stays resizable, with a title bar; closing
 the window hides it while the resident process remains warm. Copy
 [`share/hyprland.conf`](share/hyprland.conf) for the compositor rules, or let
@@ -80,17 +80,20 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Type `we` and Flint already means weather: it geolocates you and fills in the current conditions. Full sentences work too: “what’s the weather”, “is it going to rain”, “what’s on my calendar today”, “what’s in my inbox”.
 - Apps, calc, commands, and windows paint on the same keystroke. Windows come from the Hyprland event socket, not a poll. Nothing else is scheduled unless you actually asked for a file or live weather.
 - Ranking cares when you last used something, not just how many times. An app from yesterday beats one you hammered two years ago. Typing the start of a name is no longer 200× heavier than a habit.
-- After you pick a result for a query, Flint remembers it (`sl` → Slack). The next time that query (or a prefix of it) is typed, that item is row 0 — except a complete calc expression, which stays on top. **Clear learned choices** (keyword `forget`) drops that map.
+- After you pick a result for a query, Flint remembers it (`sl` → Slack). The next time that query (or a prefix of it) is typed, that item is row 0 — except a complete calc expression, which stays on top. With **Context-aware search** (default on), a pick while Firefox is focused is remembered for Firefox first, then for any app. **Clear learned choices** (keyword `forget`) drops that map.
+- Opening Flint snapshots the focused Hyprland window (class and title) before the launcher is shown. Layouts, quicklinks, and snippets may set an optional `app` field; matching the focused class boosts them. An empty query also offers Paste / Search / Ask on clipboard text copied in the last 10 seconds, and a file row when the focused editor title contains a real path. Turn this off with `set:context` or Settings.
 - Title matches beat subtitle and keyword hits. Kind labels (`APP`, `FILE`) are not searchable. Exact title > prefix > word/initials (`vsc`, `gc`) > keywords. Nucleo scores are divided by title length so long names do not inflate rank.
 - Ties break by last-used time, then title. Emoji stay out of ordinary app queries; type-words like `video` reserve the top rows for files; `weather` is live weather on the first frame, not ☔.
 - Swapped letters count (`weahter` → weather). Missing letters still do (`wthr` → weather).
 - A result can *show* something: live weather, a photo or video thumb, a document snippet. That is not the same as an icon, a title, and Enter.
 - Misspellings are handled across apps, files, types, notes, and settings — not a fixed example list. `markdwon` still finds markdown, `readne` still finds `readme.md`, `firfox` still ranks Firefox if that app is installed.
-- Selecting a result also fills the side preview: images, video frames, audio cover art and tags, the start of a document, a folder listing, or a play prompt. Enter or Space plays media in your default player; Enter opens other files in your editor.
+- Selecting a result also fills the side preview: images, video frames, audio cover art and tags, the start of a document, a folder listing, or in-pane playback when GStreamer is installed. Space play/pauses video or enlarges an image; Esc returns to the list; Enter opens the default player. `media.hide_on_external_play` (default off) hides Flint only if you want that.
 - Thumbs reuse the Freedesktop cache (`~/.cache/thumbnails/large/`) when another app has already generated them.
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
-- Calculator, unit conversion (`10 km to mi`, `32f`), hex and `rgb()` colors (`#ff5a1f`, `rgb(255, 90, 31)`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
+- Calculator, unit conversion (`10 km to mi`, `32f`), hex and `rgb()` colors (`#ff5a1f`, `rgb(255, 90, 31)`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers. The result is right-aligned on the row; Enter copies calc/convert/color without closing Flint.
+- `?` / `ask` / a question in root streams the first ~120 characters of the model reply onto the Ask row (250 ms after you pause). Enter still opens the transcript. Changing the query cancels the stream.
+- Web results (DuckDuckGo HTML, 300 ms debounce, cap 6) appear on a Web intent, a trailing `?`, or a three-word query with no title-prefix app hit. Instant Answers prepend when present. A browser row is last. Single-token app names never fetch. Settings: **Web search** / `set:web` / `web.provider` (`ddg-html`, `instant`, `off`).
 - Emoji by name or `:shortcode:` (`smile`, `:fire:`). Time in a city (`time in tokyo`) or a difference (`nyc vs london`) uses a static offset table, not DST.
 - `tr fr hello`, `translate es …`, `en:de thanks`, and `define widget` are Ask AI prompts (output only the translation or definition).
 - `content:needle` or `in:needle` searches file contents with ripgrep (`--max-count 1` over home and extra folders). Typing an app name never starts ripgrep or OCR.
@@ -102,9 +105,11 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Screenshot, region, record, and annotate (grim / slurp / wf-recorder / satty). Switch display resolution from `hyprctl` modes.
 - Snippets expand `{clipboard}`, `{date}`, `{time}`, `{datetime}`, `{day}`, `{increment}`, and strip `{cursor}` on paste.
 - Quicklinks (`link`) open URLs, folders, or files. `{argument}` / `{Query}` is the rest of the query after the keyword. `+gh https://github.com/search?q={argument}` saves one. Defaults: Downloads, Documents, GitHub search.
-- Aliases: in the action panel, type a nickname then run **Set alias**. If the filter is empty, Flint puts `alias:` in the search box — finish the name and Enter. Aliases boost root ranking and match in the haystack.
+- Aliases: in the action panel, type a nickname then run **Set alias**. If the filter is empty, Flint puts `alias:` in the search box — finish the name and Enter. Aliases boost root ranking and match as keywords.
 - Pin favorites from the action panel; they float to the top of an empty root list.
-- Result caps live in Settings (`max-results`) and `~/.config/flint/config.json` under `general.max_results` and `files.max_results`. Extra folders go in `files.search_roots`.
+- Result caps live in Settings (`max-results`) and `~/.config/flint/config.json` under `general.max_results` and `files.max_results`. Root search uses `general.max_results` as written (no hidden floor of 24). Extra folders go in `files.search_roots`.
+- Aliases, favorites, quicklinks, and custom layouts are loaded into memory with the catalog. Typing does not re-read `flint.db`; changing an alias or pin from the action panel updates the in-memory index on the same frame.
+- Live file / GIF / calendar / mail / web rows never reshuffle the list you are already looking at. They insert at their scored position only when that is at or below the current selection; otherwise they append. Weather stays on row 0 while that intent is active.
 
 ## Honest status
 
@@ -113,6 +118,8 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 | Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, window layouts, quit/uninstall, screenshot/record, display resolution, settings, store browse | Extensions: `List`, `Detail`, `Form` as a list of fields, `confirmAlert`, `getSelectedText` (primary paste). No `Grid` layout, menu-bar, extension OAuth, AT-SPI app-menu search, or preference editing |
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
+| In-app DuckDuckGo HTML results (Instant Answer as a bonus first row) | `searxng` / Brave API keys are not wired; those `web.provider` values use DuckDuckGo HTML. Set `web.provider` to `off` to disable |
+| In-pane `gtk4::Video` / `MediaFile` when GStreamer is on the system | No hard GStreamer link; missing plugins fall back to the default player |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
 | PKCE OAuth + loopback `127.0.0.1` + refresh tokens | Ask AI can call native Flint tools (calendar, weather, iCloud inbox, Instant Answers). MCP stays a prompt primer and cannot run `tools/call`. MCP spawn is **off by default** |
 
@@ -164,6 +171,7 @@ Flint runs Vicinae and Raycast-style extensions as one Node process per command.
 
 - Config, credential fallbacks, snippets, notes, and clipboard files are mode `600` under directories mode `700`
 - Clipboard history skips common secret patterns (API keys, tokens, PEM blocks)
+- Context-aware search (default on) keeps the focused Hyprland class/title in memory at show-time and may store class next to a learned query; titles are not stored. Off disables that. Never AT-SPI
 - Attaching clipboard to Ask AI redacts the same patterns
 - HTTPS AI / OAuth calls keep bearer tokens out of `ps` (curl `-K` config file, then deleted)
 - Unsigned script-commands, MCP process spawn, and installed extensions are off until you turn them on; extensions run as Node with your user's privileges
@@ -178,7 +186,7 @@ See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
 - Config: `~/.config/flint/config.json`
 - Auth metadata or credential fallback: `~/.config/flint/auth.json`
 - API-key fallback (when no Secret Service is available): `~/.config/flint/api-keys.json`
-- User store: `~/.local/share/flint/flint.db` (clips, notes, snippets, aliases, favorites, calc history, usage, learned choices, quicklinks, layouts, quit-keep). Existing `*.json` files are imported once and renamed to `*.json.bak`
+- User store: `~/.local/share/flint/flint.db` (clips, notes, snippets, aliases, favorites, calc history, usage, learned choices, per-app `choice_context`, quicklinks, layouts, quit-keep). Existing `*.json` files are imported once and renamed to `*.json.bak`
 - Extension runtime: `~/.local/share/flint/runtime/` · installed extensions: `~/.local/share/flint/store/vicinae/<name>/` · their storage: `~/.local/share/flint/extensions/<name>/`
 
 Existing Rayblast files are copied over on first launch. Stale Rayblast defaults (OpenAI provider + Ollama endpoint, “You are Rayblast”, `voice.engine: voxtype`) are rewritten to Flint defaults.

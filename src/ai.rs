@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -523,6 +523,87 @@ pub fn chat(settings: &Settings, history: &[Turn], prompt: &str) -> Result<Reply
     }
 }
 
+/// Token-by-token preview. Local Ollama over HTTP streams NDJSON; other
+/// providers emit one chunk from a normal `ask`. `emit` returning false cancels.
+pub fn ask_stream(
+    prompt: &str,
+    settings: &Settings,
+    mut emit: impl FnMut(&str) -> bool,
+) -> Result<Reply, String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err("Ask something first".into());
+    }
+    let url = chat_url(&settings.ai.endpoint, "/api/chat");
+    let local_http = matches!(settings.ai.provider.as_str(), "ollama" | "")
+        && parse_url(&url).is_ok_and(|u| !u.tls);
+    if local_http {
+        return ollama_stream(settings, prompt, emit);
+    }
+    let reply = ask(prompt, settings)?;
+    if !reply.text.is_empty() {
+        let _ = emit(&reply.text);
+    }
+    Ok(reply)
+}
+
+fn ollama_stream(
+    settings: &Settings,
+    prompt: &str,
+    mut emit: impl FnMut(&str) -> bool,
+) -> Result<Reply, String> {
+    let url = chat_url(&settings.ai.endpoint, "/api/chat");
+    let system = compose_system(settings);
+    let body = json!({
+        "model": settings.ai.model,
+        "stream": true,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+    });
+    let mut acc = String::new();
+    http_ndjson("POST", &url, &body, &[], |line| {
+        if line.is_empty() {
+            return true;
+        }
+        let Ok(raw) = serde_json::from_str::<Value>(line) else {
+            return true;
+        };
+        let chunk = raw
+            .pointer("/message/content")
+            .and_then(Value::as_str)
+            .or_else(|| raw.get("response").and_then(Value::as_str))
+            .unwrap_or("");
+        if chunk.is_empty() {
+            return true;
+        }
+        let delta = fold_stream_delta(&mut acc, chunk);
+        if delta.is_empty() {
+            return true;
+        }
+        emit(&delta)
+    })?;
+    if acc.is_empty() {
+        return Err("Ollama returned an empty answer".into());
+    }
+    Ok(Reply {
+        text: acc,
+        source: format!("Ollama · {}", settings.ai.model),
+    })
+}
+
+fn fold_stream_delta(acc: &mut String, chunk: &str) -> String {
+    if chunk.starts_with(acc.as_str()) {
+        let delta = chunk[acc.len()..].to_string();
+        acc.push_str(&delta);
+        delta
+    } else {
+        acc.push_str(chunk);
+        chunk.to_string()
+    }
+}
+
 fn title_from(prompt: &str) -> String {
     let line = prompt
         .lines()
@@ -887,6 +968,63 @@ fn http_json(
     serde_json::from_str(&raw[json_start..]).map_err(|e| format!("Bad JSON: {e}"))
 }
 
+fn http_ndjson(
+    method: &str,
+    url: &str,
+    body: &Value,
+    extra_headers: &[(&str, &str)],
+    mut on_line: impl FnMut(&str) -> bool,
+) -> Result<(), String> {
+    let parsed = parse_url(url)?;
+    if parsed.tls {
+        return Err("NDJSON stream needs a local HTTP endpoint".into());
+    }
+    if extra_headers.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key")
+    }) {
+        return Err("Refusing to send credentials over HTTP".into());
+    }
+    let payload = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+    let addr = format!("{}:{}", parsed.host, parsed.port);
+    let stream = TcpStream::connect_timeout(
+        &addr
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())?
+            .next()
+            .ok_or("Could not resolve AI endpoint")?,
+        Duration::from_secs(8),
+    )
+    .map_err(|e| format!("Connect failed: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(60))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+    let mut stream = stream;
+    write_request(&mut stream, method, &parsed, &payload, extra_headers)?;
+    let mut reader = BufReader::new(stream);
+    let mut header = String::new();
+    loop {
+        header.clear();
+        let n = reader.read_line(&mut header).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        if header == "\r\n" || header == "\n" {
+            break;
+        }
+    }
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        if !on_line(line.trim_end_matches(['\r', '\n'])) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 struct Url {
     host: String,
     port: u16,
@@ -1057,8 +1195,8 @@ fn write_request<W: Write>(
 mod tests {
     use super::{
         Attachment, Turn, attach, attach_clipboard, chat_messages, chat_url, command_items,
-        compose_system, compose_user, ensure_thread, history, new_chat, parse_url,
-        peek_attachments, reset, resume, selection_items, thread_items,
+        compose_system, compose_user, ensure_thread, fold_stream_delta, history, new_chat,
+        parse_url, peek_attachments, reset, resume, selection_items, thread_items,
     };
     use crate::config::Settings;
     use crate::db;
@@ -1256,5 +1394,15 @@ mod tests {
         let system = compose_system(&settings);
         assert!(system.contains("Flint"));
         assert!(!system.contains("Connected MCP servers"));
+    }
+
+    #[test]
+    fn stream_delta_handles_accumulated_and_incremental() {
+        let mut acc = String::new();
+        assert_eq!(fold_stream_delta(&mut acc, "Hel"), "Hel");
+        assert_eq!(fold_stream_delta(&mut acc, "Hello"), "lo");
+        assert_eq!(acc, "Hello");
+        assert_eq!(fold_stream_delta(&mut acc, "!"), "!");
+        assert_eq!(acc, "Hello!");
     }
 }

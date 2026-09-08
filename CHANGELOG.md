@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — in-pane media (Wave F)
+
+- Preview uses `gtk4::Video` + `MediaFile` when GStreamer is present at runtime (`dlopen` of `libgstreamer-1.0.so.0`). Flint does not link GStreamer. Without it, Space/Enter still use the default player.
+- Space play/pauses in the pane for audio/video, or enlarges an image. Esc returns to the list with the same query and selection. Enter always opens the external player.
+- `media.hide_on_external_play` defaults to **false** (Settings / `set:media-hide`). Query and selection restore on Hyprland `closewindow`, or `activewindow` when Flint is focused again.
+- The window grows to `WINDOW_HEIGHT_MAX` (900) via `fit_window` while the media/image pane is open.
+
+## Unreleased — real web results (Wave E)
+
+- In-app web rows use DuckDuckGo HTML (`web.provider = "ddg-html"`). An Instant Answer, when present, is a bonus first row; HTML hits follow (cap 6); **Open DuckDuckGo** stays last. `searxng` and `brave` are documented fallbacks and currently use the same HTML path (no extra API keys).
+- Fetch only on Web intent, a trailing `?` (not the Ask prefix `? `), or three-or-more words with no title-prefix fuzzy hit. A single-token app name such as `firefox` never starts a worker. 300 ms debounce; 60 s cache kept.
+- `web.provider = "off"` (Settings, `set:web`) skips every DuckDuckGo request. See [PRIVACY.md](PRIVACY.md).
+
+## Unreleased — inline answers (Wave D)
+
+- Result rows show a right-aligned answer (first 120 characters) for calc, unit conversion, color, timezone, and weather. Color rows include a hex swatch. Enter copies calc/convert/color and stays in the launcher; the preview pane says so.
+- Ask AI streams token-by-token into that answer slot via the existing generation-checked worker. Only **Ask intent**, `?`, or `ask ` (250 ms debounce). A new query cancels the in-flight stream. Enter still opens the full transcript.
+- Weather live-fetches while the weather intent is showing, even if a cache exists. Clipboard ingest refreshes empty-query chips while Flint is open.
+- Extension `List` with `onSearchTextChange` already pushes incremental renders; selection is kept across those updates.
+
+## Unreleased — search context (Wave C)
+
+- At show-time (before Flint is presented) the focused Hyprland window’s class and title are captured into `Context`. Root ranking adds +15k when a layout, quicklink, or snippet’s optional `app` field matches that class. Capture skips the launcher so Flint never records itself.
+- Learned choices look up `(query, class)` in `choice_context`, then the global `(query, "")` row in `choices`. **Clear learned choices** drops both. `schema_version` stays `"1"`.
+- Empty query, clipboard or primary selection younger than 10 seconds: Paste / Search the web / Ask AI, plus Open URL and Calc when they apply. An editor path in the window title (`foo.rs — Code`) seeds a recent-file row when that path exists.
+- Toggle **Context-aware search** in Settings (and `set:context`). Default on. Off stores no window class and hides the 10s clipboard chips. Never AT-SPI. See [PRIVACY.md](PRIVACY.md).
+
+## Unreleased — keystroke pipeline (Wave B)
+
+- Root search no longer reads SQLite on every keystroke. Aliases, favorites, quicklinks, and custom layouts live in `Catalog` (`RefCell`) and load with `Catalog::load` / `reload_installed`. Action-panel alias, pin, quicklink, and layout mutators invalidate that cache.
+- Ranking reads a precomputed `IndexEntry` (`title_lc`, words, initials, `keywords_lc` including alias, `subtitle_lc`). Alias changes rebuild that entry. The nucleo `Pattern` stays one-per-keystroke; a shared `Vec<char>` buffer is reused across items.
+- Live rows (files, GIFs, calendar, mail, web) do not reorder what is already on screen. They insert at the scored index only when that index is at or below the current selection; otherwise they append. Weather stays at row 0 when the weather intent fired.
+- `general.max_results` is the actual root mix cap. The hidden `.max(24)` floor is gone.
+- Bench (ignored): `cargo test --bins --release -- --ignored --nocapture bench_root_search_p95` — 500-item pool, 50 queries. Release p50 **1.02 ms**, p95 **1.61 ms** (target p95 < 2 ms).
+
 ## Unreleased — root ranking (Wave A)
 
 - Query→item memory: launching a root (or window) result records the typed query and its prefixes in `choices`. Next time that query is typed, the picked item is row 0 (115k, under an explicit alias). Prefixes (`s` after `sl` → Slack) get a smaller 20k boost. Not recorded from Files, Clipboard, or extension-internal actions. **Clear learned choices** (root + Settings, keyword `forget`) wipes the table. `FLINT_RANK_DEBUG=1` logs the top 10 scores.
