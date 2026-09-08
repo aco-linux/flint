@@ -53,6 +53,12 @@ Flint sends data only when a feature requires it:
   programs only after the user enables the corresponding setting. Enabling
   extensions also lets Flint run `npm install` for the pinned runtime packages
   and for each extension's own dependencies.
+- In-app web search (`web.provider`, default `ddg-html`) sends the typed query
+  to DuckDuckGo (`html.duckduckgo.com` and the Instant Answer JSON API). Results
+  stay in the launcher; Flint does not create a DuckDuckGo account. Set
+  `web.provider` to `"off"` (Settings → Web search, or `set:web`) to skip every
+  web request. `instant` uses the JSON API only. `searxng` and `brave` are
+  documented fallbacks and currently use DuckDuckGo HTML.
 
 Those third parties apply their own privacy and retention terms. Flint does not
 proxy those requests and the maintainer does not receive their contents.

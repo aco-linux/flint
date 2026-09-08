@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — real web results (Wave E)
+
+- In-app web rows use DuckDuckGo HTML (`web.provider = "ddg-html"`). An Instant Answer, when present, is a bonus first row; HTML hits follow (cap 6); **Open DuckDuckGo** stays last. `searxng` and `brave` are documented fallbacks and currently use the same HTML path (no extra API keys).
+- Fetch only on Web intent, a trailing `?` (not the Ask prefix `? `), or three-or-more words with no title-prefix fuzzy hit. A single-token app name such as `firefox` never starts a worker. 300 ms debounce; 60 s cache kept.
+- `web.provider = "off"` (Settings, `set:web`) skips every DuckDuckGo request. See [PRIVACY.md](PRIVACY.md).
+
 ## Unreleased — inline answers (Wave D)
 
 - Result rows show a right-aligned answer (first 120 characters) for calc, unit conversion, color, timezone, and weather. Color rows include a hex swatch. Enter copies calc/convert/color and stays in the launcher; the preview pane says so.

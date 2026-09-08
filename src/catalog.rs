@@ -409,6 +409,7 @@ impl Catalog {
         let include_in_root = settings.files.include_in_root;
         let file_limit = settings.files.max_results.min(files::ROOT_FILE_LIMIT);
         let mix_limit = settings.general.max_results;
+        let web_off = crate::web::normalize_provider(&settings.web.provider) == "off";
         drop(settings);
 
         if query.is_empty() {
@@ -489,10 +490,12 @@ impl Catalog {
                     ));
                 }
                 IntentKind::Web => {
-                    results.push(Scored::new(
-                        crate::web::search_item(query),
-                        TIER_WEB_INTENT + hit.score,
-                    ));
+                    let item = if web_off {
+                        crate::web::browser_fallback(query)
+                    } else {
+                        crate::web::search_item(query)
+                    };
+                    results.push(Scored::new(item, TIER_WEB_INTENT + hit.score));
                 }
                 IntentKind::Ask => {
                     if !query.is_empty() {
@@ -663,7 +666,8 @@ impl Catalog {
             self.apply_learned_choice(query, now, &mut results);
         }
 
-        if !query.starts_with(['>', '$', '=', '/', '~', ';'])
+        if !web_off
+            && !query.starts_with(['>', '$', '=', '/', '~', ';'])
             && !meaning.tool_intent()
             && !meaning.has(IntentKind::Web)
         {
@@ -1084,6 +1088,12 @@ impl Catalog {
                 "Context-aware search",
                 s.general.context_aware,
                 "hyprland focused window class clipboard",
+            ),
+            setting_cycle(
+                "web",
+                "Web search provider",
+                &s.web.provider,
+                "ddg duckduckgo html instant off searxng brave privacy",
             ),
             setting_toggle(
                 "files-root",
@@ -1693,7 +1703,13 @@ pub fn inline_ask_prompt(query: &str) -> Option<String> {
     }
 }
 
-pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
+pub fn live_needed_for(
+    query: &str,
+    mode: Mode,
+    include_in_root: bool,
+    provider: &str,
+    best_title_bonus: u32,
+) -> bool {
     let (_, rest) = Mode::parse(query);
     if crate::content::term_from_query(query).is_some() {
         return true;
@@ -1708,9 +1724,11 @@ pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
     if mode == Mode::Root
         && (meaning.has(IntentKind::Calendar)
             || meaning.has(IntentKind::Email)
-            || meaning.has(IntentKind::Web)
             || (meaning.has(IntentKind::Gif) && !intent::gif_terms(&rest).is_empty()))
     {
+        return true;
+    }
+    if mode == Mode::Root && crate::web::should_fetch_web(query, best_title_bonus, provider) {
         return true;
     }
     asked_for_files(&rest, mode, include_in_root)
@@ -1721,6 +1739,7 @@ pub fn live_extras(
     mode: Mode,
     settings: &crate::config::Settings,
     usage: &usage::Map,
+    best_title_bonus: u32,
 ) -> LiveExtras {
     let (parsed, rest) = Mode::parse(query);
     let mode = if mode == Mode::Root { parsed } else { mode };
@@ -1752,8 +1771,10 @@ pub fn live_extras(
     if meaning.has(IntentKind::Email) {
         extras.mail = live_mail(settings);
     }
-    if meaning.has(IntentKind::Web) && !meaning.tool_intent() {
-        extras.web = live_web(&q);
+    if mode == Mode::Root
+        && crate::web::should_fetch_web(query, best_title_bonus, &settings.web.provider)
+    {
+        extras.web = live_web(&q, settings, best_title_bonus);
     }
 
     if let Some(term) = crate::content::term_from_query(query) {
@@ -2561,22 +2582,28 @@ fn live_mail(settings: &crate::config::Settings) -> Vec<Scored> {
     }
 }
 
-fn live_web(query: &str) -> Vec<Scored> {
-    match crate::web::fetch(query) {
+fn live_web(query: &str, settings: &Settings, best_title_bonus: u32) -> Vec<Scored> {
+    if !crate::web::should_fetch_web(query, best_title_bonus, &settings.web.provider) {
+        return Vec::new();
+    }
+    crate::web::debounce_live();
+    if crate::files::cancelled() {
+        return Vec::new();
+    }
+    match crate::web::fetch_with(query, &settings.web.provider) {
         Ok(rows) => {
-            let mut out: Vec<Scored> = rows
-                .into_iter()
+            let rows = crate::web::with_browser_fallback(query, rows);
+            rows.into_iter()
                 .enumerate()
                 .map(|(i, (item, live))| {
-                    Scored::with_live(item, 40_000u32.saturating_sub(i as u32 * 10), live)
+                    let score = if item.id.starts_with("search:browser:") {
+                        if i == 0 { 500 } else { 300 }
+                    } else {
+                        40_000u32.saturating_sub(i as u32 * 10)
+                    };
+                    Scored::with_live(item, score, live)
                 })
-                .collect();
-            if out.is_empty() {
-                out.push(Scored::new(crate::web::browser_fallback(query), 500));
-            } else {
-                out.push(Scored::new(crate::web::browser_fallback(query), 300));
-            }
-            out
+                .collect()
         }
         Err(_) => vec![Scored::new(crate::web::browser_fallback(query), 500)],
     }
@@ -2710,6 +2737,10 @@ mod tests {
     use crate::item::{Action, Icon, Item, Kind};
     use crate::mode::Mode;
 
+    fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
+        super::live_needed_for(query, mode, include_in_root, "ddg-html", 0)
+    }
+
     #[test]
     fn math_detection() {
         assert!(crate::calc::looks_like_math("2+2"));
@@ -2767,59 +2798,47 @@ mod tests {
             "calendar questions must stay in Flint"
         );
         assert!(
-            !super::live_needed("firefox", crate::mode::Mode::Root, true),
+            !live_needed("firefox", crate::mode::Mode::Root, true),
             "an app name must not schedule a worker"
         );
         assert!(
-            !super::live_needed("smile", crate::mode::Mode::Root, true),
+            !live_needed("smile", crate::mode::Mode::Root, true),
             "emoji keywords stay in-memory"
         );
         assert!(
-            !super::live_needed("we", crate::mode::Mode::Windows, true),
+            !live_needed("we", crate::mode::Mode::Windows, true),
             "window mode is in-memory now — no live pass"
         );
     }
 
     #[test]
     fn live_needed_is_files_or_uncached_weather() {
-        assert!(super::live_needed(
-            "markdown",
-            crate::mode::Mode::Root,
-            true
-        ));
-        assert!(super::live_needed("", crate::mode::Mode::Files, false));
-        assert!(!super::live_needed(
+        assert!(live_needed("markdown", crate::mode::Mode::Root, true));
+        assert!(live_needed("", crate::mode::Mode::Files, false));
+        assert!(!live_needed(
             "clip rust",
             crate::mode::Mode::Clipboard,
             true
         ));
         if crate::weather::cached().is_none() {
-            assert!(super::live_needed("we", crate::mode::Mode::Root, false));
+            assert!(live_needed("we", crate::mode::Mode::Root, false));
         }
         assert!(
-            super::live_needed("weather", crate::mode::Mode::Root, false),
+            live_needed("weather", crate::mode::Mode::Root, false),
             "weather intent refreshes while the launcher is open, even with a cache"
         );
-        assert!(super::live_needed(
+        assert!(live_needed(
             "content:needle",
             crate::mode::Mode::Root,
             false
         ));
-        assert!(super::live_needed(
-            "in:secret",
-            crate::mode::Mode::Root,
-            false
-        ));
-        assert!(super::live_needed(
+        assert!(live_needed("in:secret", crate::mode::Mode::Root, false));
+        assert!(live_needed(
             "file content invoices",
             crate::mode::Mode::Files,
             false
         ));
-        assert!(!super::live_needed(
-            "contentment",
-            crate::mode::Mode::Root,
-            false
-        ));
+        assert!(!live_needed("contentment", crate::mode::Mode::Root, false));
     }
 
     #[test]
@@ -3119,11 +3138,7 @@ mod tests {
                 .map(|r| (&r.item.title, format!("{:?}", r.item.action)))
                 .collect::<Vec<_>>()
         );
-        assert!(super::live_needed(
-            "gif cats",
-            crate::mode::Mode::Gif,
-            false
-        ));
+        assert!(live_needed("gif cats", crate::mode::Mode::Gif, false));
     }
 
     #[test]
@@ -3847,5 +3862,65 @@ mod tests {
             color.item.action,
             Action::Copy(ref hex) if hex == "#ff5a1f"
         ));
+    }
+
+    #[test]
+    fn web_catalog_trigger_rules() {
+        use crate::mode::Mode;
+        assert!(
+            !live_needed("firefox", Mode::Root, true),
+            "single-token app names must not schedule web"
+        );
+        assert!(live_needed("search rust", Mode::Root, true));
+        assert!(live_needed("best pizza berlin", Mode::Root, true));
+        assert!(live_needed("install rustc?", Mode::Root, true));
+        assert!(!crate::web::should_fetch_web("search rust", 0, "off"));
+        assert!(!super::live_needed_for(
+            "search rust",
+            Mode::Root,
+            false,
+            "off",
+            0
+        ));
+        assert!(!crate::web::should_fetch_web(
+            "best pizza berlin",
+            crate::web::TITLE_PREFIX_BONUS,
+            "ddg-html"
+        ));
+
+        let firefox = test_item("app:firefox", "Firefox", "browser");
+        let catalog = test_catalog(vec![firefox]);
+        let rows = catalog.search_root("firefox");
+        assert_eq!(
+            rows[0].item.id,
+            "app:firefox",
+            "app match stays above web placeholder, got {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+
+        let hits = vec![
+            crate::web::Hit {
+                title: "First".into(),
+                snippet: "one".into(),
+                url: "https://example.com/a".into(),
+            },
+            crate::web::Hit {
+                title: "Second".into(),
+                snippet: "two".into(),
+                url: "https://example.com/b".into(),
+            },
+        ];
+        let ordered: Vec<Item> =
+            crate::web::with_browser_fallback("best pizza berlin", crate::web::hits_to_rows(&hits))
+                .into_iter()
+                .map(|(item, _)| item)
+                .collect();
+        assert_eq!(ordered[0].title, "First");
+        assert_eq!(ordered[1].title, "Second");
+        assert!(
+            ordered.last().unwrap().id.starts_with("search:browser:"),
+            "browser fallback last"
+        );
+        assert!(ordered.iter().all(|item| item.kind == Kind::Web));
     }
 }

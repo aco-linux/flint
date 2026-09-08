@@ -10,7 +10,7 @@ Flint stays resident: the first launch keeps a daemon so clipboard history, note
 
 Flint opens as a normal desktop window. Under Hyprland it floats centered at
 980×400 on the first frame (`no_anim` so it does not tile large then shrink),
-then grows with the results (weather card, agenda, GIFs, Instant Answers, Ask
+then grows with the results (weather card, agenda, GIFs, web results, Ask
 transcript) up to about 980×900. It stays resizable, with a title bar; closing
 the window hides it while the resident process remains warm. Copy
 [`share/hyprland.conf`](share/hyprland.conf) for the compositor rules, or let
@@ -93,6 +93,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
 - Calculator, unit conversion (`10 km to mi`, `32f`), hex and `rgb()` colors (`#ff5a1f`, `rgb(255, 90, 31)`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers. The result is right-aligned on the row; Enter copies calc/convert/color without closing Flint.
 - `?` / `ask` / a question in root streams the first ~120 characters of the model reply onto the Ask row (250 ms after you pause). Enter still opens the transcript. Changing the query cancels the stream.
+- Web results (DuckDuckGo HTML, 300 ms debounce, cap 6) appear on a Web intent, a trailing `?`, or a three-word query with no title-prefix app hit. Instant Answers prepend when present. A browser row is last. Single-token app names never fetch. Settings: **Web search** / `set:web` / `web.provider` (`ddg-html`, `instant`, `off`).
 - Emoji by name or `:shortcode:` (`smile`, `:fire:`). Time in a city (`time in tokyo`) or a difference (`nyc vs london`) uses a static offset table, not DST.
 - `tr fr hello`, `translate es …`, `en:de thanks`, and `define widget` are Ask AI prompts (output only the translation or definition).
 - `content:needle` or `in:needle` searches file contents with ripgrep (`--max-count 1` over home and extra folders). Typing an app name never starts ripgrep or OCR.
@@ -117,6 +118,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 | Daemon hide/toggle, apps, calc (math, dates, percents, history), clipboard pin/rename/edit, notes, snippets with placeholders, quicklinks, aliases, favorites, action panel, confetti, window layouts, quit/uninstall, screenshot/record, display resolution, settings, store browse | Extensions: `List`, `Detail`, `Form` as a list of fields, `confirmAlert`, `getSelectedText` (primary paste). No `Grid` layout, menu-bar, extension OAuth, AT-SPI app-menu search, or preference editing |
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
+| In-app DuckDuckGo HTML results (Instant Answer as a bonus first row) | `searxng` / Brave API keys are not wired; those `web.provider` values use DuckDuckGo HTML. Set `web.provider` to `off` to disable |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
 | PKCE OAuth + loopback `127.0.0.1` + refresh tokens | Ask AI can call native Flint tools (calendar, weather, iCloud inbox, Instant Answers). MCP stays a prompt primer and cannot run `tools/call`. MCP spawn is **off by default** |
 

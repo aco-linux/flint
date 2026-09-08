@@ -369,6 +369,37 @@ fn page_general(settings: &Rc<RefCell<Settings>>) -> Box {
             }
         },
     ));
+    let names = [
+        "DuckDuckGo HTML",
+        "Instant Answer JSON",
+        "Off (no web fetch)",
+    ];
+    let ids = ["ddg-html", "instant", "off"];
+    let current = settings.borrow().web.provider.clone();
+    let selected = ids.iter().position(|id| *id == current).unwrap_or(0) as u32;
+    let drop = DropDown::from_strings(&names);
+    drop.set_selected(selected);
+    drop.connect_selected_notify({
+        let s = s.clone();
+        move |dd| {
+            let idx = dd.selected() as usize;
+            if let Some(id) = ids.get(idx) {
+                let _ = s.borrow_mut().apply("set:web", id);
+            }
+        }
+    });
+    let lab = Label::new(Some("Web search"));
+    lab.add_css_class("prefs-row-title");
+    lab.set_xalign(0.0);
+    let hint = Label::new(Some(
+        "In-app results from DuckDuckGo. searxng and brave are documented fallbacks and currently use DuckDuckGo HTML. Off never leaves this computer.",
+    ));
+    hint.add_css_class("prefs-row-sub");
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    card.append(&lab);
+    card.append(&hint);
+    card.append(&drop);
     page.append(&card);
     page
 }

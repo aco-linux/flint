@@ -198,6 +198,7 @@ struct LiveJob {
     mode: Mode,
     settings: crate::config::Settings,
     usage: usage::Map,
+    best_title_bonus: u32,
 }
 
 pub fn build(app: &Application, catalog: Catalog) -> Shell {
@@ -653,7 +654,7 @@ impl Shell {
 
     fn refresh(&self) {
         let query = self.entry.text().to_string();
-        let (generation, include_in_root) = {
+        let (generation, include_in_root, provider, bonus) = {
             let mut st = self.state.borrow_mut();
             if st.editing.is_some() || st.actions_open {
                 return;
@@ -700,21 +701,31 @@ impl Shell {
                 .and_then(|id| st.results.iter().position(|row| row.item.id == id))
                 .unwrap_or(0);
             let include_in_root = st.catalog.settings.borrow().files.include_in_root;
-            (st.search_gen, include_in_root)
+            let provider = st.catalog.settings.borrow().web.provider.clone();
+            let bonus =
+                crate::web::best_title_bonus(&query, st.results.iter().map(|row| &row.item));
+            (st.search_gen, include_in_root, provider, bonus)
         };
         self.sync_chrome();
         rebuild_rows(self);
         self.update_preview();
         self.request_visible_thumbs();
-        self.schedule_live(generation, query.clone(), include_in_root);
+        self.schedule_live(generation, query.clone(), include_in_root, provider, bonus);
         self.schedule_ask_stream(generation, query);
         self.fit_window();
     }
 
-    fn schedule_live(&self, generation: u64, query: String, include_in_root: bool) {
+    fn schedule_live(
+        &self,
+        generation: u64,
+        query: String,
+        include_in_root: bool,
+        provider: String,
+        best_title_bonus: u32,
+    ) {
         let mode = self.state.borrow().mode;
         self.live_cancel.cancel();
-        if !catalog::live_needed(&query, mode, include_in_root) {
+        if !catalog::live_needed_for(&query, mode, include_in_root, &provider, best_title_bonus) {
             return;
         }
         let settings = self.state.borrow().catalog.settings.borrow().clone();
@@ -725,6 +736,7 @@ impl Shell {
             mode,
             settings,
             usage,
+            best_title_bonus,
         });
     }
 
@@ -861,6 +873,15 @@ impl Shell {
             catalog::insert_live_stable(&mut st.results, live.gifs, &selected);
             catalog::insert_live_stable(&mut st.results, live.calendar, &selected);
             catalog::insert_live_stable(&mut st.results, live.mail, &selected);
+            if !live.web.is_empty() {
+                st.results.retain(|row| {
+                    let id = row.item.id.as_str();
+                    !(id.starts_with("search:")
+                        && !id.starts_with("search:hit:")
+                        && !id.starts_with("search:browser:")
+                        && !id.starts_with("search:empty:"))
+                });
+            }
             catalog::insert_live_stable(&mut st.results, live.web, &selected);
             catalog::pin_weather_row_zero(&mut st.results);
             st.results.dedup_by(|a, b| a.item.id == b.item.id);
@@ -2891,7 +2912,13 @@ fn start_live_worker(rx: mpsc::Receiver<LiveJob>, cancel: Arc<files::Cancel>) {
             }
             cancel.reset();
             let extras = files::with_cancel(cancel.clone(), || {
-                catalog::live_extras(&job.query, job.mode, &job.settings, &job.usage)
+                catalog::live_extras(
+                    &job.query,
+                    job.mode,
+                    &job.settings,
+                    &job.usage,
+                    job.best_title_bonus,
+                )
             });
             if cancel.is_cancelled() {
                 continue;

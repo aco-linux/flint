@@ -15,6 +15,7 @@ pub struct Settings {
     pub mcp: Vec<McpServer>,
     pub store: Store,
     pub connectors: Connectors,
+    pub web: Web,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -67,6 +68,23 @@ pub struct Files {
     pub max_results: usize,
     /// Extra folders to scan (external drives, project roots). Home is always included.
     pub search_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Web {
+    /// `ddg-html` (default) · `instant` (DuckDuckGo Instant Answer JSON only) · `off`.
+    /// `searxng` and `brave` are documented fallbacks; they currently use `ddg-html`.
+    #[serde(default = "default_web_provider")]
+    pub provider: String,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self {
+            provider: "ddg-html".into(),
+        }
+    }
 }
 
 impl Default for Files {
@@ -125,6 +143,10 @@ pub struct Store {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_web_provider() -> String {
+    "ddg-html".into()
 }
 
 impl Default for General {
@@ -386,6 +408,30 @@ impl Settings {
                     "Context-aware search off — no window class or 10s clipboard chips"
                 }
                 .into()
+            }
+            "set:web" => {
+                let typed = typed.trim();
+                if !typed.is_empty() {
+                    self.web.provider = match typed.to_ascii_lowercase().as_str() {
+                        "off" => "off".into(),
+                        "instant" => "instant".into(),
+                        "searxng" | "brave" | "ddg-html" | "ddg" | "duckduckgo" => {
+                            "ddg-html".into()
+                        }
+                        _ => self.web.provider.clone(),
+                    };
+                } else {
+                    self.web.provider = match self.web.provider.as_str() {
+                        "ddg-html" => "instant".into(),
+                        "instant" => "off".into(),
+                        _ => "ddg-html".into(),
+                    };
+                }
+                match self.web.provider.as_str() {
+                    "off" => "Web search off — Flint will not fetch DuckDuckGo".into(),
+                    "instant" => "Web search → DuckDuckGo Instant Answer JSON only".into(),
+                    _ => "Web search → DuckDuckGo HTML (searxng/brave use this too)".into(),
+                }
             }
             "set:files-root" => {
                 self.files.include_in_root = !self.files.include_in_root;
@@ -708,6 +754,7 @@ mod tests {
         assert!(!s.general.allow_mcp);
         assert!(!s.general.allow_extensions);
         assert!(s.general.context_aware);
+        assert_eq!(s.web.provider, "ddg-html");
         assert_eq!(s.voice.engine, "in-app");
         assert!(s.files.include_in_root);
         assert!(s.files.system_wide);
@@ -719,6 +766,12 @@ mod tests {
     fn missing_context_aware_defaults_on() {
         let s: Settings = serde_json::from_str(r#"{"general":{"autostart":true}}"#).unwrap();
         assert!(s.general.context_aware);
+    }
+
+    #[test]
+    fn missing_web_provider_defaults_to_ddg_html() {
+        let s: Settings = serde_json::from_str(r#"{"general":{"autostart":true}}"#).unwrap();
+        assert_eq!(s.web.provider, "ddg-html");
     }
 
     #[test]
