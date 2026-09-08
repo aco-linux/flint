@@ -205,6 +205,25 @@ entry.search placeholder {
   border-color: rgba(255, 90, 31, 0.28);
 }
 
+.answer {
+  color: #ffe1c4;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  font-weight: 500;
+  padding-left: 12px;
+}
+
+.row.selected .answer {
+  color: #ffd2b0;
+}
+
+.color-swatch {
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .empty {
   padding: 28px 28px 18px 28px;
 }

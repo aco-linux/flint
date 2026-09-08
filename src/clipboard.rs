@@ -279,9 +279,24 @@ fn capture(clipboard: &gtk4::gdk::Clipboard, store: Rc<RefCell<Store>>) {
             let changed = store.borrow_mut().ingest(text.to_string());
             if changed {
                 store.borrow().persist();
+                ON_INGEST.with(|hook| {
+                    if let Some(cb) = hook.borrow().as_ref() {
+                        cb();
+                    }
+                });
             }
         }
     });
+}
+
+thread_local! {
+    static ON_INGEST: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Called after a new clipboard entry is stored. Used so an open launcher can
+/// refresh empty-query chips without polling.
+pub fn on_ingest(cb: Rc<dyn Fn()>) {
+    ON_INGEST.with(|hook| *hook.borrow_mut() = Some(cb));
 }
 
 pub fn looks_secret(text: &str) -> bool {

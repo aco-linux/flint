@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — inline answers (Wave D)
+
+- Result rows show a right-aligned answer (first 120 characters) for calc, unit conversion, color, timezone, and weather. Color rows include a hex swatch. Enter copies calc/convert/color and stays in the launcher; the preview pane says so.
+- Ask AI streams token-by-token into that answer slot via the existing generation-checked worker. Only **Ask intent**, `?`, or `ask ` (250 ms debounce). A new query cancels the in-flight stream. Enter still opens the full transcript.
+- Weather live-fetches while the weather intent is showing, even if a cache exists. Clipboard ingest refreshes empty-query chips while Flint is open.
+- Extension `List` with `onSearchTextChange` already pushes incremental renders; selection is kept across those updates.
+
 ## Unreleased — search context (Wave C)
 
 - At show-time (before Flint is presented) the focused Hyprland window’s class and title are captured into `Context`. Root ranking adds +15k when a layout, quicklink, or snippet’s optional `app` field matches that class. Capture skips the launcher so Flint never records itself.

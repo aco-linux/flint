@@ -134,11 +134,13 @@ pub fn for_item(item: &Item) -> Preview {
             }
         }
         Kind::Calc => {
-            if item.subtitle.is_empty() {
-                Preview::None
+            let answer = item.inline_answer().unwrap_or_else(|| item.title.clone());
+            let body = if item.id.starts_with("color:") {
+                format!("{answer}\n{}\n\nEnter copies the hex.", item.subtitle)
             } else {
-                Preview::Text(item.subtitle.clone())
-            }
+                format!("{answer}\n{}\n\nEnter copies the result.", item.subtitle)
+            };
+            Preview::Text(body)
         }
         _ => match &item.action {
             Action::Extension { detail, .. } if !detail.is_empty() => {
@@ -849,6 +851,44 @@ mod tests {
         assert_eq!(classify(Path::new("shot.PNG")), MediaKind::Image);
         assert_eq!(classify(Path::new("notes.md")), MediaKind::Text);
         assert_eq!(classify(Path::new("brief.pdf")), MediaKind::Document);
+    }
+
+    #[test]
+    fn calc_and_color_preview_says_enter_copies() {
+        use super::Preview;
+        use crate::item::{Action, Icon, Item, Kind};
+        let calc = Item {
+            id: "calc:1+1".into(),
+            title: "2".into(),
+            subtitle: "1+1  →  copy result".into(),
+            keywords: String::new(),
+            kind: Kind::Calc,
+            icon: Icon::None,
+            action: Action::Copy("2".into()),
+        };
+        match super::for_item(&calc) {
+            Preview::Text(body) => {
+                assert!(body.contains("2"));
+                assert!(body.contains("Enter copies the result"));
+            }
+            other => panic!("expected text preview, got {other:?}"),
+        }
+        let color = Item {
+            id: "color:#ff5a1f".into(),
+            title: "#ff5a1f".into(),
+            subtitle: "RGB 255, 90, 31".into(),
+            keywords: String::new(),
+            kind: Kind::Calc,
+            icon: Icon::None,
+            action: Action::Copy("#ff5a1f".into()),
+        };
+        match super::for_item(&color) {
+            Preview::Text(body) => {
+                assert!(body.contains("#ff5a1f"));
+                assert!(body.contains("Enter copies the hex"));
+            }
+            other => panic!("expected text preview, got {other:?}"),
+        }
     }
 
     #[test]

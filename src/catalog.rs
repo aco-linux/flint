@@ -1680,6 +1680,19 @@ fn asked_for_files(rest: &str, mode: Mode, include_in_root: bool) -> bool {
     }
 }
 
+/// Inline Ask AI streaming: `?` / `ask ` mode with a prompt, or a root Ask intent.
+pub fn inline_ask_prompt(query: &str) -> Option<String> {
+    let (mode, rest) = Mode::parse(query);
+    let rest = rest.trim();
+    match mode {
+        Mode::Ask if !rest.is_empty() => Some(rest.to_string()),
+        Mode::Root if intent::resolve(rest).has(IntentKind::Ask) && !rest.is_empty() => {
+            Some(rest.to_string())
+        }
+        _ => None,
+    }
+}
+
 pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
     let (_, rest) = Mode::parse(query);
     if crate::content::term_from_query(query).is_some() {
@@ -1689,7 +1702,7 @@ pub fn live_needed(query: &str, mode: Mode, include_in_root: bool) -> bool {
         return true;
     }
     let meaning = intent::resolve(&rest);
-    if mode == Mode::Root && meaning.has(IntentKind::Weather) && weather::cached().is_none() {
+    if mode == Mode::Root && meaning.has(IntentKind::Weather) {
         return true;
     }
     if mode == Mode::Root
@@ -2783,6 +2796,10 @@ mod tests {
         if crate::weather::cached().is_none() {
             assert!(super::live_needed("we", crate::mode::Mode::Root, false));
         }
+        assert!(
+            super::live_needed("weather", crate::mode::Mode::Root, false),
+            "weather intent refreshes while the launcher is open, even with a cache"
+        );
         assert!(super::live_needed(
             "content:needle",
             crate::mode::Mode::Root,
@@ -3793,5 +3810,42 @@ mod tests {
         unsafe {
             libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0);
         }
+    }
+
+    #[test]
+    fn inline_ask_only_on_ask_intent_or_prefix() {
+        assert_eq!(
+            super::inline_ask_prompt("? what is rust"),
+            Some("what is rust".into())
+        );
+        assert_eq!(
+            super::inline_ask_prompt("ask summarize this"),
+            Some("summarize this".into())
+        );
+        assert!(super::inline_ask_prompt("?").is_none());
+        assert!(super::inline_ask_prompt("firefox").is_none());
+        assert!(super::inline_ask_prompt("1+1").is_none());
+        assert!(super::inline_ask_prompt("what is rust?").is_some());
+    }
+
+    #[test]
+    fn calc_and_color_rows_expose_inline_answers() {
+        let catalog = test_catalog(Vec::new());
+        let plus = catalog.search_root("1+1");
+        let calc = plus
+            .iter()
+            .find(|r| r.item.kind == Kind::Calc)
+            .expect("calc");
+        assert_eq!(calc.item.inline_answer().as_deref(), Some("2"));
+        let rgb = catalog.search_root("rgb(255, 90, 31)");
+        let color = rgb
+            .iter()
+            .find(|r| r.item.id.starts_with("color:"))
+            .expect("color");
+        assert_eq!(color.item.inline_answer().as_deref(), Some("#ff5a1f"));
+        assert!(matches!(
+            color.item.action,
+            Action::Copy(ref hex) if hex == "#ff5a1f"
+        ));
     }
 }

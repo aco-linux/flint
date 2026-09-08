@@ -91,7 +91,8 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Thumbs reuse the Freedesktop cache (`~/.cache/thumbnails/large/`) when another app has already generated them.
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
-- Calculator, unit conversion (`10 km to mi`, `32f`), hex and `rgb()` colors (`#ff5a1f`, `rgb(255, 90, 31)`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers.
+- Calculator, unit conversion (`10 km to mi`, `32f`), hex and `rgb()` colors (`#ff5a1f`, `rgb(255, 90, 31)`), PATH binaries, and well-known folders (`Downloads`, `Documents`) appear as instant answers. The result is right-aligned on the row; Enter copies calc/convert/color without closing Flint.
+- `?` / `ask` / a question in root streams the first ~120 characters of the model reply onto the Ask row (250 ms after you pause). Enter still opens the transcript. Changing the query cancels the stream.
 - Emoji by name or `:shortcode:` (`smile`, `:fire:`). Time in a city (`time in tokyo`) or a difference (`nyc vs london`) uses a static offset table, not DST.
 - `tr fr hello`, `translate es …`, `en:de thanks`, and `define widget` are Ask AI prompts (output only the translation or definition).
 - `content:needle` or `in:needle` searches file contents with ripgrep (`--max-count 1` over home and extra folders). Typing an app name never starts ripgrep or OCR.

@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use gtk4::gdk::{Key, ModifierType, Texture};
+use gtk4::gdk::{Key, ModifierType, RGBA, Texture};
 use gtk4::gio::prelude::AppInfoExt;
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
@@ -90,6 +90,7 @@ pub struct Shell {
     state: Rc<RefCell<State>>,
     live_jobs: Sender<LiveJob>,
     live_cancel: Arc<files::Cancel>,
+    ask_cancel: Rc<RefCell<Arc<files::Cancel>>>,
     thumb_jobs: Sender<PathBuf>,
     thumb_cancel: Arc<files::Cancel>,
     prefs: Rc<RefCell<Option<prefs::Host>>>,
@@ -117,6 +118,9 @@ struct State {
     /// Bumped to cancel the 1s focus timeout when idle or replaced.
     focus_gen: u64,
     search_gen: u64,
+    ask_job: u64,
+    ask_preview: Option<(String, String)>,
+    ask_label: Option<Label>,
     thumbs: HashMap<PathBuf, CachedThumb>,
     captions: HashMap<PathBuf, String>,
     thumb_miss: HashSet<PathBuf>,
@@ -399,6 +403,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     let (live_tx, live_rx) = mpsc::channel();
     let live_cancel = files::Cancel::new();
+    let ask_cancel = files::Cancel::new();
     let (thumb_tx, thumb_rx) = mpsc::channel();
     let thumb_cancel = files::Cancel::new();
 
@@ -441,12 +446,16 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             voice: VoiceSession::new(),
             focus_gen: 0,
             search_gen: 0,
+            ask_job: 0,
+            ask_preview: None,
+            ask_label: None,
             thumbs: HashMap::new(),
             captions: HashMap::new(),
             thumb_miss: HashSet::new(),
         })),
         live_jobs: live_tx,
         live_cancel: live_cancel.clone(),
+        ask_cancel: Rc::new(RefCell::new(ask_cancel)),
         thumb_jobs: thumb_tx,
         thumb_cancel: thumb_cancel.clone(),
         prefs: Rc::new(RefCell::new(None)),
@@ -457,6 +466,13 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     start_thumb_worker(thumb_rx, thumb_cancel);
     start_hypr_watch();
     hypr::install_float_rule();
+    clipboard::on_ingest(Rc::new(|| {
+        SHELL.with(|slot| {
+            if let Some(shell) = slot.borrow().as_ref() {
+                shell.on_clipboard_changed();
+            }
+        });
+    }));
 
     {
         let shell = shell.clone();
@@ -542,6 +558,7 @@ impl Clone for Shell {
             state: self.state.clone(),
             live_jobs: self.live_jobs.clone(),
             live_cancel: self.live_cancel.clone(),
+            ask_cancel: self.ask_cancel.clone(),
             thumb_jobs: self.thumb_jobs.clone(),
             thumb_cancel: self.thumb_cancel.clone(),
             prefs: self.prefs.clone(),
@@ -689,7 +706,8 @@ impl Shell {
         rebuild_rows(self);
         self.update_preview();
         self.request_visible_thumbs();
-        self.schedule_live(generation, query, include_in_root);
+        self.schedule_live(generation, query.clone(), include_in_root);
+        self.schedule_ask_stream(generation, query);
         self.fit_window();
     }
 
@@ -708,6 +726,112 @@ impl Shell {
             settings,
             usage,
         });
+    }
+
+    fn schedule_ask_stream(&self, generation: u64, query: String) {
+        self.ask_cancel.borrow().cancel();
+        let prompt = catalog::inline_ask_prompt(&query);
+        {
+            let mut st = self.state.borrow_mut();
+            st.ask_job = st.ask_job.wrapping_add(1);
+            if prompt.is_none() {
+                st.ask_preview = None;
+                st.ask_label = None;
+            }
+        }
+        let Some(prompt) = prompt else {
+            return;
+        };
+        let job = self.state.borrow().ask_job;
+        let item_id = format!("ask:{prompt}");
+        let settings = self.state.borrow().catalog.settings.borrow().clone();
+        let shell = self.clone();
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            if shell.state.borrow().search_gen != generation || shell.state.borrow().ask_job != job
+            {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            shell.spawn_ask_stream(
+                generation,
+                job,
+                item_id.clone(),
+                prompt.clone(),
+                settings.clone(),
+            );
+            gtk4::glib::ControlFlow::Break
+        });
+    }
+
+    fn spawn_ask_stream(
+        &self,
+        generation: u64,
+        job: u64,
+        item_id: String,
+        prompt: String,
+        settings: crate::config::Settings,
+    ) {
+        self.ask_cancel.borrow().cancel();
+        let token = files::Cancel::new();
+        *self.ask_cancel.borrow_mut() = token.clone();
+        thread::spawn(move || {
+            let id = item_id.clone();
+            let _ = ai::ask_stream(&prompt, &settings, |delta| {
+                if token.is_cancelled() {
+                    return false;
+                }
+                post_ask_delta(generation, job, id.clone(), delta.to_string(), false);
+                true
+            });
+            if !token.is_cancelled() {
+                post_ask_delta(generation, job, item_id, String::new(), true);
+            }
+        });
+    }
+
+    fn on_clipboard_changed(&self) {
+        if !self.state.borrow().visible
+            || self.state.borrow().editing.is_some()
+            || self.state.borrow().actions_open
+        {
+            return;
+        }
+        if self.state.borrow().mode != Mode::Root {
+            return;
+        }
+        if !self.entry.text().trim().is_empty() {
+            return;
+        }
+        self.refresh();
+    }
+
+    fn apply_ask_delta(&self, generation: u64, job: u64, item_id: &str, delta: &str, _done: bool) {
+        {
+            let st = self.state.borrow();
+            if st.search_gen != generation || st.ask_job != job {
+                return;
+            }
+        }
+        let mut need_rebuild = false;
+        {
+            let mut st = self.state.borrow_mut();
+            let mut text = match &st.ask_preview {
+                Some((id, text)) if id == item_id => text.clone(),
+                _ => String::new(),
+            };
+            text.push_str(delta);
+            let shown: String = text.chars().take(120).collect();
+            st.ask_preview = Some((item_id.to_string(), text));
+            if let Some(label) = &st.ask_label {
+                label.set_text(&shown);
+                label.set_visible(!shown.is_empty());
+            } else {
+                need_rebuild = true;
+            }
+        }
+        if need_rebuild {
+            rebuild_rows(self);
+            self.update_preview();
+        }
     }
 
     fn apply_live(&self, live: LiveExtras) {
@@ -1426,7 +1550,7 @@ impl Shell {
                 }
                 let stay = matches!(
                     item.kind,
-                    Kind::Calendar | Kind::Mail | Kind::Ai | Kind::Weather | Kind::Web
+                    Kind::Calendar | Kind::Mail | Kind::Ai | Kind::Weather | Kind::Web | Kind::Calc
                 );
                 if stay {
                     action::copy_text(&text);
@@ -2709,6 +2833,17 @@ fn bind_shell(shell: &Shell) {
     SHELL.with(|slot| *slot.borrow_mut() = Some(shell.clone()));
 }
 
+fn post_ask_delta(generation: u64, job: u64, item_id: String, delta: String, done: bool) {
+    let _ = gtk4::glib::idle_add(move || {
+        SHELL.with(|slot| {
+            if let Some(shell) = slot.borrow().as_ref() {
+                shell.apply_ask_delta(generation, job, &item_id, &delta, done);
+            }
+        });
+        gtk4::glib::ControlFlow::Break
+    });
+}
+
 fn push_ui(inbox: &Arc<Mutex<Vec<UiMsg>>>, msg: UiMsg) {
     inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
     let inbox = inbox.clone();
@@ -2889,6 +3024,7 @@ fn rebuild_rows(shell: &Shell) {
     {
         let mut st = shell.state.borrow_mut();
         st.rows.clear();
+        st.ask_label = None;
         if st.editing.is_some() {
             return;
         }
@@ -2897,6 +3033,7 @@ fn rebuild_rows(shell: &Shell) {
             return;
         }
         let selected = st.selected;
+        let stream = st.ask_preview.clone();
         let rows: Vec<(Item, Live)> = st
             .results
             .iter()
@@ -2912,7 +3049,30 @@ fn rebuild_rows(shell: &Shell) {
             .collect();
         let mut st = shell.state.borrow_mut();
         for (idx, ((item, live), thumb)) in rows.into_iter().zip(thumbs).enumerate() {
-            let row = result_row(&item, &live, idx == selected, thumb.as_ref());
+            let streamed = stream.as_ref().and_then(|(id, text)| {
+                if id == &item.id {
+                    let mut shown: String = text.chars().take(120).collect();
+                    if text.chars().count() > 120 {
+                        shown.push('…');
+                    }
+                    Some(shown)
+                } else {
+                    None
+                }
+            });
+            let answer = streamed
+                .clone()
+                .or_else(|| item.inline_answer());
+            let (row, answer_label) = result_row(
+                &item,
+                &live,
+                idx == selected,
+                thumb.as_ref(),
+                answer.as_deref(),
+            );
+            if streamed.is_some() {
+                st.ask_label = answer_label;
+            }
             host.append(&row);
             st.rows.push(row);
         }
@@ -3606,7 +3766,13 @@ fn paint_selection(state: &State) {
     }
 }
 
-fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>) -> Box {
+fn result_row(
+    item: &Item,
+    live: &Live,
+    selected: bool,
+    thumb: Option<&Texture>,
+    answer: Option<&str>,
+) -> (Box, Option<Label>) {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("row");
     if selected {
@@ -3621,6 +3787,28 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
     accent.add_css_class("accent");
     accent.set_valign(Align::Center);
     row.append(&accent);
+
+    if item.id.starts_with("color:")
+        && let Action::Copy(hex) = &item.action
+        && let Ok(rgba) = RGBA::parse(hex)
+    {
+        let swatch = DrawingArea::new();
+        swatch.set_content_width(16);
+        swatch.set_content_height(16);
+        swatch.add_css_class("color-swatch");
+        swatch.set_draw_func(move |_, cr, w, h| {
+            cr.set_source_rgba(
+                f64::from(rgba.red()),
+                f64::from(rgba.green()),
+                f64::from(rgba.blue()),
+                f64::from(rgba.alpha()),
+            );
+            cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
+            let _ = cr.fill();
+        });
+        swatch.set_valign(Align::Center);
+        row.append(&swatch);
+    }
 
     let icon = if live.thumb_path().is_some() {
         let image = if let Some(texture) = thumb {
@@ -3707,12 +3895,25 @@ fn result_row(item: &Item, live: &Live, selected: bool, thumb: Option<&Texture>)
     }
     row.append(&text);
 
+    let mut answer_label = None;
+    if let Some(answer) = answer.filter(|s| !s.is_empty()) {
+        let label = Label::new(Some(answer));
+        label.set_xalign(1.0);
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_max_width_chars(28);
+        label.add_css_class("answer");
+        label.set_valign(Align::Center);
+        label.set_hexpand(false);
+        row.append(&label);
+        answer_label = Some(label);
+    }
+
     let pill = Label::new(Some(item.kind.label()));
     pill.add_css_class("pill");
     pill.set_valign(Align::Center);
     row.append(&pill);
 
-    row
+    (row, answer_label)
 }
 
 fn empty_state(entry: &Entry) -> (Box, Label, Label) {
