@@ -169,6 +169,28 @@ pub fn append_turn(thread_id: &str, role: &str, text: &str) {
     let _ = db::ai_thread_touch(thread_id, None, now);
 }
 
+pub fn transcript(thread_id: &str) -> String {
+    let msgs = db::ai_messages(thread_id).unwrap_or_default();
+    if msgs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for msg in msgs {
+        let role = if msg.role == "assistant" {
+            "Flint"
+        } else {
+            "You"
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(role);
+        out.push('\n');
+        out.push_str(msg.text.trim());
+    }
+    out
+}
+
 pub fn history(thread_id: &str) -> Vec<Turn> {
     let mut msgs = db::ai_messages(thread_id).unwrap_or_default();
     if msgs.len() > HISTORY_TURNS {
@@ -452,6 +474,9 @@ pub fn compose_system(settings: &Settings) -> String {
         system.push_str("\n\n");
         system.push_str(&block);
     }
+    system.push_str(
+        "\n\nYou can call Flint tools to read the user's real calendar, weather, iCloud inbox, and Instant Answers. Use get_calendar_today, get_weather, get_inbox, or web_search instead of inventing a web search or telling them to open another app.",
+    );
     if settings.general.allow_mcp
         && let Some(tools) = mcp::tool_primer(&settings.mcp)
     {
@@ -584,19 +609,56 @@ fn ollama(
     let url = chat_url(&settings.ai.endpoint, "/api/chat");
     let mut messages = vec![json!({"role": "system", "content": system})];
     messages.extend(chat_messages(history, prompt));
-    let body = json!({
+    let mut body = json!({
         "model": settings.ai.model,
         "stream": false,
-        "messages": messages
+        "messages": messages,
+        "tools": crate::tools::definitions(),
     });
-    let raw = http_json("POST", &url, &body, &[])?;
-    let text = raw
-        .pointer("/message/content")
-        .and_then(Value::as_str)
-        .or_else(|| raw.get("response").and_then(Value::as_str))
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let mut text = String::new();
+    for _ in 0..3 {
+        let raw = http_json("POST", &url, &body, &[])?;
+        let message = raw.get("message").cloned().unwrap_or(Value::Null);
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array)
+            && !calls.is_empty()
+        {
+            let msgs = body
+                .get_mut("messages")
+                .and_then(Value::as_array_mut)
+                .ok_or("bad messages")?;
+            msgs.push(message.clone());
+            for call in calls {
+                let name = call
+                    .pointer("/function/name")
+                    .or_else(|| call.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let args = call
+                    .pointer("/function/arguments")
+                    .cloned()
+                    .or_else(|| call.get("arguments").cloned())
+                    .unwrap_or(json!({}));
+                let args = match args {
+                    Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})),
+                    other => other,
+                };
+                let result = crate::tools::run(name, &args, settings);
+                msgs.push(json!({
+                    "role": "tool",
+                    "content": result,
+                }));
+            }
+            continue;
+        }
+        text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .or_else(|| raw.get("response").and_then(Value::as_str))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        break;
+    }
     if text.is_empty() {
         return Err("Ollama returned an empty answer".into());
     }
@@ -632,9 +694,11 @@ fn chat_completions(
     }
     let mut messages = vec![json!({"role": "system", "content": system})];
     messages.extend(chat_messages(history, prompt));
-    let body = json!({
+    let mut body = json!({
         "model": model,
-        "messages": messages
+        "messages": messages,
+        "max_tokens": 2048,
+        "tools": crate::tools::definitions(),
     });
     let auth = if credential.value.is_empty() {
         None
@@ -648,13 +712,49 @@ fn chat_completions(
     if settings.ai.provider == "google" && credential.oauth {
         headers.push(("x-goog-user-project", &settings.ai.oauth_project_id));
     }
-    let raw = http_json("POST", url, &body, &headers)?;
-    let text = raw
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let mut text = String::new();
+    for _ in 0..3 {
+        let raw = http_json("POST", url, &body, &headers)?;
+        let message = raw
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array)
+            && !calls.is_empty()
+        {
+            let msgs = body
+                .get_mut("messages")
+                .and_then(Value::as_array_mut)
+                .ok_or("bad messages")?;
+            msgs.push(message.clone());
+            for call in calls {
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let args_raw = call
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                let args: Value = serde_json::from_str(args_raw).unwrap_or(json!({}));
+                let result = crate::tools::run(name, &args, settings);
+                let id = call.get("id").and_then(Value::as_str).unwrap_or("");
+                msgs.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": result,
+                }));
+            }
+            continue;
+        }
+        text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        break;
+    }
     if text.is_empty() {
         return Err(format!("{label} returned an empty answer"));
     }
@@ -678,24 +778,67 @@ fn anthropic(
     } else {
         "https://api.anthropic.com/v1/messages".into()
     };
-    let body = json!({
-        "model": settings.ai.model,
-        "max_tokens": 1024,
-        "system": system,
-        "messages": chat_messages(history, prompt)
-    });
-    let raw = http_json(
-        "POST",
-        &endpoint,
-        &body,
-        &[("x-api-key", &key), ("anthropic-version", "2023-06-01")],
-    )?;
-    let text = raw
-        .pointer("/content/0/text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let mut messages = chat_messages(history, prompt);
+    let mut text = String::new();
+    for _ in 0..3 {
+        let body = json!({
+            "model": settings.ai.model,
+            "max_tokens": 2048,
+            "system": system,
+            "messages": messages,
+            "tools": crate::tools::anthropic_definitions(),
+        });
+        let raw = http_json(
+            "POST",
+            &endpoint,
+            &body,
+            &[("x-api-key", &key), ("anthropic-version", "2023-06-01")],
+        )?;
+        let stop = raw.get("stop_reason").and_then(Value::as_str).unwrap_or("");
+        let content = raw.get("content").cloned().unwrap_or(json!([]));
+        if stop == "tool_use" {
+            messages.push(json!({"role": "assistant", "content": content}));
+            let mut results = Vec::new();
+            if let Some(blocks) = content.as_array() {
+                for block in blocks {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                        continue;
+                    }
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                    let input = block.get("input").cloned().unwrap_or(json!({}));
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                    let result = crate::tools::run(name, &input, settings);
+                    results.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": result,
+                    }));
+                }
+            }
+            messages.push(json!({"role": "user", "content": results}));
+            continue;
+        }
+        text = raw
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty()
+            && let Some(blocks) = content.as_array()
+        {
+            text = blocks
+                .iter()
+                .filter_map(|b| {
+                    (b.get("type").and_then(Value::as_str) == Some("text"))
+                        .then(|| b.get("text").and_then(Value::as_str))
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        break;
+    }
     if text.is_empty() {
         return Err("Anthropic returned an empty answer".into());
     }

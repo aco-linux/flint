@@ -84,6 +84,13 @@ pub fn client_id_for(id: &str, settings: &Settings) -> String {
     }
 }
 
+pub fn calendar_connected() -> bool {
+    auth::load_for("google-calendar").is_some()
+        || auth::load_for("outlook").is_some()
+        || crate::caldav::connected("apple-calendar")
+        || crate::caldav::connected("proton-calendar")
+}
+
 pub fn items() -> Vec<Item> {
     let mut items: Vec<Item> = PRESETS
         .iter()
@@ -172,26 +179,23 @@ fn google_event(value: &Value) -> Option<Item> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let html = value
-        .get("htmlLink")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let when = crate::caldav::format_when(&start);
+    let copy = if when.is_empty() {
+        summary.clone()
+    } else {
+        format!("{when} — {summary}")
+    };
     Some(Item {
         id: format!(
             "cal:{}",
             value.get("id").and_then(Value::as_str).unwrap_or(&summary)
         ),
         title: summary,
-        subtitle: start.clone(),
+        subtitle: when,
         keywords: "calendar event google".into(),
-        kind: Kind::Web,
+        kind: Kind::Calendar,
         icon: Icon::Name("office-calendar".into()),
-        action: if html.starts_with("https://") {
-            Action::OpenUri(html)
-        } else {
-            Action::Copy(start)
-        },
+        action: Action::Copy(copy),
     })
 }
 
@@ -219,17 +223,23 @@ fn outlook_today() -> Result<Vec<Item>, String> {
                 .and_then(|s| s.get("dateTime"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            let when = crate::caldav::format_when(start);
+            let copy = if when.is_empty() {
+                title.clone()
+            } else {
+                format!("{when} — {title}")
+            };
             Some(Item {
                 id: format!(
                     "ol:{}",
                     v.get("id").and_then(Value::as_str).unwrap_or(&title)
                 ),
                 title,
-                subtitle: start.into(),
+                subtitle: when,
                 keywords: "outlook calendar".into(),
-                kind: Kind::Web,
+                kind: Kind::Calendar,
                 icon: Icon::Name("office-calendar".into()),
-                action: Action::Copy(start.into()),
+                action: Action::Copy(copy),
             })
         })
         .collect())
@@ -505,8 +515,8 @@ mod tests {
         let item = google_event(&v).unwrap();
         assert_eq!(item.title, "Standup");
         match item.action {
-            crate::item::Action::OpenUri(url) => assert!(url.starts_with("https://")),
-            _ => panic!("expected open uri"),
+            crate::item::Action::Copy(text) => assert!(text.contains("Standup")),
+            other => panic!("expected copy, got {other:?}"),
         }
     }
 }

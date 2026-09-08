@@ -1,6 +1,5 @@
 //! GIF search via Tenor (optional key in the keyring / `TENOR_API_KEY`) or
-//! Wikimedia Commons. Without a Tenor key, Commons still returns GIFs and
-//! Flint also offers a Tenor page that opens in the browser.
+//! Wikimedia Commons. Hits preview in Flint; Enter copies the GIF bytes.
 
 use std::fs;
 use std::io::Write;
@@ -28,8 +27,7 @@ pub fn search_item(query: &str) -> Item {
         Item {
             id: "gif:help".into(),
             title: "Search GIFs".into(),
-            subtitle: "Type gif cats · add a Tenor API key in Settings for in-launcher results"
-                .into(),
+            subtitle: "Type gif cats — results preview in Flint".into(),
             keywords: "gif giphy tenor".into(),
             kind: Kind::Web,
             icon: Icon::Name("image-x-generic".into()),
@@ -38,15 +36,12 @@ pub fn search_item(query: &str) -> Item {
     } else {
         Item {
             id: format!("gif:web:{q}"),
-            title: format!("Search Tenor for “{q}”"),
-            subtitle: "Opens tenor.com in your browser".into(),
+            title: format!("Search GIFs for “{q}”"),
+            subtitle: "Fetching in-app previews…".into(),
             keywords: "gif tenor".into(),
-            kind: Kind::Web,
-            icon: Icon::Name("web-browser".into()),
-            action: Action::OpenUri(format!(
-                "https://tenor.com/search/{}-gifs",
-                urlencoding_lite(q)
-            )),
+            kind: Kind::Media,
+            icon: Icon::Name("image-x-generic".into()),
+            action: Action::EnterMode(crate::mode::Mode::Gif),
         }
     }
 }
@@ -126,12 +121,61 @@ pub fn to_item(hit: &Hit) -> Item {
         } else {
             hit.title.clone()
         },
-        subtitle: "Enter copies the GIF URL, then the image when the download finishes".into(),
+        subtitle: "Enter copies the GIF".into(),
         keywords: format!("gif {}", hit.title),
         kind: Kind::Media,
         icon: Icon::Name("image-x-generic".into()),
         action: Action::Copy(gif_copy_url(hit).to_string()),
     }
+}
+
+pub fn cache_preview(hit: &Hit) -> Option<PathBuf> {
+    let url = if hit.preview.starts_with("https://") {
+        hit.preview.as_str()
+    } else if hit.url.starts_with("https://") {
+        hit.url.as_str()
+    } else {
+        return None;
+    };
+    let dir = crate::paths::runtime_dir().join("gifs");
+    fs::create_dir_all(&dir).ok()?;
+    let safe: String = hit
+        .id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(48)
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let path = dir.join(format!("{safe}.gif"));
+    if path.is_file() && path.metadata().ok().is_some_and(|m| m.len() > 32) {
+        return Some(path);
+    }
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "--fail",
+            "--connect-timeout",
+            "6",
+            "--max-time",
+            "10",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "-L",
+            url,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 4 * 1024 * 1024
+    {
+        return None;
+    }
+    fs::write(&path, &output.stdout).ok()?;
+    Some(path)
 }
 
 fn gif_copy_url(hit: &Hit) -> &str {
@@ -484,13 +528,13 @@ mod tests {
     }
 
     #[test]
-    fn tenor_search_item_is_https() {
+    fn search_item_stays_in_flint() {
         let item = super::search_item("cats");
-        match item.action {
-            crate::item::Action::OpenUri(url) => {
-                assert!(url.starts_with("https://tenor.com/"));
-            }
-            other => panic!("expected OpenUri, got {other:?}"),
-        }
+        assert!(
+            !matches!(item.action, crate::item::Action::OpenUri(_)),
+            "GIF search must not open a browser by default, got {:?}",
+            item.action
+        );
+        assert!(item.title.contains("cats"));
     }
 }

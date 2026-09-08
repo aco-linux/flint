@@ -108,8 +108,8 @@ pub fn is_playable(kind: MediaKind) -> bool {
 pub fn for_item(item: &Item) -> Preview {
     match item.kind {
         Kind::Weather => {
-            if item.subtitle.contains("Detecting") {
-                Preview::Text("Looking up the weather for your location…".into())
+            if item.subtitle.contains("Detecting") || item.subtitle.contains("Loading") {
+                Preview::Text("Looking this up…".into())
             } else {
                 Preview::Text(format!(
                     "{}\n{}\n\nEnter copies the summary.",
@@ -117,7 +117,23 @@ pub fn for_item(item: &Item) -> Preview {
                 ))
             }
         }
-        Kind::Calc | Kind::Ai => {
+        Kind::Calendar | Kind::Mail => {
+            let body = match &item.action {
+                Action::Copy(text) => text.clone(),
+                _ => format!("{}\n{}", item.title, item.subtitle),
+            };
+            Preview::Text(body)
+        }
+        Kind::Ai => {
+            if item.keywords.chars().count() > 24 {
+                Preview::Text(item.keywords.chars().take(4000).collect())
+            } else if item.subtitle.is_empty() {
+                Preview::None
+            } else {
+                Preview::Text(item.subtitle.clone())
+            }
+        }
+        Kind::Calc => {
             if item.subtitle.is_empty() {
                 Preview::None
             } else {

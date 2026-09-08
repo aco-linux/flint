@@ -1,10 +1,17 @@
 /// Query meaning: prefixes, aliases, and close misspellings.
 /// "we" → weather, "weatr" → weather, "firfox" → firefox when that word is in the lexicon.
+/// Multi-word sentences match on tokens and short phrases: "what's the weather like today?"
+/// hits Weather; "what's on my calendar today?" hits Calendar.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentKind {
     Weather,
     Time,
+    Calendar,
+    Email,
+    Gif,
+    Web,
+    Ask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,15 +28,72 @@ pub struct Meaning {
     pub expansions: Vec<String>,
 }
 
+impl Meaning {
+    pub fn has(&self, kind: IntentKind) -> bool {
+        self.intents.iter().any(|hit| hit.kind == kind)
+    }
+
+    pub fn tool_intent(&self) -> bool {
+        self.intents.iter().any(|hit| {
+            matches!(
+                hit.kind,
+                IntentKind::Weather
+                    | IntentKind::Time
+                    | IntentKind::Calendar
+                    | IntentKind::Email
+                    | IntentKind::Gif
+            )
+        })
+    }
+}
+
+/// Prefix length for whole-query / first-token matching (Raycast-style `we` → weather).
 const INTENTS: &[(&str, IntentKind, usize)] = &[
     ("weather", IntentKind::Weather, 2),
     ("forecast", IntentKind::Weather, 4),
     ("temperature", IntentKind::Weather, 4),
     ("wx", IntentKind::Weather, 2),
+    ("rain", IntentKind::Weather, 4),
+    ("raining", IntentKind::Weather, 4),
+    ("sunny", IntentKind::Weather, 4),
+    ("snow", IntentKind::Weather, 4),
+    ("snowing", IntentKind::Weather, 4),
     ("time", IntentKind::Time, 3),
     ("clock", IntentKind::Time, 3),
     ("now", IntentKind::Time, 3),
+    ("calendar", IntentKind::Calendar, 4),
+    ("agenda", IntentKind::Calendar, 4),
+    ("schedule", IntentKind::Calendar, 4),
+    ("meetings", IntentKind::Calendar, 4),
+    ("email", IntentKind::Email, 4),
+    ("inbox", IntentKind::Email, 4),
+    ("unread", IntentKind::Email, 4),
+    ("mail", IntentKind::Email, 4),
+    ("gif", IntentKind::Gif, 3),
+    ("gifs", IntentKind::Gif, 3),
+    ("giphy", IntentKind::Gif, 4),
+    ("tenor", IntentKind::Gif, 4),
+    ("search", IntentKind::Web, 5),
+    ("lookup", IntentKind::Web, 5),
 ];
+
+const PHRASES: &[(&str, IntentKind)] = &[
+    ("on my calendar", IntentKind::Calendar),
+    ("my calendar", IntentKind::Calendar),
+    ("my agenda", IntentKind::Calendar),
+    ("my schedule", IntentKind::Calendar),
+    ("my meetings", IntentKind::Calendar),
+    ("my inbox", IntentKind::Email),
+    ("my email", IntentKind::Email),
+    ("my mail", IntentKind::Email),
+    ("going to rain", IntentKind::Weather),
+    ("will it rain", IntentKind::Weather),
+    ("is it raining", IntentKind::Weather),
+    ("search the web", IntentKind::Web),
+];
+
+/// Tokens that must be the whole query (or a lone first token) — too noisy in sentences.
+const WHOLE_ONLY: &[&str] = &["now", "wx", "we", "mail"];
 
 /// Built-in concept words only. App and file names come from the live catalog.
 const LEXICON: &[&str] = &[
@@ -43,6 +107,8 @@ const LEXICON: &[&str] = &[
     "screenshot",
     "calendar",
     "calculator",
+    "inbox",
+    "email",
 ];
 
 pub fn resolve(query: &str) -> Meaning {
@@ -60,8 +126,11 @@ pub fn resolve_with(query: &str, extra_lexicon: &[&str]) -> Meaning {
         return meaning;
     }
 
+    let tokens = tokenize(&q);
+    let single = tokens.len() <= 1;
+
     for (word, kind, min_len) in INTENTS {
-        if let Some(score) = match_word(&q, word, *min_len) {
+        if let Some(score) = match_intent(&q, &tokens, word, *min_len, single) {
             meaning.intents.push(Hit {
                 kind: *kind,
                 score,
@@ -69,12 +138,38 @@ pub fn resolve_with(query: &str, extra_lexicon: &[&str]) -> Meaning {
             });
         }
     }
+    for (phrase, kind) in PHRASES {
+        if q.contains(phrase) {
+            meaning.intents.push(Hit {
+                kind: *kind,
+                score: 16_000,
+                via: (*phrase).to_string(),
+            });
+        }
+    }
+    if looks_like_question(&q) {
+        if !meaning.has(IntentKind::Ask) {
+            meaning.intents.push(Hit {
+                kind: IntentKind::Ask,
+                score: 7_000,
+                via: "question".into(),
+            });
+        }
+        if !meaning.tool_intent() && !meaning.has(IntentKind::Web) {
+            meaning.intents.push(Hit {
+                kind: IntentKind::Web,
+                score: 5_500,
+                via: "question".into(),
+            });
+        }
+    }
+
     meaning
         .intents
         .sort_by_key(|hit| std::cmp::Reverse(hit.score));
     meaning.intents.dedup_by(|a, b| a.kind == b.kind);
 
-    if meaning.corrected.is_none() && q.chars().count() >= 4 {
+    if meaning.corrected.is_none() && q.chars().count() >= 4 && single {
         meaning.corrected =
             swap_in_lexicon(&q, extra_lexicon).or_else(|| suggest(&q, extra_lexicon));
     }
@@ -84,11 +179,102 @@ pub fn resolve_with(query: &str, extra_lexicon: &[&str]) -> Meaning {
         meaning.expansions.push(corrected);
     }
     for hit in &meaning.intents {
-        if hit.via != q && !meaning.expansions.contains(&hit.via) {
+        if hit.via != q && !meaning.expansions.contains(&hit.via) && !hit.via.contains(' ') {
             meaning.expansions.push(hit.via.clone());
         }
     }
     meaning
+}
+
+pub fn looks_like_question(query: &str) -> bool {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    if q.ends_with('?') {
+        return true;
+    }
+    let head = q.split_whitespace().next().unwrap_or("");
+    matches!(
+        head,
+        "what"
+            | "what's"
+            | "whats"
+            | "who"
+            | "who's"
+            | "when"
+            | "where's"
+            | "where"
+            | "why"
+            | "how"
+            | "is"
+            | "are"
+            | "will"
+            | "does"
+            | "do"
+            | "can"
+            | "could"
+            | "should"
+            | "would"
+    )
+}
+
+/// Remainder of a GIF intent query with filler words stripped (`gif cats` → `cats`).
+pub fn gif_terms(query: &str) -> String {
+    let skip = [
+        "gif", "gifs", "giphy", "tenor", "show", "me", "a", "an", "of", "some",
+    ];
+    tokenize(query)
+        .into_iter()
+        .filter(|tok| !skip.contains(&tok.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn match_intent(
+    query: &str,
+    tokens: &[String],
+    word: &str,
+    min_len: usize,
+    single: bool,
+) -> Option<u32> {
+    if single {
+        return match_word(query, word, min_len);
+    }
+    if WHOLE_ONLY.contains(&word) {
+        return None;
+    }
+    let mut best = None;
+    for token in tokens {
+        if token == word {
+            best = Some(best.map_or(18_000, |s: u32| s.max(18_000)));
+            continue;
+        }
+        // Prefix of an intent word only for reasonably long tokens (`fore` → forecast).
+        // Short prefixes like `we` must stay single-token so "we should meet" is quiet.
+        if token.len() >= min_len.max(3) && word.starts_with(token.as_str()) {
+            let remain = word.len() - token.len();
+            let score = 12_000u32.saturating_sub((remain as u32) * 400);
+            best = Some(best.map_or(score, |s: u32| s.max(score)));
+        }
+    }
+    best
+}
+
+fn tokenize(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    for ch in query.chars() {
+        if ch.is_ascii_alphanumeric() {
+            buf.push(ch.to_ascii_lowercase());
+        } else if !buf.is_empty() {
+            out.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
 }
 
 fn match_word(query: &str, word: &str, min_len: usize) -> Option<u32> {
@@ -251,7 +437,9 @@ pub fn damerau(a: &str, b: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{IntentKind, LEXICON, damerau, resolve, suggest, title_typo_score};
+    use super::{
+        IntentKind, LEXICON, damerau, looks_like_question, resolve, suggest, title_typo_score,
+    };
 
     #[test]
     fn we_means_weather() {
@@ -320,5 +508,58 @@ mod tests {
     fn title_typo_recovers_app_names() {
         assert!(title_typo_score("firfox", "Firefox").is_some());
         assert!(title_typo_score("we", "Weather").is_none());
+    }
+
+    #[test]
+    fn phrases_hit_weather_calendar_and_inbox() {
+        let weather = resolve("what's the weather like today");
+        assert!(
+            weather.has(IntentKind::Weather),
+            "expected weather, got {weather:?}"
+        );
+        let rain = resolve("is it going to rain?");
+        assert!(
+            rain.has(IntentKind::Weather),
+            "expected rain → weather, got {rain:?}"
+        );
+        let cal = resolve("what's on my calendar today?");
+        assert!(
+            cal.has(IntentKind::Calendar),
+            "expected calendar, got {cal:?}"
+        );
+        let inbox = resolve("what's in my inbox");
+        assert!(
+            inbox.has(IntentKind::Email),
+            "expected email, got {inbox:?}"
+        );
+    }
+
+    #[test]
+    fn now_inside_a_sentence_is_not_time() {
+        let meaning = resolve("what's on my calendar now");
+        assert!(meaning.has(IntentKind::Calendar));
+        assert!(!meaning.has(IntentKind::Time));
+        assert!(resolve("now").has(IntentKind::Time));
+    }
+
+    #[test]
+    fn questions_boost_ask_without_drowning_tools() {
+        let q = resolve("what's on my calendar today?");
+        assert!(q.has(IntentKind::Calendar));
+        assert!(q.has(IntentKind::Ask));
+        assert!(
+            !q.has(IntentKind::Web),
+            "tool intents skip the web fallback"
+        );
+        assert!(looks_like_question("how do I cook pasta"));
+        let pasta = resolve("how do I cook pasta");
+        assert!(pasta.has(IntentKind::Ask));
+        assert!(pasta.has(IntentKind::Web));
+    }
+
+    #[test]
+    fn we_in_a_sentence_is_not_weather() {
+        let meaning = resolve("we should meet");
+        assert!(!meaning.has(IntentKind::Weather));
     }
 }

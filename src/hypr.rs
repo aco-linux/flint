@@ -280,6 +280,26 @@ pub(crate) fn target_client<'a>(
     ranked.into_iter().next()
 }
 
+pub fn resize_launcher(width: i32, height: i32) {
+    let width = width.max(320);
+    let height = height.max(240);
+    let clients = clients();
+    if let Some(client) = clients
+        .iter()
+        .find(|c| c.mapped && !c.hidden && is_launcher_class(&c.class) && !c.address.is_empty())
+    {
+        let _ = dispatch(&format!(
+            "resizewindowpixel exact {width} {height},address:{}",
+            client.address
+        ));
+        return;
+    }
+    let _ = dispatch(&format!(
+        "resizewindowpixel exact {width} {height},class:{}",
+        crate::APP_ID
+    ));
+}
+
 pub(crate) fn dispatch(spec: &str) -> bool {
     if command_ok(&format!("dispatch {spec}")) {
         return true;

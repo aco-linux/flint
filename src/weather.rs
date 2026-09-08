@@ -40,7 +40,7 @@ pub fn fetch() -> Result<Snapshot, String> {
             "2",
             "-A",
             "flint/0.2",
-            "https://wttr.in/?format=%l|%c|%t|%C|%h|%w",
+            "https://wttr.in/?format=%l|%c|%t|%C|%h|%w|%p|%o",
         ])
         .stdin(Stdio::null())
         .output()
@@ -77,9 +77,11 @@ pub fn parse(raw: &str) -> Option<Snapshot> {
     let condition = parts[3].to_string();
     let humidity = parts.get(4).copied().unwrap_or("");
     let wind = parts.get(5).copied().unwrap_or("");
-    let extra = [humidity, wind]
+    let precip = parts.get(6).copied().unwrap_or("");
+    let rain = parts.get(7).copied().unwrap_or("");
+    let extra = [humidity, wind, precip, rain]
         .into_iter()
-        .filter(|part| !part.is_empty())
+        .filter(|part| !part.is_empty() && *part != "0.0mm" && *part != "0mm")
         .collect::<Vec<_>>()
         .join(" · ");
     let summary = format!("{temp} {glyph} {condition}").trim().to_string();
@@ -112,7 +114,7 @@ pub fn item(snapshot: Option<&Snapshot>) -> Item {
             keywords: "weather forecast temperature wx climate".into(),
             kind: Kind::Weather,
             icon: Icon::Name("weather-few-clouds".into()),
-            action: Action::OpenUri("https://wttr.in".into()),
+            action: Action::Copy("Detecting weather…".into()),
         },
     }
 }
@@ -152,11 +154,13 @@ mod tests {
 
     #[test]
     fn parses_wttr_pipe_format() {
-        let snap = parse("San Francisco, United States|☀️|+18°C|Clear|61%|↙11km/h").unwrap();
+        let snap =
+            parse("San Francisco, United States|☀️|+18°C|Clear|61%|↙11km/h|0.0mm|10%").unwrap();
         assert_eq!(snap.location, "San Francisco, United States");
         assert!(snap.summary.contains("18"));
         assert!(snap.summary.contains("Clear"));
         assert!(snap.extra.contains("61%"));
+        assert!(snap.extra.contains("10%"));
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub enum Kind {
     Script,
     Weather,
     Media,
+    Calendar,
+    Mail,
 }
 
 impl Kind {
@@ -45,6 +47,8 @@ impl Kind {
             Kind::Script => "SCRIPT",
             Kind::Weather => "NOW",
             Kind::Media => "MEDIA",
+            Kind::Calendar => "CAL",
+            Kind::Mail => "MAIL",
         }
     }
 }
@@ -268,6 +272,15 @@ impl Live {
                 Action::OpenPath(path) | Action::PlayMedia { path } => Self::from_path(path),
                 _ => Self::None,
             },
+            Kind::Calendar | Kind::Mail => {
+                if item.subtitle.is_empty() {
+                    Self::None
+                } else {
+                    Self::Snippet {
+                        text: item.subtitle.clone(),
+                    }
+                }
+            }
             Kind::App
             | Kind::Window
             | Kind::Command
