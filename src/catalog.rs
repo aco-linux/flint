@@ -8,6 +8,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use crate::alias;
 use crate::auth;
 use crate::calc;
+use crate::choices;
 use crate::clipboard::{self, Store as ClipStore};
 use crate::config::Settings;
 use crate::desktop;
@@ -23,8 +24,59 @@ use crate::quicklinks;
 use crate::smart;
 use crate::snippets;
 use crate::store;
+use crate::tz;
 use crate::usage;
 use crate::weather;
+
+// Ranking ladder (higher wins). Nucleo is length-normalized and sits in the
+// thousands; these steps are the order the user actually sees.
+//
+//   120_000  explicit alias
+//   118_000  complete calc (`1+1`, `20% of 80`) — not a bare `1`
+//   115_000  learned query→item choice (decayed)
+//   110_000  live weather / first-frame weather placeholder / focus timer
+//   100_000  layout-save
+//    92_000  emoji (only when the query looks like emoji)
+//    90_000  `>` / `$` shell
+//    85_000  memory / translate / tz / instant answers
+//    80_000  typed URI
+//    70_000  intents (weather/time/calendar/email/gif) + hit.score
+//    50_000  Ask AI · type-word file search (files sit here and above)
+//    20_000  prefix-learned choice (`s` after `sl` → Slack)
+//     8_000  apps/commands while a type-word file search is running
+//       400  web fallback (last)
+//
+// Title-first fuzzy pool (applied inside `rank`, before usage/kind):
+//   +10_000  exact title
+//    +4_000  title starts with query
+//    +2_500  title-word prefix or initials (`vsc`, `gc`)
+//    +1_500  keyword exact/prefix
+//    ≤2_400  typo / adjacent-swap (capped below prefix)
+const TIER_ALIAS: u32 = 120_000;
+const TIER_CALC: u32 = 100_000;
+const TIER_WEATHER: u32 = 110_000;
+const TIER_FOCUS: u32 = 110_000;
+const TIER_LAYOUT_SAVE: u32 = 100_000;
+const TIER_EMOJI: u32 = 92_000;
+const TIER_SHELL: u32 = 90_000;
+const TIER_INSTANT: u32 = 85_000;
+const TIER_URI: u32 = 80_000;
+const TIER_INTENT: u32 = 70_000;
+const TIER_ASK: u32 = 50_000;
+const TIER_FILE_TYPE: u32 = 50_000;
+const TIER_APP_IN_TYPE_SEARCH: u32 = 8_000;
+const TIER_WEB_INTENT: u32 = 12_000;
+const TIER_WEB_ASK: u32 = 8_000;
+const TIER_WEB_FALLBACK: u32 = 400;
+const TIER_PATH: u32 = 12_000;
+const TIER_GIF: u32 = 65_000;
+const TIER_TIME: u32 = 60_000;
+
+const TITLE_EXACT: u32 = 10_000;
+const TITLE_PREFIX: u32 = 4_000;
+const TITLE_WORD_OR_INITIALS: u32 = 2_500;
+const KEYWORD_PREFIX: u32 = 1_500;
+const TYPO_CAP: u32 = 2_400;
 
 pub struct Catalog {
     apps: Vec<Item>,
@@ -36,6 +88,7 @@ pub struct Catalog {
     windows: RefCell<Vec<Item>>,
     matcher: RefCell<Matcher>,
     pub(crate) usage: usage::Map,
+    pub(crate) choices: choices::Map,
     pub(crate) clips: Rc<RefCell<ClipStore>>,
     pub settings: Rc<RefCell<Settings>>,
 }
@@ -108,6 +161,7 @@ impl Catalog {
             windows: RefCell::new(windows),
             matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
             usage: usage::load(),
+            choices: choices::load(),
             clips,
             settings,
         }
@@ -174,85 +228,90 @@ impl Catalog {
             return self.empty_state();
         }
 
+        let file_query = files::parse_query(query);
+        let type_search = file_query.is_type_search();
+        let file_heavy = type_search || file_query.path_like || file_query.explicit;
+
+        let lexicon: Vec<&str> = self.lexicon.iter().map(String::as_str).collect();
+        let meaning = intent::resolve_with(query, &lexicon);
+        let complete_calc = calc::root_item(query);
+
         if let Some(item) = crate::focus::live_item() {
             let hay = format!("{} {}", item.title, item.keywords).to_ascii_lowercase();
             if hay.contains(&query.to_ascii_lowercase()) {
-                results.push(Scored::new(item, 110_000));
+                results.push(Scored::new(item, TIER_FOCUS));
             }
         }
 
         if let Some(id) = alias::Store::load().lookup(query)
             && let Some(item) = self.lookup_item(id)
         {
-            results.push(Scored::new(item, 120_000));
+            results.push(Scored::new(item, TIER_ALIAS));
         }
 
-        if let Some(item) = calc::answer_item(query) {
-            results.push(Scored::new(item, 100_000));
+        if let Some(item) = complete_calc.clone() {
+            results.push(Scored::new(item, TIER_CALC));
         }
         for item in smart::instant_items(query) {
-            results.push(Scored::new(item, 95_000));
+            results.push(Scored::new(item, TIER_INSTANT));
         }
         if let Some(item) = crate::translate::item(query) {
-            results.push(Scored::new(item, 98_000));
+            results.push(Scored::new(item, TIER_INSTANT));
         }
         for (i, item) in crate::memory::items(query).into_iter().enumerate() {
-            results.push(Scored::new(item, 99_000u32.saturating_sub(i as u32)));
+            results.push(Scored::new(item, TIER_INSTANT.saturating_sub(i as u32)));
         }
-        for item in crate::tz::items(query) {
-            results.push(Scored::new(item, 96_000));
+        for item in tz::items(query) {
+            results.push(Scored::new(item, TIER_INSTANT));
         }
-        if query.chars().count() >= 2 {
-            let looks = crate::emoji::looks_like_query(query);
-            let n = if looks { 8 } else { 3 };
-            for (i, item) in crate::emoji::search(query, n).into_iter().enumerate() {
-                let score = if looks {
-                    92_000u32.saturating_sub(i as u32 * 10)
-                } else {
-                    3_000
-                };
-                results.push(Scored::new(item, score));
+
+        let suppress_emoji = type_search
+            || meaning.has(IntentKind::Weather)
+            || meaning.has(IntentKind::Time)
+            || meaning.has(IntentKind::Calendar)
+            || meaning.has(IntentKind::Email);
+        if !suppress_emoji && crate::emoji::looks_like_query(query) {
+            for (i, item) in crate::emoji::search(query, 8).into_iter().enumerate() {
+                results.push(Scored::new(item, TIER_EMOJI.saturating_sub(i as u32 * 10)));
             }
         }
 
-        let lexicon: Vec<&str> = self.lexicon.iter().map(String::as_str).collect();
-        let meaning = intent::resolve_with(query, &lexicon);
         for hit in &meaning.intents {
             match hit.kind {
                 IntentKind::Weather => results.push(Scored::new(
                     weather::item(weather::cached().as_ref()),
-                    70_000 + hit.score,
+                    TIER_WEATHER,
                 )),
                 IntentKind::Time => {
-                    results.push(Scored::new(weather::time_item(), 60_000 + hit.score))
+                    results.push(Scored::new(weather::time_item(), TIER_TIME + hit.score))
                 }
                 IntentKind::Calendar => {
-                    results.push(Scored::new(calendar_stub(), 70_000 + hit.score));
+                    results.push(Scored::new(calendar_stub(), TIER_INTENT + hit.score));
                 }
                 IntentKind::Email => {
                     results.push(Scored::new(
                         crate::mail::stub(&self.settings.borrow()),
-                        70_000 + hit.score,
+                        TIER_INTENT + hit.score,
                     ));
                 }
                 IntentKind::Gif => {
                     let terms = intent::gif_terms(query);
                     results.push(Scored::new(
                         crate::gif::search_item(if terms.is_empty() { query } else { &terms }),
-                        65_000 + hit.score,
+                        TIER_GIF + hit.score,
                     ));
                 }
                 IntentKind::Web => {
                     results.push(Scored::new(
                         crate::web::search_item(query),
-                        12_000 + hit.score,
+                        TIER_WEB_INTENT + hit.score,
                     ));
                 }
                 IntentKind::Ask => {
                     if !query.is_empty() {
                         results.push(Scored::new(
                             ask_prompt_item(query, &self.settings.borrow()),
-                            50_000,
+                            TIER_ASK,
                         ));
                     }
                 }
@@ -262,17 +321,20 @@ impl Catalog {
         if query.starts_with('>') {
             let cmd = query.trim_start_matches('>').trim();
             if !cmd.is_empty() {
-                results.push(Scored::new(run_item(cmd.to_string(), false), 90_000));
+                results.push(Scored::new(run_item(cmd.to_string(), false), TIER_SHELL));
             }
         } else if query.starts_with('$') {
             let cmd = query.trim_start_matches('$').trim();
             if !cmd.is_empty() {
-                results.push(Scored::new(run_item(cmd.to_string(), true), 90_000));
+                results.push(Scored::new(run_item(cmd.to_string(), true), TIER_SHELL));
             }
         }
 
         if let Some(name) = crate::layout::parse_save_query(query) {
-            results.push(Scored::new(crate::layout::save_item(&name), 100_000));
+            results.push(Scored::new(
+                crate::layout::save_item(&name),
+                TIER_LAYOUT_SAVE,
+            ));
         }
 
         if looks_like_uri(query) {
@@ -291,18 +353,20 @@ impl Catalog {
                     icon: Icon::Name("web-browser".into()),
                     action: Action::OpenUri(uri),
                 },
-                80_000,
+                TIER_URI,
             ));
         }
 
         if let Some(item) = smart::path_command(query) {
-            results.push(Scored::new(item, 12_000));
+            results.push(Scored::new(item, TIER_PATH));
         }
 
-        let file_query = files::parse_query(query);
-        let file_heavy = file_query.is_type_search() || file_query.path_like || file_query.explicit;
+        if type_search {
+            let label = file_query.type_label.as_deref().unwrap_or("Files");
+            results.push(Scored::new(files_searching_item(label), TIER_FILE_TYPE));
+        }
+
         let now = usage::now_secs();
-        let hay = self.haystacks.borrow();
         let windows = self.windows.borrow();
         let installed = self.installed.borrow();
         let mut matcher = self.matcher.borrow_mut();
@@ -326,16 +390,9 @@ impl Catalog {
 
         let mut ranked: Vec<(u32, &Item)> = Vec::new();
         for item in pool {
-            let glued = hay_with_alias(
-                item,
-                hay.get(&item.id).map(String::as_str),
-                aliases.get(&item.id),
-            );
-            let haystack = glued.as_str();
             let input = RankInput {
                 query,
                 item,
-                haystack,
                 usage: &self.usage,
                 now,
                 file_heavy,
@@ -350,7 +407,6 @@ impl Catalog {
                 RankInput {
                     query,
                     item,
-                    haystack,
                     usage: &self.usage,
                     now,
                     file_heavy,
@@ -362,18 +418,16 @@ impl Catalog {
             }
         }
 
-        results.extend(take_scored(ranked, mix_limit.max(file_limit)));
+        results.extend(take_scored(ranked, mix_limit.max(file_limit), &self.usage));
 
         if include_in_root && file_query.wants_files() {
             for item in files::well_known_folders(query) {
-                let scratch = item.haystack();
                 let score = rank(
                     &mut matcher,
                     &pattern,
                     RankInput {
                         query,
                         item: &item,
-                        haystack: &scratch,
                         usage: &self.usage,
                         now,
                         file_heavy,
@@ -388,16 +442,30 @@ impl Catalog {
 
         drop(matcher);
         drop(windows);
-        drop(hay);
+
+        if type_search {
+            for row in &mut results {
+                if matches!(
+                    row.item.kind,
+                    Kind::App | Kind::Command | Kind::Extension | Kind::Window | Kind::Script
+                ) {
+                    row.score = row.score.min(TIER_APP_IN_TYPE_SEARCH);
+                }
+            }
+        }
+
+        if complete_calc.is_none() {
+            self.apply_learned_choice(query, now, &mut results);
+        }
 
         if !query.starts_with(['>', '$', '=', '/', '~', ';'])
             && !meaning.tool_intent()
             && !meaning.has(IntentKind::Web)
         {
             let encoded_score = if meaning.has(IntentKind::Ask) {
-                8_000
+                TIER_WEB_ASK
             } else {
-                400
+                TIER_WEB_FALLBACK
             };
             results.push(Scored::new(crate::web::search_item(query), encoded_score));
         }
@@ -407,7 +475,49 @@ impl Catalog {
         } else {
             mix_limit
         };
-        finish_limited(results, limit)
+        let out = finish_limited(results, limit, &self.usage);
+        log_rank_debug(query, &out);
+        out
+    }
+
+    pub(crate) fn touch_usage(&mut self, id: &str) {
+        if id.is_empty() {
+            return;
+        }
+        let now = usage::now_secs();
+        let rec = self
+            .usage
+            .entry(id.to_string())
+            .or_insert(usage::Record { count: 0, last: 0 });
+        rec.count = rec.count.saturating_add(1);
+        rec.last = now;
+        usage::bump(id);
+    }
+
+    pub(crate) fn learn_choice(&mut self, query: &str, id: &str) {
+        choices::bump(&mut self.choices, query, id);
+    }
+
+    pub(crate) fn clear_choices(&mut self) {
+        choices::clear(&mut self.choices);
+    }
+
+    fn apply_learned_choice(&self, query: &str, now: u64, results: &mut Vec<Scored>) {
+        let Some((id, rec)) = choices::best(&self.choices, query) else {
+            return;
+        };
+        let id = id.to_string();
+        let bonus = choices::bonus(&rec, now);
+        if bonus == 0 {
+            return;
+        }
+        if let Some(row) = results.iter_mut().find(|row| row.item.id == id) {
+            row.score = row.score.max(bonus);
+            return;
+        }
+        if let Some(item) = self.lookup_item(&id) {
+            results.push(Scored::new(item, bonus));
+        }
     }
 
     fn search_files(&self, query: &str) -> Vec<Scored> {
@@ -434,13 +544,13 @@ impl Catalog {
                     results.push(Scored::new(item, 20_000 + score));
                 }
             }
-            return finish_limited(results, limit);
+            return finish_limited(results, limit, &self.usage);
         }
 
         for item in files::well_known_folders(q) {
             results.push(Scored::new(item, 30_000));
         }
-        finish_limited(results, limit)
+        finish_limited(results, limit, &self.usage)
     }
 
     fn search_windows(&self, query: &str) -> Vec<Scored> {
@@ -464,7 +574,7 @@ impl Catalog {
         }
         results.extend(self.score_pool(&layouts, q, 24));
         results.extend(self.score_windows(q));
-        finish(results)
+        finish(results, &self.usage)
     }
 
     fn score_pool(&self, items: &[Item], query: &str, limit: usize) -> Vec<Scored> {
@@ -526,7 +636,7 @@ impl Catalog {
         let items: Vec<Item> = snippets::load().into_iter().map(|s| s.to_item()).collect();
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
         results.extend(self.score_pool(&items, rest, 18));
-        finish(results)
+        finish(results, &self.usage)
     }
 
     fn search_notes(&self, query: &str) -> Vec<Scored> {
@@ -558,7 +668,7 @@ impl Catalog {
         items.extend(notes::load().into_iter().map(|n| n.to_item()));
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
         results.extend(self.score_pool(&items, rest, 18));
-        finish(results)
+        finish(results, &self.usage)
     }
 
     fn search_ask(&self, query: &str) -> Vec<Scored> {
@@ -686,7 +796,7 @@ impl Catalog {
             return results;
         }
         results.extend(self.score_pool(&hist, q, 48));
-        finish(results)
+        finish(results, &self.usage)
     }
 
     fn search_settings(&self, query: &str) -> Vec<Scored> {
@@ -701,6 +811,15 @@ impl Catalog {
                 kind: Kind::Settings,
                 icon: Icon::Name("preferences-system".into()),
                 action: Action::OpenPrefs { page: None },
+            },
+            Item {
+                id: "set:clear-choices".into(),
+                title: "Clear learned choices".into(),
+                subtitle: "Forget query→app ranking memory".into(),
+                keywords: "forget ranking memory choices query".into(),
+                kind: Kind::Settings,
+                icon: Icon::Name("edit-clear".into()),
+                action: Action::ClearChoices,
             },
             setting_toggle(
                 "autostart",
@@ -1123,7 +1242,7 @@ impl Catalog {
             .collect();
         let rest = q.strip_prefix('+').unwrap_or(q).trim();
         results.extend(self.score_pool(&items, rest, 24));
-        finish(results)
+        finish(results, &self.usage)
     }
 
     fn search_emoji(&self, query: &str) -> Vec<Scored> {
@@ -1170,7 +1289,7 @@ impl Catalog {
         }
         let history = calc::History::load().items();
         results.extend(self.score_pool(&history, q, 24));
-        finish(results)
+        finish(results, &self.usage)
     }
 
     pub(crate) fn lookup_item(&self, id: &str) -> Option<Item> {
@@ -1332,7 +1451,7 @@ pub fn live_extras(
         let item = weather::item(Some(&snap));
         extras.weather = Some(Scored::with_live(
             item,
-            88_000,
+            TIER_WEATHER,
             Live::Weather {
                 summary: snap.summary,
                 location: snap.location,
@@ -1628,7 +1747,7 @@ fn score_pool(
     usage_map: &usage::Map,
     limit: usize,
     matcher: &mut Matcher,
-    haystacks: &HashMap<String, String>,
+    _haystacks: &HashMap<String, String>,
 ) -> Vec<Scored> {
     let query = query.trim();
     let aliases = alias::Store::load();
@@ -1655,15 +1774,9 @@ fn score_pool(
     let now = usage::now_secs();
     let mut ranked: Vec<(u32, &Item)> = Vec::new();
     for item in items {
-        let owned = hay_with_alias(
-            item,
-            haystacks.get(&item.id).map(String::as_str),
-            aliases.get(&item.id),
-        );
         let input = RankInput {
             query,
             item,
-            haystack: &owned,
             usage: usage_map,
             now,
             file_heavy: false,
@@ -1676,11 +1789,19 @@ fn score_pool(
             ranked.push((score, item));
         }
     }
-    take_scored(ranked, limit)
+    take_scored(ranked, limit, usage_map)
 }
 
-fn take_scored(mut ranked: Vec<(u32, &Item)>, limit: usize) -> Vec<Scored> {
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+fn usage_last(usage: &usage::Map, id: &str) -> u64 {
+    usage.get(id).map(|rec| rec.last).unwrap_or(0)
+}
+
+fn take_scored(mut ranked: Vec<(u32, &Item)>, limit: usize, usage: &usage::Map) -> Vec<Scored> {
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| usage_last(usage, &b.1.id).cmp(&usage_last(usage, &a.1.id)))
+            .then_with(|| a.1.title.cmp(&b.1.title))
+    });
     ranked.dedup_by(|a, b| a.1.id == b.1.id);
     ranked.truncate(limit);
     ranked
@@ -1689,14 +1810,15 @@ fn take_scored(mut ranked: Vec<(u32, &Item)>, limit: usize) -> Vec<Scored> {
         .collect()
 }
 
-fn finish(results: Vec<Scored>) -> Vec<Scored> {
-    finish_limited(results, 48)
+fn finish(results: Vec<Scored>, usage: &usage::Map) -> Vec<Scored> {
+    finish_limited(results, 48, usage)
 }
 
-fn finish_limited(mut results: Vec<Scored>, limit: usize) -> Vec<Scored> {
+fn finish_limited(mut results: Vec<Scored>, limit: usize, usage: &usage::Map) -> Vec<Scored> {
     results.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
+            .then_with(|| usage_last(usage, &b.item.id).cmp(&usage_last(usage, &a.item.id)))
             .then_with(|| a.item.title.cmp(&b.item.title))
     });
     results.dedup_by(|a, b| a.item.id == b.item.id);
@@ -1708,7 +1830,6 @@ fn finish_limited(mut results: Vec<Scored>, limit: usize) -> Vec<Scored> {
 struct RankInput<'a> {
     query: &'a str,
     item: &'a Item,
-    haystack: &'a str,
     usage: &'a usage::Map,
     now: u64,
     file_heavy: bool,
@@ -1732,37 +1853,89 @@ fn rank_expansions(
     None
 }
 
-fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Option<u32> {
+fn nucleo_norm(raw: u32, text: &str) -> u32 {
+    let len = text.chars().count().max(4) as u32;
+    raw / len
+}
+
+fn nucleo_field(matcher: &mut Matcher, pattern: &Pattern, text: &str) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
     let mut buf = Vec::new();
-    let title = input.item.title.to_lowercase();
-    let title_score = pattern.score(Utf32Str::new(&input.item.title, &mut buf), matcher);
-    buf.clear();
-    let hay_score = pattern.score(Utf32Str::new(input.haystack, &mut buf), matcher);
-    let typo = typo_score(input.query, input.item);
-    let q_lower = input.query.to_ascii_lowercase();
-    let alias_hit = input.alias.is_some_and(|alias| {
-        let a = alias.to_ascii_lowercase();
-        !q_lower.is_empty() && (a == q_lower || a.starts_with(&q_lower))
-    });
-    let mut score = match hay_score {
-        Some(value) => value,
-        None if alias_hit => 1,
-        None => typo?,
+    let raw = pattern
+        .score(Utf32Str::new(text, &mut buf), matcher)
+        .unwrap_or(0);
+    nucleo_norm(raw, text)
+}
+
+fn title_initials(title: &str) -> String {
+    title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .filter_map(|word| word.chars().next())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Option<u32> {
+    let title = input.item.title.as_str();
+    let title_lc = title.to_lowercase();
+    let q_lc = input.query.trim().to_lowercase();
+    let alias_lc = input.alias.map(|a| a.to_ascii_lowercase());
+    let keywords = match alias_lc.as_deref() {
+        Some(alias) if !alias.is_empty() => format!("{} {alias}", input.item.keywords),
+        _ => input.item.keywords.clone(),
     };
-    if hay_score.is_some()
-        && let Some(typo) = typo
-    {
+
+    let title_score = nucleo_field(matcher, pattern, title);
+    let keyword_score = nucleo_field(matcher, pattern, &keywords).saturating_mul(3) / 5;
+    let subtitle_score =
+        nucleo_field(matcher, pattern, &input.item.subtitle).saturating_mul(3) / 10;
+    let nucleo = title_score.max(keyword_score).max(subtitle_score);
+
+    let typo = typo_score(input.query, input.item).map(|s| s.min(TYPO_CAP));
+    let alias_hit = alias_lc
+        .as_deref()
+        .is_some_and(|alias| !q_lc.is_empty() && (alias == q_lc || alias.starts_with(&q_lc)));
+
+    let exact_title = !q_lc.is_empty() && title_lc == q_lc;
+    let title_prefix = !q_lc.is_empty() && title_lc.starts_with(&q_lc);
+    let word_prefix = !q_lc.is_empty()
+        && title_lc
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word.starts_with(&q_lc));
+    let initials = !q_lc.is_empty() && {
+        let init = title_initials(title);
+        init == q_lc || (!init.is_empty() && init.starts_with(&q_lc))
+    };
+    let keyword_lc = keywords.to_lowercase();
+    let keyword_hit = !q_lc.is_empty()
+        && keyword_lc
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == q_lc || word.starts_with(&q_lc));
+
+    let title_tier = if exact_title {
+        TITLE_EXACT
+    } else if title_prefix {
+        TITLE_PREFIX
+    } else if word_prefix || initials {
+        TITLE_WORD_OR_INITIALS
+    } else if keyword_hit {
+        KEYWORD_PREFIX
+    } else {
+        0
+    };
+
+    if nucleo == 0 && typo.is_none() && !alias_hit && title_tier == 0 {
+        return None;
+    }
+
+    let mut score = nucleo;
+    if let Some(typo) = typo {
         score = score.max(typo);
     }
-    if let Some(ts) = title_score {
-        score = score.saturating_add(ts.saturating_mul(2));
-    }
-    let q = input.query.to_lowercase();
-    if title.starts_with(&q) {
-        score = score.saturating_add(usage::PREFIX_BONUS);
-    } else if title.split_whitespace().any(|word| word.starts_with(&q)) {
-        score = score.saturating_add(usage::PREFIX_BONUS / 2);
-    }
+    score = score.saturating_add(title_tier);
     score = score.saturating_add(usage::score(input.usage.get(&input.item.id), input.now));
     score = score.saturating_add(match input.item.kind {
         Kind::Weather | Kind::Calendar | Kind::Mail => 220,
@@ -1778,11 +1951,10 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
         Kind::File => 30,
         Kind::Calc | Kind::Web | Kind::Shell => 10,
     });
-    if let Some(alias) = input.alias {
-        let a = alias.to_ascii_lowercase();
-        if !q_lower.is_empty() && a == q_lower {
+    if let Some(alias) = alias_lc.as_deref() {
+        if !q_lc.is_empty() && alias == q_lc {
             score = score.saturating_add(50_000);
-        } else if !q_lower.is_empty() && a.starts_with(&q_lower) {
+        } else if !q_lc.is_empty() && alias.starts_with(&q_lc) {
             score = score.saturating_add(40_000);
         }
     }
@@ -1794,7 +1966,7 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
 
 fn typo_score(query: &str, item: &Item) -> Option<u32> {
     if let Some(score) = intent::title_typo_score(query, &item.title) {
-        return Some(score);
+        return Some(score.min(TYPO_CAP));
     }
     let q = query.trim().to_ascii_lowercase();
     let title = item.title.to_ascii_lowercase();
@@ -1809,6 +1981,7 @@ fn typo_score(query: &str, item: &Item) -> Option<u32> {
     item.keywords
         .split_whitespace()
         .find_map(|word| intent::title_typo_score(query, word))
+        .map(|score| score.min(TYPO_CAP))
 }
 
 fn rank_file(
@@ -1820,14 +1993,13 @@ fn rank_file(
     now: u64,
 ) -> u32 {
     let path = std::path::Path::new(item.id.trim_start_matches("file:"));
-    let hay = item.haystack();
+    let type_search = files::parse_query(query).is_type_search();
     let nucleo = rank(
         matcher,
         pattern,
         RankInput {
             query,
             item,
-            haystack: &hay,
             usage: usage_map,
             now,
             file_heavy: true,
@@ -1837,7 +2009,11 @@ fn rank_file(
     )
     .unwrap_or(800);
     let mut score = nucleo;
-    score = score.saturating_add(4_000);
+    if type_search {
+        score = score.saturating_add(TIER_FILE_TYPE);
+    } else {
+        score = score.saturating_add(4_000);
+    }
     let title = item.title.to_ascii_lowercase();
     let q = query.to_ascii_lowercase();
     if title == q || title.starts_with(&q) {
@@ -1854,15 +2030,36 @@ fn rank_file(
     score
 }
 
-fn hay_with_alias(item: &Item, cached: Option<&str>, alias: Option<&str>) -> String {
-    let mut hay = cached
-        .map(str::to_string)
-        .unwrap_or_else(|| item.haystack());
-    if let Some(alias) = alias.filter(|a| !a.is_empty()) {
-        hay.push(' ');
-        hay.push_str(alias);
+fn files_searching_item(label: &str) -> Item {
+    Item {
+        id: format!("files:searching:{label}"),
+        title: format!("{label} · searching…"),
+        subtitle: "Recent files will fill this list".into(),
+        keywords: format!("{label} files search type"),
+        kind: Kind::File,
+        icon: Icon::Name("system-search".into()),
+        action: Action::EnterMode(Mode::Files),
     }
-    hay
+}
+
+fn log_rank_debug(query: &str, results: &[Scored]) {
+    if !rank_debug_enabled() {
+        return;
+    }
+    eprintln!("flint-rank query={query:?}");
+    for (i, row) in results.iter().take(10).enumerate() {
+        eprintln!(
+            "flint-rank {i} ({}, {}, kind={:?} title={:?})",
+            row.score, row.item.id, row.item.kind, row.item.title
+        );
+    }
+}
+
+fn rank_debug_enabled() -> bool {
+    match std::env::var_os("FLINT_RANK_DEBUG") {
+        Some(value) => value == "1",
+        None => false,
+    }
 }
 
 fn looks_like_uri(query: &str) -> bool {
@@ -2105,6 +2302,15 @@ fn system_commands() -> Vec<Item> {
     );
     confetti.keywords = "party celebrate confetti".into();
     items.push(confetti);
+    let mut forget = cmd(
+        "clear-choices",
+        "Clear learned choices",
+        "Forget which apps you pick for a query",
+        "edit-clear",
+        Action::ClearChoices,
+    );
+    forget.keywords = "forget ranking memory choices query".into();
+    items.push(forget);
     items
 }
 
@@ -2136,6 +2342,7 @@ fn which(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::looks_like_uri;
+    use crate::item::{Action, Icon, Item, Kind};
     use crate::mode::Mode;
 
     #[test]
@@ -2460,15 +2667,12 @@ mod tests {
             nucleo_matcher::pattern::CaseMatching::Smart,
             nucleo_matcher::pattern::Normalization::Smart,
         );
-        let hay_w = weather.haystack();
-        let hay_web = web.haystack();
         let weather_score = super::rank(
             &mut matcher,
             &pattern,
             super::RankInput {
                 query: "we",
                 item: &weather,
-                haystack: &hay_w,
                 usage: &usage,
                 now,
                 file_heavy: false,
@@ -2483,7 +2687,6 @@ mod tests {
             super::RankInput {
                 query: "we",
                 item: &web,
-                haystack: &hay_web,
                 usage: &usage,
                 now,
                 file_heavy: false,
@@ -2517,7 +2720,6 @@ mod tests {
             nucleo_matcher::pattern::CaseMatching::Smart,
             nucleo_matcher::pattern::Normalization::Smart,
         );
-        let hay = item.haystack();
         let usage = crate::usage::Map::new();
         let score = super::rank(
             &mut matcher,
@@ -2525,7 +2727,6 @@ mod tests {
             super::RankInput {
                 query: "weahter",
                 item: &item,
-                haystack: &hay,
                 usage: &usage,
                 now: 1_800_000_000,
                 file_heavy: false,
@@ -2651,5 +2852,317 @@ mod tests {
         assert!(settings.iter().any(|row| row.item.id == "set:signin-xai"
             || row.item.id == "ext:signin-grok"
             || matches!(row.item.action, Action::SignIn { ref provider } if provider == "xai")));
+    }
+
+    fn test_item(id: &str, title: &str, keywords: &str) -> Item {
+        Item {
+            id: id.into(),
+            title: title.into(),
+            subtitle: String::new(),
+            keywords: keywords.into(),
+            kind: Kind::App,
+            icon: Icon::None,
+            action: Action::Copy(String::new()),
+        }
+    }
+
+    fn test_catalog(apps: Vec<Item>) -> super::Catalog {
+        let mut haystacks = std::collections::HashMap::new();
+        for item in &apps {
+            haystacks.insert(item.id.clone(), item.haystack());
+        }
+        super::Catalog {
+            apps,
+            commands: Vec::new(),
+            extensions: Vec::new(),
+            installed: std::cell::RefCell::new(Vec::new()),
+            lexicon: Vec::new(),
+            haystacks: std::cell::RefCell::new(haystacks),
+            windows: std::cell::RefCell::new(Vec::new()),
+            matcher: std::cell::RefCell::new(nucleo_matcher::Matcher::new(
+                nucleo_matcher::Config::DEFAULT,
+            )),
+            usage: crate::usage::Map::new(),
+            choices: crate::choices::Map::new(),
+            clips: std::rc::Rc::new(std::cell::RefCell::new(crate::clipboard::Store::default())),
+            settings: std::rc::Rc::new(std::cell::RefCell::new(crate::config::Settings::default())),
+        }
+    }
+
+    fn rank_item(query: &str, item: &Item, usage: &crate::usage::Map, now: u64) -> u32 {
+        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let pattern = nucleo_matcher::pattern::Pattern::parse(
+            query,
+            nucleo_matcher::pattern::CaseMatching::Smart,
+            nucleo_matcher::pattern::Normalization::Smart,
+        );
+        super::rank(
+            &mut matcher,
+            &pattern,
+            super::RankInput {
+                query,
+                item,
+                usage,
+                now,
+                file_heavy: false,
+                alias: None,
+                favorite: false,
+            },
+        )
+        .unwrap_or(0)
+    }
+
+    #[test]
+    fn learned_choice_is_row_zero() {
+        let slack = test_item("app:slack", "Slack", "");
+        let sleep = test_item("app:sleep", "Sleep", "");
+        let helper = test_item("app:slack-helper", "Slack Helper", "");
+        let mut catalog = test_catalog(vec![slack, sleep, helper]);
+        let now = 1_800_000_000;
+        let rec = crate::usage::Record {
+            count: 2,
+            last: now - 12 * crate::usage::HOUR,
+        };
+        catalog
+            .choices
+            .entry("sl".into())
+            .or_default()
+            .insert("app:slack".into(), rec);
+        catalog.choices.entry("s".into()).or_default().insert(
+            "app:slack".into(),
+            crate::usage::Record {
+                count: 0,
+                last: rec.last,
+            },
+        );
+        let sl = catalog.search_root("sl");
+        assert_eq!(
+            sl[0].item.id, "app:slack",
+            "learned sl → Slack must be row 0"
+        );
+        let s = catalog.search_root("s");
+        assert_eq!(s[0].item.id, "app:slack", "prefix s must still pick Slack");
+
+        catalog
+            .choices
+            .entry("1+1".into())
+            .or_default()
+            .insert("app:slack".into(), rec);
+        let calc = catalog.search_root("1+1");
+        assert_eq!(
+            calc[0].item.kind,
+            Kind::Calc,
+            "a complete calc expression stays above a learned choice"
+        );
+        assert_ne!(
+            catalog.search_root("sl")[0].item.kind,
+            Kind::Calc,
+            "non-calc queries let the learned choice win"
+        );
+    }
+
+    #[test]
+    fn short_exact_title_beats_long_fuzzy_title() {
+        let short = test_item("app:cat", "Cat", "");
+        let long = test_item(
+            "app:catalog",
+            "Application Catalog Helper Service",
+            "cat feline",
+        );
+        let usage = crate::usage::Map::new();
+        let now = 1_800_000_000;
+        let short_score = rank_item("cat", &short, &usage, now);
+        let long_score = rank_item("cat", &long, &usage, now);
+        assert!(
+            short_score > long_score,
+            "exact Cat ({short_score}) must beat a long haystack ({long_score})"
+        );
+    }
+
+    #[test]
+    fn same_day_use_cannot_overturn_exact_title() {
+        let exact = test_item("app:fi", "Fi", "");
+        let prefix = test_item("app:firefox", "Firefox", "");
+        let now = 1_800_000_000;
+        let mut usage = crate::usage::Map::new();
+        usage.insert(
+            prefix.id.clone(),
+            crate::usage::Record {
+                count: 1,
+                last: now - 60,
+            },
+        );
+        let exact_score = rank_item("fi", &exact, &usage, now);
+        let prefix_score = rank_item("fi", &prefix, &usage, now);
+        assert!(
+            exact_score > prefix_score,
+            "exact Fi ({exact_score}) must beat same-day Firefox prefix ({prefix_score})"
+        );
+    }
+
+    #[test]
+    fn same_day_use_overturns_prefix_vs_prefix() {
+        let firefox = test_item("app:firefox", "Firefox", "");
+        let files = test_item("app:files", "Files", "");
+        let now = 1_800_000_000;
+        let mut usage = crate::usage::Map::new();
+        usage.insert(
+            firefox.id.clone(),
+            crate::usage::Record {
+                count: 1,
+                last: now - 60,
+            },
+        );
+        let firefox_score = rank_item("fi", &firefox, &usage, now);
+        let files_score = rank_item("fi", &files, &usage, now);
+        assert!(
+            firefox_score > files_score,
+            "same-day Firefox ({firefox_score}) should beat unused Files ({files_score})"
+        );
+    }
+
+    #[test]
+    fn initials_match_visual_studio_code() {
+        let vsc = test_item("app:code", "Visual Studio Code", "");
+        let usage = crate::usage::Map::new();
+        assert!(rank_item("vsc", &vsc, &usage, 1_800_000_000) > 0);
+        let chrome = test_item("app:chrome", "Google Chrome", "");
+        assert!(rank_item("gc", &chrome, &usage, 1_800_000_000) > 0);
+    }
+
+    #[test]
+    fn bare_one_is_not_a_calc_row() {
+        let one = test_item("app:1password", "1Password", "");
+        let catalog = test_catalog(vec![one]);
+        let rows = catalog.search_root("1");
+        assert!(
+            !rows.iter().any(|row| row.item.kind == Kind::Calc),
+            "typing 1 must not put a calc row above 1Password"
+        );
+        assert_eq!(rows[0].item.id, "app:1password");
+        let plus = catalog.search_root("1+1");
+        assert_eq!(plus[0].item.kind, Kind::Calc);
+        assert_eq!(plus[0].item.title, "2");
+    }
+
+    #[test]
+    fn plain_app_query_has_no_emoji_rows() {
+        let firefox = test_item("app:firefox", "Firefox", "");
+        let catalog = test_catalog(vec![firefox]);
+        let rows = catalog.search_root("fi");
+        assert!(
+            !rows.iter().any(|row| row.item.id.starts_with("emoji:")),
+            "plain app queries must not leak emoji rows, got {:?}",
+            rows.iter().map(|r| &r.item.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn type_word_video_puts_files_above_apps() {
+        let player = test_item("app:player", "Movies", "Video Player");
+        let catalog = test_catalog(vec![player]);
+        let rows = catalog.search_root("video");
+        assert!(
+            rows[0].item.id.starts_with("files:searching"),
+            "type-word video should reserve row 0 for files, got {}",
+            rows[0].item.id
+        );
+        assert!(
+            !rows.iter().any(|row| row.item.id.starts_with("emoji:")),
+            "type-word queries suppress emoji"
+        );
+        let app = rows.iter().find(|row| row.item.id == "app:player");
+        if let Some(app) = app {
+            assert!(
+                app.score <= rows[0].score,
+                "keyword-Video app ({}) must not outrank files ({})",
+                app.score,
+                rows[0].score
+            );
+            assert!(app.score <= super::TIER_APP_IN_TYPE_SEARCH);
+        }
+    }
+
+    #[test]
+    fn weather_query_row_zero_is_live_weather_not_emoji() {
+        let cloud = test_item("app:cloudy", "Cloudy", "weather");
+        let catalog = test_catalog(vec![cloud]);
+        let rows = catalog.search_root("weather");
+        assert_eq!(rows[0].item.id, "live:weather");
+        let weather_at = rows.iter().position(|r| r.item.id == "live:weather");
+        let emoji_at = rows.iter().position(|r| r.item.id.starts_with("emoji:"));
+        if let (Some(weather_at), Some(emoji_at)) = (weather_at, emoji_at) {
+            assert!(weather_at < emoji_at, "emoji must never sit above weather");
+        }
+    }
+
+    #[test]
+    fn empty_fuzzy_pool_still_offers_web_search() {
+        let catalog = test_catalog(Vec::new());
+        let rows = catalog.search_root("zzzznotanappxyz");
+        assert!(
+            rows.iter().any(|row| row.item.id.starts_with("search:")
+                && row.item.title.contains("Search the web")),
+            "an unmatched query should still offer a web search row"
+        );
+    }
+
+    #[test]
+    fn today_file_beats_old_better_name() {
+        use std::fs;
+        use std::time::{Duration, SystemTime};
+
+        let dir = std::env::temp_dir().join(format!(
+            "flint-rank-files-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("video.mp4");
+        let new = dir.join("IMG_1234.mp4");
+        fs::write(&old, b"old").unwrap();
+        fs::write(&new, b"new").unwrap();
+        filetime_set(
+            &old,
+            SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 400),
+        );
+
+        let old_item = crate::files::file_item(old.clone(), Some("video"));
+        let new_item = crate::files::file_item(new.clone(), Some("video"));
+        let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let pattern = nucleo_matcher::pattern::Pattern::parse(
+            "video",
+            nucleo_matcher::pattern::CaseMatching::Smart,
+            nucleo_matcher::pattern::Normalization::Smart,
+        );
+        let usage = crate::usage::Map::new();
+        let now = crate::usage::now_secs();
+        let old_score = super::rank_file(&mut matcher, &pattern, "video", &old_item, &usage, now);
+        let new_score = super::rank_file(&mut matcher, &pattern, "video", &new_item, &usage, now);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            new_score > old_score,
+            "today's clip ({new_score}) must beat a 2019-named video.mp4 ({old_score})"
+        );
+    }
+
+    fn filetime_set(path: &std::path::Path, at: std::time::SystemTime) {
+        let Ok(secs) = at.duration_since(std::time::UNIX_EPOCH) else {
+            return;
+        };
+        let t = libc::timespec {
+            tv_sec: secs.as_secs() as libc::time_t,
+            tv_nsec: secs.subsec_nanos() as i64,
+        };
+        let times = [t, t];
+        let cpath = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: `cpath` is a valid C string; `times` is two timespecs; AT_FDCWD
+        // updates `path` in the test temp dir only.
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0);
+        }
     }
 }

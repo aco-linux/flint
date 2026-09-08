@@ -6,6 +6,7 @@ mod calc;
 mod caldav;
 mod capture;
 mod catalog;
+mod choices;
 mod clipboard;
 mod config;
 mod connectors;

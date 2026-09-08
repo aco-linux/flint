@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS usage (
     count INTEGER NOT NULL,
     last INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS choices (
+    query TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    last INTEGER NOT NULL,
+    PRIMARY KEY(query, item_id)
+);
+CREATE INDEX IF NOT EXISTS choices_query ON choices(query);
 CREATE TABLE IF NOT EXISTS quicklinks (
     name TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL DEFAULT '',
@@ -796,6 +804,78 @@ pub fn usage_bump(id: &str, now: u64) -> Option<()> {
     })
 }
 
+pub fn choices_load() -> Option<crate::choices::Map> {
+    with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT query, item_id, count, last FROM choices")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                Record {
+                    count: row.get::<_, i64>(2)? as u32,
+                    last: row.get::<_, i64>(3)? as u64,
+                },
+            ))
+        })?;
+        let mut map = crate::choices::Map::new();
+        for row in rows {
+            let (query, item_id, rec) = row?;
+            map.entry(query).or_default().insert(item_id, rec);
+        }
+        Ok(map)
+    })
+}
+
+pub fn choices_record(query: &str, item_id: &str, now: u64, prefixes: &[String]) -> Option<()> {
+    with_conn(|conn| {
+        choices_bump_full(conn, query, item_id, now)?;
+        for prefix in prefixes {
+            if prefix.is_empty() || prefix == query {
+                continue;
+            }
+            choices_bump_prefix(conn, prefix, item_id, now)?;
+        }
+        Ok(())
+    })
+}
+
+fn choices_bump_full(
+    conn: &Connection,
+    query: &str,
+    item_id: &str,
+    now: u64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO choices (query, item_id, count, last) VALUES (?1, ?2, 1, ?3)
+         ON CONFLICT(query, item_id) DO UPDATE SET
+            count = choices.count + 1,
+            last = excluded.last",
+        params![query, item_id, now as i64],
+    )?;
+    Ok(())
+}
+
+fn choices_bump_prefix(
+    conn: &Connection,
+    query: &str,
+    item_id: &str,
+    now: u64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO choices (query, item_id, count, last) VALUES (?1, ?2, 0, ?3)
+         ON CONFLICT(query, item_id) DO UPDATE SET last = excluded.last",
+        params![query, item_id, now as i64],
+    )?;
+    Ok(())
+}
+
+pub fn choices_clear() -> Option<()> {
+    with_conn(|conn| {
+        conn.execute("DELETE FROM choices", [])?;
+        Ok(())
+    })
+}
+
 pub fn quicklinks_load() -> Option<Vec<Link>> {
     with_conn(|conn| {
         let mut stmt =
@@ -1264,5 +1344,33 @@ mod tests {
             crate::quit::file().file_name().expect("name"),
             "quit-keep.json"
         );
+    }
+
+    #[test]
+    fn choices_roundtrip_in_temp_db() {
+        with_temp(|dir| {
+            open_path(&dir.join("flint.db")).expect("open");
+            let now = 1_800_000_000;
+            super::choices_record("sl", "app:slack", now, &["s".into()]).expect("record");
+            let map = super::choices_load().expect("load");
+            assert_eq!(
+                map.get("sl")
+                    .expect("sl")
+                    .get("app:slack")
+                    .expect("row")
+                    .count,
+                1
+            );
+            assert_eq!(
+                map.get("s")
+                    .expect("s")
+                    .get("app:slack")
+                    .expect("prefix")
+                    .count,
+                0
+            );
+            super::choices_clear().expect("clear");
+            assert!(super::choices_load().expect("empty").is_empty());
+        });
     }
 }

@@ -61,6 +61,7 @@ pub fn run(action: &Action) {
         | Action::Remember { .. }
         | Action::ForgetMemory { .. }
         | Action::ShowMemory
+        | Action::ClearChoices
         | Action::AttachClipboard
         | Action::AttachSelected
         | Action::AttachPath { .. }

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::db;
 
 /// One launch of something you used yesterday outranks 200 launches from years ago.
-const HOUR: u64 = 3600;
-const DAY: u64 = 24 * HOUR;
+pub(crate) const HOUR: u64 = 3600;
+pub(crate) const DAY: u64 = 24 * HOUR;
 const WEEK: u64 = 7 * DAY;
 const MONTH: u64 = 30 * DAY;
 
@@ -21,8 +21,9 @@ pub struct Record {
     pub last: u64,
 }
 
-/// Prefix bonus used to be 8_000 vs 40 per use (200×). Keep it in the same
-/// ballpark as a single recent use, not two hundred of them.
+/// Prefix bonus used to be 8_000 vs 40 per use (200×). Kept as a documented
+/// comparison: a single recent use should still outweigh this old knob.
+#[cfg(test)]
 pub const PREFIX_BONUS: u32 = 1_200;
 
 pub fn now_secs() -> u64 {
@@ -43,23 +44,25 @@ pub fn bump(id: &str) {
     let _ = db::usage_bump(id, now_secs());
 }
 
+pub fn recency_bonus(last: u64, now: u64) -> u32 {
+    if last == 0 || now < last {
+        return 0;
+    }
+    match now - last {
+        0..HOUR => 3_500,
+        HOUR..DAY => 2_200,
+        DAY..WEEK => 1_200,
+        WEEK..MONTH => 500,
+        _ => 0,
+    }
+}
+
 pub fn score(record: Option<&Record>, now: u64) -> u32 {
     let Some(record) = record else {
         return 0;
     };
     let freq = record.count.min(80).saturating_mul(25);
-    let recency = if record.last == 0 || now < record.last {
-        0
-    } else {
-        match now - record.last {
-            0..HOUR => 3_500,
-            HOUR..DAY => 2_200,
-            DAY..WEEK => 1_200,
-            WEEK..MONTH => 500,
-            _ => 0,
-        }
-    };
-    freq.saturating_add(recency)
+    freq.saturating_add(recency_bonus(record.last, now))
 }
 
 #[cfg(test)]

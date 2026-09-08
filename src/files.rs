@@ -1078,11 +1078,11 @@ pub fn recency_bonus(path: &Path) -> u32 {
         return 80;
     };
     if age < Duration::from_secs(60 * 60 * 24) {
-        2_400
+        12_000
     } else if age < Duration::from_secs(60 * 60 * 24 * 7) {
-        1_200
+        6_000
     } else if age < Duration::from_secs(60 * 60 * 24 * 30) {
-        400
+        1_500
     } else {
         0
     }
@@ -1121,6 +1121,11 @@ mod tests {
         assert_eq!(q.type_label.as_deref(), Some("markdown"));
         assert!(q.extensions.iter().any(|ext| ext == "md"));
         assert!(q.extensions.iter().any(|ext| ext == "markdown"));
+        assert!(parse_query("video").is_type_search());
+        assert_eq!(
+            parse_query("type:video").type_label.as_deref(),
+            Some("video")
+        );
     }
 
     #[test]
