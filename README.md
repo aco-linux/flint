@@ -80,6 +80,9 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Type `we` and Flint already means weather: it geolocates you and fills in the current conditions. Full sentences work too: “what’s the weather”, “is it going to rain”, “what’s on my calendar today”, “what’s in my inbox”.
 - Apps, calc, commands, and windows paint on the same keystroke. Windows come from the Hyprland event socket, not a poll. Nothing else is scheduled unless you actually asked for a file or live weather.
 - Ranking cares when you last used something, not just how many times. An app from yesterday beats one you hammered two years ago. Typing the start of a name is no longer 200× heavier than a habit.
+- After you pick a result for a query, Flint remembers it (`sl` → Slack). The next time that query (or a prefix of it) is typed, that item is row 0 — except a complete calc expression, which stays on top. **Clear learned choices** (keyword `forget`) drops that map.
+- Title matches beat subtitle and keyword hits. Kind labels (`APP`, `FILE`) are not searchable. Exact title > prefix > word/initials (`vsc`, `gc`) > keywords. Nucleo scores are divided by title length so long names do not inflate rank.
+- Ties break by last-used time, then title. Emoji stay out of ordinary app queries; type-words like `video` reserve the top rows for files; `weather` is live weather on the first frame, not ☔.
 - Swapped letters count (`weahter` → weather). Missing letters still do (`wthr` → weather).
 - A result can *show* something: live weather, a photo or video thumb, a document snippet. That is not the same as an icon, a title, and Enter.
 - Misspellings are handled across apps, files, types, notes, and settings — not a fixed example list. `markdwon` still finds markdown, `readne` still finds `readme.md`, `firfox` still ranks Firefox if that app is installed.
@@ -175,7 +178,7 @@ See [SECURITY.md](SECURITY.md) for controls and vulnerability reporting, and
 - Config: `~/.config/flint/config.json`
 - Auth metadata or credential fallback: `~/.config/flint/auth.json`
 - API-key fallback (when no Secret Service is available): `~/.config/flint/api-keys.json`
-- User store: `~/.local/share/flint/flint.db` (clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks, layouts, quit-keep). Existing `*.json` files are imported once and renamed to `*.json.bak`
+- User store: `~/.local/share/flint/flint.db` (clips, notes, snippets, aliases, favorites, calc history, usage, learned choices, quicklinks, layouts, quit-keep). Existing `*.json` files are imported once and renamed to `*.json.bak`
 - Extension runtime: `~/.local/share/flint/runtime/` · installed extensions: `~/.local/share/flint/store/vicinae/<name>/` · their storage: `~/.local/share/flint/extensions/<name>/`
 
 Existing Rayblast files are copied over on first launch. Stale Rayblast defaults (OpenAI provider + Ollama endpoint, “You are Rayblast”, `voice.engine: voxtype`) are rewritten to Flint defaults.

@@ -6,9 +6,11 @@ advertising SDK, or maintainer-operated cloud service.
 ## Data kept on this computer
 
 Flint stores settings under the standard user config directory and user data
-(clips, notes, snippets, aliases, favorites, calc history, usage, quicklinks,
-layouts) in `~/.local/share/flint/flint.db`. Private data files are written with
-mode `600` inside directories with mode `700`.
+(clips, notes, snippets, aliases, favorites, calc history, usage, learned
+choices, quicklinks, layouts) in `~/.local/share/flint/flint.db`. Private data
+files are written with mode `600` inside directories with mode `700`. Learned
+choices are query→item launch counts only (the text you typed and the result
+id). They never leave this computer. **Clear learned choices** drops them.
 
 OAuth and API credentials are stored in the Linux desktop Secret Service when
 `secret-tool` and a keyring are available. If the desktop has no usable Secret

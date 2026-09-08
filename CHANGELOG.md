@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — root ranking (Wave A)
+
+- Query→item memory: launching a root (or window) result records the typed query and its prefixes in `choices`. Next time that query is typed, the picked item is row 0 (115k, under an explicit alias). Prefixes (`s` after `sl` → Slack) get a smaller 20k boost. Not recorded from Files, Clipboard, or extension-internal actions. **Clear learned choices** (root + Settings, keyword `forget`) wipes the table. `FLINT_RANK_DEBUG=1` logs the top 10 scores.
+- Title-first fuzzy rank: nucleo on title / keywords×0.6 / subtitle×0.3, take the max, divide by character length (min 4). Exact title +10k, prefix +4k, word/initials +2.5k, keyword +1.5k. Kind labels are no longer in the haystack. Same-day usage cannot overturn an exact title over a prefix; it can break a prefix tie.
+- Fixed tiers only fire when the query means them. Calc at 100k needs an operator (`1` is not calc; `1+1` is). Memory/translate/tz/instant sit at 85k. Emoji only when the query looks like emoji (or `:shortcode:`) — never the old 3-row leak. Type-word queries (`video`, `type:pdf`) reserve row 0 for a files placeholder and cap apps below that tier. Weather is 110k on the first frame (cached summary or “Detecting…”), replaced in place when live data arrives. Intents stay at 70k so a learned `we` → WezTerm can outrank weather after two picks.
+- Tie-break is last-used, then title. If you have moved off row 0, the selected item stays selected across keystrokes while it remains in the list.
+
 ## Unreleased — in-app results and smart sizing
 
 - Natural-language intents: “what’s the weather”, “is it going to rain”, “what’s on my calendar today”, “what’s in my inbox” route to live cards instead of a web search

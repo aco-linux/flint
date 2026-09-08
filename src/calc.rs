@@ -111,6 +111,28 @@ pub fn answer_item(query: &str) -> Option<Item> {
         .or_else(|| math_item(query))
 }
 
+/// Root ranking only: a complete expression with an operator, unit, date, or
+/// percent — not a bare number or a lone word like `1` / `firefox`.
+pub fn root_item(query: &str) -> Option<Item> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    if is_bare_number(q) {
+        return None;
+    }
+    answer_item(q)
+}
+
+fn is_bare_number(query: &str) -> bool {
+    let compact: String = query.chars().filter(|c| !c.is_whitespace()).collect();
+    !compact.is_empty()
+        && compact
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.')
+        && !compact.contains('+')
+}
+
 pub fn percent_item(query: &str) -> Option<Item> {
     let result = eval_percent(query)?;
     calc_item(query.trim(), &result)
@@ -452,5 +474,14 @@ mod tests {
             .iso(),
             "2026-02-01"
         );
+    }
+
+    #[test]
+    fn root_item_skips_bare_numbers() {
+        assert!(super::root_item("1").is_none());
+        assert!(super::root_item("42").is_none());
+        let plus = super::root_item("1+1").expect("1+1");
+        assert_eq!(plus.title, "2");
+        assert!(super::root_item("20% of 80").is_some());
     }
 }

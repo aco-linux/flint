@@ -213,6 +213,8 @@ pub enum Action {
         label: String,
     },
     StopFocus,
+    /// Drop query→item launches used by root ranking.
+    ClearChoices,
 }
 
 /// Callback identity for an action rendered by a running extension.
@@ -357,12 +359,6 @@ pub enum Icon {
 
 impl Item {
     pub fn haystack(&self) -> String {
-        format!(
-            "{} {} {} {}",
-            self.title,
-            self.subtitle,
-            self.keywords,
-            self.kind.label()
-        )
+        format!("{} {} {}", self.title, self.subtitle, self.keywords)
     }
 }

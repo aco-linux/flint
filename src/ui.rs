@@ -630,6 +630,11 @@ impl Shell {
                 return;
             }
             st.search_gen = st.search_gen.saturating_add(1);
+            let keep_id = if st.selected == 0 {
+                None
+            } else {
+                st.results.get(st.selected).map(|row| row.item.id.clone())
+            };
             let (mode, mut results) = st.catalog.search_fast(&query);
             if let Some(item_id) = st.pending_alias.clone()
                 && let Some(name) = alias_typed(&query)
@@ -657,7 +662,9 @@ impl Shell {
             }
             st.mode = mode;
             st.results = results;
-            st.selected = 0;
+            st.selected = keep_id
+                .and_then(|id| st.results.iter().position(|row| row.item.id == id))
+                .unwrap_or(0);
             let include_in_root = st.catalog.settings.borrow().files.include_in_root;
             (st.search_gen, include_in_root)
         };
@@ -695,8 +702,19 @@ impl Shell {
                 .map(|row| row.item.id.clone())
                 .unwrap_or_default();
             if let Some(weather) = live.weather {
-                st.results.retain(|row| row.item.id != "live:weather");
-                st.results.insert(0, weather);
+                if let Some(row) = st
+                    .results
+                    .iter_mut()
+                    .find(|row| row.item.id == "live:weather")
+                {
+                    *row = weather;
+                } else {
+                    st.results.insert(0, weather);
+                }
+            }
+            if !live.files.is_empty() {
+                st.results
+                    .retain(|row| !row.item.id.starts_with("files:searching:"));
             }
             merge_live(&mut st.results, live.files);
             merge_live(&mut st.results, live.gifs);
@@ -1098,7 +1116,7 @@ impl Shell {
                         if let Some(item) = item
                             && let Some(play) = action::spacebar_play(&item)
                         {
-                            usage::bump(&item.id);
+                            self.record_launch(&item);
                             self.hide();
                             action::run(&play);
                             Propagation::Stop
@@ -1175,6 +1193,33 @@ impl Shell {
         self.request_visible_thumbs();
     }
 
+    fn record_launch(&self, item: &Item) {
+        let (query, mode, in_extension) = {
+            let st = self.state.borrow();
+            (
+                self.entry.text().to_string(),
+                st.mode,
+                st.extension.is_some(),
+            )
+        };
+        let (_, rest) = Mode::parse(&query);
+        let learn = !in_extension
+            && matches!(mode, Mode::Root | Mode::Windows)
+            && !matches!(
+                item.action,
+                Action::Extension { .. }
+                    | Action::ExtensionConfirm { .. }
+                    | Action::ExtensionFormField { .. }
+                    | Action::ClearChoices
+            );
+        let mut st = self.state.borrow_mut();
+        st.catalog.touch_usage(&item.id);
+        if learn {
+            let q = if mode == Mode::Root { query } else { rest };
+            st.catalog.learn_choice(&q, &item.id);
+        }
+    }
+
     fn activate(&self) {
         let item = {
             let st = self.state.borrow();
@@ -1183,7 +1228,7 @@ impl Shell {
             };
             scored.item.clone()
         };
-        usage::bump(&item.id);
+        self.record_launch(&item);
         if item.id == "cmd:apply-alias" {
             if let Action::Copy(id) = &item.action
                 && let Some(name) = alias_typed(&self.entry.text())
@@ -2107,6 +2152,12 @@ impl Shell {
                     self.sync_chrome();
                     rebuild_rows(self);
                 }
+                true
+            }
+            Action::ClearChoices => {
+                self.state.borrow_mut().catalog.clear_choices();
+                self.set_status("Cleared learned choices");
+                self.refresh();
                 true
             }
             Action::AttachClipboard => {
