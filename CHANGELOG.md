@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — in-pane media (Wave F)
+
+- Preview uses `gtk4::Video` + `MediaFile` when GStreamer is present at runtime (`dlopen` of `libgstreamer-1.0.so.0`). Flint does not link GStreamer. Without it, Space/Enter still use the default player.
+- Space play/pauses in the pane for audio/video, or enlarges an image. Esc returns to the list with the same query and selection. Enter always opens the external player.
+- `media.hide_on_external_play` defaults to **false** (Settings / `set:media-hide`). Query and selection restore on Hyprland `closewindow`, or `activewindow` when Flint is focused again.
+- The window grows to `WINDOW_HEIGHT_MAX` (900) via `fit_window` while the media/image pane is open.
+
 ## Unreleased — real web results (Wave E)
 
 - In-app web rows use DuckDuckGo HTML (`web.provider = "ddg-html"`). An Instant Answer, when present, is a bonus first row; HTML hits follow (cap 6); **Open DuckDuckGo** stays last. `searxng` and `brave` are documented fallbacks and currently use the same HTML path (no extra API keys).

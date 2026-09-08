@@ -400,6 +400,18 @@ fn page_general(settings: &Rc<RefCell<Settings>>) -> Box {
     card.append(&lab);
     card.append(&hint);
     card.append(&drop);
+    card.append(&switch_row(
+        "Hide when playing media externally",
+        "Enter still opens the default player. On: hide Flint. Off (default): stay open, and restore the query plus selection after Hyprland closewindow or when Flint is focused again.",
+        settings.borrow().media.hide_on_external_play,
+        {
+            let s = s.clone();
+            move |on| {
+                s.borrow_mut().media.hide_on_external_play = on;
+                s.borrow().save();
+            }
+        },
+    ));
     page.append(&card);
     page
 }

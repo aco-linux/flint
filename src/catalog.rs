@@ -1096,6 +1096,12 @@ impl Catalog {
                 "ddg duckduckgo html instant off searxng brave privacy",
             ),
             setting_toggle(
+                "media-hide",
+                "Hide when playing media externally",
+                s.media.hide_on_external_play,
+                "player mpv video hide restore",
+            ),
+            setting_toggle(
                 "files-root",
                 "Include files in root search",
                 s.files.include_in_root,

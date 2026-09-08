@@ -105,6 +105,42 @@ pub fn is_playable(kind: MediaKind) -> bool {
     matches!(kind, MediaKind::Audio | MediaKind::Video)
 }
 
+/// GtkMediaFile / GtkVideo load GStreamer at runtime. Flint never links it.
+pub fn gstreamer_available() -> bool {
+    for name in [c"libgstreamer-1.0.so.0", c"libgstreamer-1.0.so"] {
+        // SAFETY: `name` is a NUL-terminated CStr. A non-null handle is closed.
+        let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+        if !handle.is_null() {
+            unsafe {
+                libc::dlclose(handle);
+            }
+            return true;
+        }
+    }
+    ["gst-inspect-1.0", "gst-launch-1.0"]
+        .iter()
+        .any(|bin| which_bin(bin))
+}
+
+fn which_bin(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+        .unwrap_or(false)
+}
+
+pub fn in_pane_hint(path: &std::path::Path, kind: MediaKind) -> String {
+    let play = if gstreamer_available() {
+        "Space play/pause in Flint · Esc back to the list · Enter opens the default player."
+    } else {
+        "Enter or Space starts playback in your default player."
+    };
+    let mark = match kind {
+        MediaKind::Audio => "♪",
+        _ => "▶",
+    };
+    format!("{mark}  {}\n\n{play}", path.display())
+}
+
 pub fn for_item(item: &Item) -> Preview {
     match item.kind {
         Kind::Weather => {
@@ -172,14 +208,11 @@ pub fn for_path(path: &Path) -> Preview {
         }
         MediaKind::Audio => Preview::Media {
             path: path.to_path_buf(),
-            hint: format!(
-                "▶  {}\n\nEnter or Space starts playback in your default player.",
-                path.display()
-            ),
+            hint: in_pane_hint(path, MediaKind::Audio),
         },
         MediaKind::Video => Preview::Media {
             path: path.to_path_buf(),
-            hint: format!("▶  {}\n\nEnter or Space plays this video.", path.display()),
+            hint: in_pane_hint(path, MediaKind::Video),
         },
         MediaKind::Text => Preview::Text(read_head(path, 8 * 1024)),
         MediaKind::Document => Preview::Text(format!(
@@ -806,8 +839,9 @@ fn file_too_heavy(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MediaInfo, MediaKind, classify, file_uri, large_thumb_path, parse_ffmpeg_info,
-        parse_ffprobe_json, png_text_chunks, produce, thumb_hash, thumbnail, xdg_cache_home,
+        MediaInfo, MediaKind, classify, file_uri, gstreamer_available, is_playable,
+        large_thumb_path, parse_ffmpeg_info, parse_ffprobe_json, png_text_chunks, produce,
+        thumb_hash, thumbnail, xdg_cache_home,
     };
     use gdk_pixbuf::{Colorspace, Pixbuf};
     use std::path::{Path, PathBuf};
@@ -816,6 +850,19 @@ mod tests {
     use std::time::{Duration, Instant};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn gstreamer_probe_does_not_panic_or_link() {
+        let _ = gstreamer_available();
+    }
+
+    #[test]
+    fn playable_kinds_are_audio_and_video() {
+        assert!(is_playable(classify(Path::new("clip.mp4"))));
+        assert!(is_playable(classify(Path::new("song.mp3"))));
+        assert!(!is_playable(classify(Path::new("photo.png"))));
+        assert!(!is_playable(classify(Path::new("readme.md"))));
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()

@@ -117,6 +117,16 @@ entry.search placeholder {
   min-height: 120px;
 }
 
+.preview-expanded {
+  max-width: none;
+  min-width: 560px;
+}
+
+.preview-video {
+  min-width: 320px;
+  min-height: 220px;
+}
+
 .row {
   border-radius: 10px;
   padding: 8px 10px;

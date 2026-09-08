@@ -16,6 +16,7 @@ pub struct Settings {
     pub store: Store,
     pub connectors: Connectors,
     pub web: Web,
+    pub media: Media,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +86,15 @@ impl Default for Web {
             provider: "ddg-html".into(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Media {
+    /// When Enter opens the external player, hide Flint. Off (default) keeps
+    /// the launcher (or restores query + selection after Hyprland closewindow /
+    /// activewindow).
+    pub hide_on_external_play: bool,
 }
 
 impl Default for Files {
@@ -433,6 +443,14 @@ impl Settings {
                     _ => "Web search → DuckDuckGo HTML (searxng/brave use this too)".into(),
                 }
             }
+            "set:media-hide" => {
+                self.media.hide_on_external_play = !self.media.hide_on_external_play;
+                if self.media.hide_on_external_play {
+                    "Hide Flint when Enter opens an external player".into()
+                } else {
+                    "Stay open (or restore) when Enter opens an external player".into()
+                }
+            }
             "set:files-root" => {
                 self.files.include_in_root = !self.files.include_in_root;
                 if self.files.include_in_root {
@@ -755,6 +773,7 @@ mod tests {
         assert!(!s.general.allow_extensions);
         assert!(s.general.context_aware);
         assert_eq!(s.web.provider, "ddg-html");
+        assert!(!s.media.hide_on_external_play);
         assert_eq!(s.voice.engine, "in-app");
         assert!(s.files.include_in_root);
         assert!(s.files.system_wide);

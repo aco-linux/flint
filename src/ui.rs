@@ -13,7 +13,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box, CssProvider, DrawingArea, Entry,
     EventControllerKey, GestureClick, HeaderBar, Image, Label, Orientation, Overflow, Overlay,
-    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, WrapMode,
+    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, Video, WrapMode,
 };
 
 use crate::action;
@@ -78,6 +78,7 @@ pub struct Shell {
     results_scroll: ScrolledWindow,
     preview: Box,
     preview_image: Image,
+    preview_video: Video,
     preview_text: Label,
     empty: Box,
     status: Label,
@@ -124,6 +125,20 @@ struct State {
     thumbs: HashMap<PathBuf, CachedThumb>,
     captions: HashMap<PathBuf, String>,
     thumb_miss: HashSet<PathBuf>,
+    pane: Pane,
+    media_restore: Option<MediaRestore>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    List,
+    Media,
+    ImageZoom,
+}
+
+struct MediaRestore {
+    query: String,
+    selected_id: String,
 }
 
 struct CachedThumb {
@@ -304,6 +319,13 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
     preview_image.add_css_class("preview-image");
     preview_image.set_visible(false);
 
+    let preview_video = Video::new();
+    preview_video.add_css_class("preview-video");
+    preview_video.set_autoplay(false);
+    preview_video.set_hexpand(true);
+    preview_video.set_vexpand(true);
+    preview_video.set_visible(false);
+
     let preview_text = Label::new(None);
     preview_text.set_xalign(0.0);
     preview_text.set_yalign(0.0);
@@ -314,6 +336,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
 
     let preview_inner = Box::new(Orientation::Vertical, 10);
     preview_inner.append(&preview_image);
+    preview_inner.append(&preview_video);
     preview_inner.append(&preview_text);
 
     let preview_scroll = ScrolledWindow::builder()
@@ -418,6 +441,7 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
         results_scroll: scroll.clone(),
         preview: preview.clone(),
         preview_image: preview_image.clone(),
+        preview_video: preview_video.clone(),
         preview_text: preview_text.clone(),
         empty: empty.clone(),
         status: status.clone(),
@@ -453,6 +477,8 @@ pub fn build(app: &Application, catalog: Catalog) -> Shell {
             thumbs: HashMap::new(),
             captions: HashMap::new(),
             thumb_miss: HashSet::new(),
+            pane: Pane::List,
+            media_restore: None,
         })),
         live_jobs: live_tx,
         live_cancel: live_cancel.clone(),
@@ -547,6 +573,7 @@ impl Clone for Shell {
             results_scroll: self.results_scroll.clone(),
             preview: self.preview.clone(),
             preview_image: self.preview_image.clone(),
+            preview_video: self.preview_video.clone(),
             preview_text: self.preview_text.clone(),
             empty: self.empty.clone(),
             status: self.status.clone(),
@@ -646,6 +673,11 @@ impl Shell {
         self.close_actions_inner(false);
         if cancel_voice && self.state.borrow().voice.state() != voice::State::Idle {
             self.state.borrow().voice.cancel();
+        }
+        if self.state.borrow().pane != Pane::List
+            && let Some(stream) = self.preview_video.media_stream()
+        {
+            stream.pause();
         }
         self.state.borrow_mut().visible = false;
         hypr::resize_launcher(crate::WINDOW_WIDTH, crate::WINDOW_HEIGHT);
@@ -916,6 +948,9 @@ impl Shell {
         if self.preview.is_visible() {
             height = height.max(520);
         }
+        if self.state.borrow().pane != Pane::List {
+            height = crate::WINDOW_HEIGHT_MAX;
+        }
         if self.detail.is_visible() {
             height += 180;
         }
@@ -927,7 +962,12 @@ impl Shell {
         hypr::resize_launcher(crate::WINDOW_WIDTH, height);
     }
 
-    fn apply_hypr_windows(&self, windows: Vec<crate::item::Item>) {
+    fn apply_hypr_windows(&self, event: Option<String>, windows: Vec<crate::item::Item>) {
+        let restore = event.as_deref().is_some_and(hypr::should_restore_media)
+            && self.state.borrow().media_restore.is_some();
+        if restore {
+            self.restore_media_session();
+        }
         let query = self.entry.text().to_string();
         let visible = {
             let st = self.state.borrow();
@@ -1090,21 +1130,31 @@ impl Shell {
             return;
         };
         match crate::preview::for_item(&item) {
-            crate::preview::Preview::None => self.preview.set_visible(false),
+            crate::preview::Preview::None => {
+                self.preview_video.set_visible(false);
+                self.preview.set_visible(false);
+            }
             crate::preview::Preview::Text(text) => {
+                self.preview_video.set_visible(false);
                 self.preview_image.set_visible(false);
                 self.preview_text.set_text(&text);
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
             crate::preview::Preview::Image(path) => {
+                if self.state.borrow().pane != Pane::Media {
+                    self.preview_video.set_visible(false);
+                }
                 self.show_preview_image(&path);
                 self.preview_text.set_text(&path.to_string_lossy());
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
             crate::preview::Preview::Media { path, hint } => {
-                self.show_preview_image(&path);
+                if self.state.borrow().pane != Pane::Media {
+                    self.preview_video.set_visible(false);
+                    self.show_preview_image(&path);
+                }
                 let caption = self.state.borrow().captions.get(&path).cloned();
                 let body = match caption {
                     Some(extra) if !extra.is_empty() => format!("{hint}\n\n{extra}"),
@@ -1114,6 +1164,127 @@ impl Shell {
                 self.preview_text.set_visible(true);
                 self.preview.set_visible(true);
             }
+        }
+    }
+
+    fn snapshot_media_restore(&self) {
+        let query = self.entry.text().to_string();
+        let selected_id = self
+            .state
+            .borrow()
+            .results
+            .get(self.state.borrow().selected)
+            .map(|row| row.item.id.clone())
+            .unwrap_or_default();
+        self.state.borrow_mut().media_restore = Some(MediaRestore { query, selected_id });
+    }
+
+    fn restore_media_session(&self) {
+        let Some(snap) = self.state.borrow_mut().media_restore.take() else {
+            return;
+        };
+        self.exit_media_pane();
+        self.entry.set_text(&snap.query);
+        self.entry.set_position(-1);
+        {
+            let mut st = self.state.borrow_mut();
+            st.visible = true;
+        }
+        self.show_launcher();
+        self.refresh();
+        {
+            let mut st = self.state.borrow_mut();
+            if let Some(idx) = st
+                .results
+                .iter()
+                .position(|row| row.item.id == snap.selected_id)
+            {
+                st.selected = idx;
+            }
+        }
+        self.sync_chrome();
+        rebuild_rows(self);
+        self.update_preview();
+        self.fit_window();
+        self.entry.grab_focus();
+    }
+
+    fn exit_media_pane(&self) {
+        if self.state.borrow().pane == Pane::List {
+            return;
+        }
+        if let Some(stream) = self.preview_video.media_stream() {
+            stream.pause();
+        }
+        self.preview_video.set_filename(Option::<&str>::None);
+        self.preview_video.set_visible(false);
+        self.preview_image.set_pixel_size(240);
+        self.preview.remove_css_class("preview-expanded");
+        self.preview.set_hexpand(false);
+        self.preview.set_width_request(300);
+        self.results_scroll.set_visible(true);
+        self.state.borrow_mut().pane = Pane::List;
+        self.update_preview();
+        self.fit_window();
+    }
+
+    fn enter_media_pane(&self, path: &Path) -> bool {
+        if !crate::preview::gstreamer_available() {
+            return false;
+        }
+        let file = gtk4::gio::File::for_path(path);
+        self.preview_video.set_file(Some(&file));
+        self.preview_video.set_autoplay(true);
+        self.preview_video.set_visible(true);
+        self.preview_image.set_visible(false);
+        self.preview.add_css_class("preview-expanded");
+        self.preview.set_hexpand(true);
+        self.preview.set_width_request(560);
+        self.preview.set_visible(true);
+        self.results_scroll.set_visible(false);
+        self.state.borrow_mut().pane = Pane::Media;
+        if let Some(stream) = self.preview_video.media_stream() {
+            stream.play();
+        }
+        self.fit_window();
+        true
+    }
+
+    fn enter_image_zoom(&self) {
+        self.preview_image.set_pixel_size(520);
+        self.preview.add_css_class("preview-expanded");
+        self.preview.set_hexpand(true);
+        self.preview.set_width_request(560);
+        self.results_scroll.set_visible(false);
+        self.state.borrow_mut().pane = Pane::ImageZoom;
+        self.fit_window();
+    }
+
+    fn toggle_in_pane_media(&self) {
+        if let Some(stream) = self.preview_video.media_stream() {
+            if stream.is_playing() {
+                stream.pause();
+            } else {
+                stream.play();
+            }
+        }
+    }
+
+    fn play_external(&self, path: &Path) {
+        self.snapshot_media_restore();
+        let hide = self
+            .state
+            .borrow()
+            .catalog
+            .settings
+            .borrow()
+            .media
+            .hide_on_external_play;
+        action::run(&Action::PlayMedia {
+            path: path.to_path_buf(),
+        });
+        if hide {
+            self.hide();
         }
     }
 
@@ -1209,7 +1380,9 @@ impl Shell {
             Some(Shortcut::Save) => Propagation::Proceed,
             None => match key {
                 Key::Escape => {
-                    if self.state.borrow().actions_open {
+                    if self.state.borrow().pane != Pane::List {
+                        self.exit_media_pane();
+                    } else if self.state.borrow().actions_open {
                         self.close_actions();
                     } else if self.state.borrow().editing.is_some() {
                         let back = match self.state.borrow().editing {
@@ -1266,18 +1439,44 @@ impl Shell {
                 Key::space | Key::KP_Space => {
                     if self.state.borrow().editing.is_some() || self.state.borrow().actions_open {
                         Propagation::Proceed
+                    } else if self.state.borrow().pane == Pane::Media {
+                        self.toggle_in_pane_media();
+                        Propagation::Stop
+                    } else if self.state.borrow().pane == Pane::ImageZoom {
+                        Propagation::Stop
                     } else {
                         let item = {
                             let st = self.state.borrow();
                             st.results.get(st.selected).map(|row| row.item.clone())
                         };
-                        if let Some(item) = item
-                            && let Some(play) = action::spacebar_play(&item)
-                        {
-                            self.record_launch(&item);
-                            self.hide();
-                            action::run(&play);
-                            Propagation::Stop
+                        if let Some(item) = item {
+                            match crate::preview::for_item(&item) {
+                                crate::preview::Preview::Image(_) => {
+                                    self.enter_image_zoom();
+                                    Propagation::Stop
+                                }
+                                crate::preview::Preview::Media { path, .. }
+                                    if crate::preview::gstreamer_available()
+                                        && self.enter_media_pane(&path) =>
+                                {
+                                    Propagation::Stop
+                                }
+                                _ => {
+                                    if let Some(play) = action::spacebar_play(&item) {
+                                        self.record_launch(&item);
+                                        match play {
+                                            Action::PlayMedia { path } => self.play_external(&path),
+                                            other => {
+                                                self.hide();
+                                                action::run(&other);
+                                            }
+                                        }
+                                        Propagation::Stop
+                                    } else {
+                                        Propagation::Proceed
+                                    }
+                                }
+                            }
                         } else {
                             Propagation::Proceed
                         }
@@ -1450,6 +1649,7 @@ impl Shell {
                 self.sign_in(&provider);
             }
             Action::OpenUri(_) => self.hide_then(item.action),
+            Action::PlayMedia { path } => self.play_external(&path),
             Action::ConnectorFetch { id } => {
                 let settings = self.state.borrow().catalog.settings.borrow().clone();
                 match crate::connectors::fetch(&id, &settings) {
@@ -2847,7 +3047,10 @@ enum UiMsg {
         text: String,
     },
     ThumbMiss(PathBuf),
-    Windows(Vec<Item>),
+    Windows {
+        event: Option<String>,
+        windows: Vec<Item>,
+    },
 }
 
 fn bind_shell(shell: &Shell) {
@@ -2894,7 +3097,9 @@ fn push_ui(inbox: &Arc<Mutex<Vec<UiMsg>>>, msg: UiMsg) {
                         UiMsg::ThumbMiss(path) => {
                             shell.state.borrow_mut().thumb_miss.insert(path);
                         }
-                        UiMsg::Windows(windows) => shell.apply_hypr_windows(windows),
+                        UiMsg::Windows { event, windows } => {
+                            shell.apply_hypr_windows(event, windows)
+                        }
                     }
                 }
             }
@@ -3039,7 +3244,7 @@ fn start_thumb_worker(rx: mpsc::Receiver<PathBuf>, cancel: Arc<files::Cancel>) {
 
 fn start_hypr_watch() {
     let inbox: Arc<Mutex<Vec<UiMsg>>> = Arc::new(Mutex::new(Vec::new()));
-    hypr::watch(move |windows| push_ui(&inbox, UiMsg::Windows(windows)));
+    hypr::watch(move |event, windows| push_ui(&inbox, UiMsg::Windows { event, windows }));
 }
 
 fn rebuild_rows(shell: &Shell) {

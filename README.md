@@ -87,7 +87,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 - Swapped letters count (`weahter` → weather). Missing letters still do (`wthr` → weather).
 - A result can *show* something: live weather, a photo or video thumb, a document snippet. That is not the same as an icon, a title, and Enter.
 - Misspellings are handled across apps, files, types, notes, and settings — not a fixed example list. `markdwon` still finds markdown, `readne` still finds `readme.md`, `firfox` still ranks Firefox if that app is installed.
-- Selecting a result also fills the side preview: images, video frames, audio cover art and tags, the start of a document, a folder listing, or a play prompt. Enter or Space plays media in your default player; Enter opens other files in your editor.
+- Selecting a result also fills the side preview: images, video frames, audio cover art and tags, the start of a document, a folder listing, or in-pane playback when GStreamer is installed. Space play/pauses video or enlarges an image; Esc returns to the list; Enter opens the default player. `media.hide_on_external_play` (default off) hides Flint only if you want that.
 - Thumbs reuse the Freedesktop cache (`~/.cache/thumbnails/large/`) when another app has already generated them.
 - Type `markdown`, `pdf`, `images`, `*.rs`, or `type:md readme` to list matching files from home (and, when `plocate`/`locate` is available, the rest of the disk). Arrow keys and Page Up/Down scroll the full set.
 - Open **Search Files** (`file`, Ctrl+F, or `flint --files`) for the dedicated long list. An empty query shows recent and frequently opened files.
@@ -119,6 +119,7 @@ Root search is intent-aware, closer to Raycast than a fixed 12-row list:
 | Installed Vicinae / Raycast extensions run in a Node host (real React + `@vicinae/api`) | Extensions are **off by default** and run unsandboxed as your user when you opt in |
 | Ask AI against local Ollama / LM Studio / llama.cpp and configured cloud APIs | Consumer ChatGPT and Claude plans do not include API usage |
 | In-app DuckDuckGo HTML results (Instant Answer as a bonus first row) | `searxng` / Brave API keys are not wired; those `web.provider` values use DuckDuckGo HTML. Set `web.provider` to `off` to disable |
+| In-pane `gtk4::Video` / `MediaFile` when GStreamer is on the system | No hard GStreamer link; missing plugins fall back to the default player |
 | `pw-record` + voxtype dictation into the search box | Third-party script-commands are **off by default** and run as `sh` / `python3` / `node` with no signature when you opt in |
 | PKCE OAuth + loopback `127.0.0.1` + refresh tokens | Ask AI can call native Flint tools (calendar, weather, iCloud inbox, Instant Answers). MCP stays a prompt primer and cannot run `tools/call`. MCP spawn is **off by default** |
 
