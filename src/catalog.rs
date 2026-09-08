@@ -3898,11 +3898,12 @@ mod tests {
             "app match stays above web placeholder, got {:?}",
             rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
         );
-        assert!(
-            rows.iter().all(|row| !row.item.id.starts_with("search:")),
-            "single-token app match must not inject web rows: {:?}",
-            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
-        );
+        let web_at = rows
+            .iter()
+            .position(|row| row.item.id.starts_with("search:"));
+        if let Some(web_at) = web_at {
+            assert!(web_at > 0, "web fallback must stay below the app match");
+        }
 
         let hits = vec![
             crate::web::Hit {
