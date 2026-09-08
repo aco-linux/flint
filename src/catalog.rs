@@ -3888,13 +3888,19 @@ mod tests {
             "ddg-html"
         ));
 
-        let firefox = test_item("app:firefox", "Firefox", "browser");
-        let catalog = test_catalog(vec![firefox]);
-        let rows = catalog.search_root("firefox");
+        // Unique title so CI images with `firefox` on PATH cannot inject `path:firefox`.
+        let app = test_item("app:flintwebtrigger", "FlintWebTrigger", "browser");
+        let catalog = test_catalog(vec![app]);
+        let rows = catalog.search_root("flintwebtrigger");
         assert_eq!(
             rows[0].item.id,
-            "app:firefox",
+            "app:flintwebtrigger",
             "app match stays above web placeholder, got {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            rows.iter().all(|row| !row.item.id.starts_with("search:")),
+            "single-token app match must not inject web rows: {:?}",
             rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
         );
 
