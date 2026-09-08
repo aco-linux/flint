@@ -272,10 +272,7 @@ impl Catalog {
             || meaning.has(IntentKind::Email);
         if !suppress_emoji && crate::emoji::looks_like_query(query) {
             for (i, item) in crate::emoji::search(query, 8).into_iter().enumerate() {
-                results.push(Scored::new(
-                    item,
-                    TIER_EMOJI.saturating_sub(i as u32 * 10),
-                ));
+                results.push(Scored::new(item, TIER_EMOJI.saturating_sub(i as u32 * 10)));
             }
         }
 
@@ -1893,13 +1890,14 @@ fn rank(matcher: &mut Matcher, pattern: &Pattern, input: RankInput<'_>) -> Optio
 
     let title_score = nucleo_field(matcher, pattern, title);
     let keyword_score = nucleo_field(matcher, pattern, &keywords).saturating_mul(3) / 5;
-    let subtitle_score = nucleo_field(matcher, pattern, &input.item.subtitle).saturating_mul(3) / 10;
+    let subtitle_score =
+        nucleo_field(matcher, pattern, &input.item.subtitle).saturating_mul(3) / 10;
     let nucleo = title_score.max(keyword_score).max(subtitle_score);
 
     let typo = typo_score(input.query, input.item).map(|s| s.min(TYPO_CAP));
-    let alias_hit = alias_lc.as_deref().is_some_and(|alias| {
-        !q_lc.is_empty() && (alias == q_lc || alias.starts_with(&q_lc))
-    });
+    let alias_hit = alias_lc
+        .as_deref()
+        .is_some_and(|alias| !q_lc.is_empty() && (alias == q_lc || alias.starts_with(&q_lc)));
 
     let exact_title = !q_lc.is_empty() && title_lc == q_lc;
     let title_prefix = !q_lc.is_empty() && title_lc.starts_with(&q_lc);
@@ -2938,7 +2936,10 @@ mod tests {
             },
         );
         let sl = catalog.search_root("sl");
-        assert_eq!(sl[0].item.id, "app:slack", "learned sl → Slack must be row 0");
+        assert_eq!(
+            sl[0].item.id, "app:slack",
+            "learned sl → Slack must be row 0"
+        );
         let s = catalog.search_root("s");
         assert_eq!(s[0].item.id, "app:slack", "prefix s must still pick Slack");
 
@@ -3091,10 +3092,7 @@ mod tests {
         let weather_at = rows.iter().position(|r| r.item.id == "live:weather");
         let emoji_at = rows.iter().position(|r| r.item.id.starts_with("emoji:"));
         if let (Some(weather_at), Some(emoji_at)) = (weather_at, emoji_at) {
-            assert!(
-                weather_at < emoji_at,
-                "emoji must never sit above weather"
-            );
+            assert!(weather_at < emoji_at, "emoji must never sit above weather");
         }
     }
 
@@ -3127,7 +3125,10 @@ mod tests {
         let new = dir.join("IMG_1234.mp4");
         fs::write(&old, b"old").unwrap();
         fs::write(&new, b"new").unwrap();
-        filetime_set(&old, SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 400));
+        filetime_set(
+            &old,
+            SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 400),
+        );
 
         let old_item = crate::files::file_item(old.clone(), Some("video"));
         let new_item = crate::files::file_item(new.clone(), Some("video"));

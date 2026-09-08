@@ -127,9 +127,7 @@ pub fn root_item(query: &str) -> Option<Item> {
 fn is_bare_number(query: &str) -> bool {
     let compact: String = query.chars().filter(|c| !c.is_whitespace()).collect();
     !compact.is_empty()
-        && compact
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.')
+        && compact.chars().all(|c| c.is_ascii_digit() || c == '.')
         && !compact.contains('+')
 }
 

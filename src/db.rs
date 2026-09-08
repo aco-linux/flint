@@ -1353,8 +1353,22 @@ mod tests {
             let now = 1_800_000_000;
             super::choices_record("sl", "app:slack", now, &["s".into()]).expect("record");
             let map = super::choices_load().expect("load");
-            assert_eq!(map.get("sl").expect("sl").get("app:slack").expect("row").count, 1);
-            assert_eq!(map.get("s").expect("s").get("app:slack").expect("prefix").count, 0);
+            assert_eq!(
+                map.get("sl")
+                    .expect("sl")
+                    .get("app:slack")
+                    .expect("row")
+                    .count,
+                1
+            );
+            assert_eq!(
+                map.get("s")
+                    .expect("s")
+                    .get("app:slack")
+                    .expect("prefix")
+                    .count,
+                0
+            );
             super::choices_clear().expect("clear");
             assert!(super::choices_load().expect("empty").is_empty());
         });

@@ -1122,7 +1122,10 @@ mod tests {
         assert!(q.extensions.iter().any(|ext| ext == "md"));
         assert!(q.extensions.iter().any(|ext| ext == "markdown"));
         assert!(parse_query("video").is_type_search());
-        assert_eq!(parse_query("type:video").type_label.as_deref(), Some("video"));
+        assert_eq!(
+            parse_query("type:video").type_label.as_deref(),
+            Some("video")
+        );
     }
 
     #[test]
