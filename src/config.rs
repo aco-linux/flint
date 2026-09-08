@@ -50,6 +50,10 @@ pub struct General {
     /// user's privileges and no signature. Off until the user opts in.
     #[serde(default)]
     pub allow_extensions: bool,
+    /// Rank and empty-state use the Hyprland focused window (class/title) captured
+    /// when Flint opens. Off disables that and the 10s clipboard chips.
+    #[serde(default = "default_true")]
+    pub context_aware: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +123,10 @@ pub struct Store {
     pub script_commands_dir: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for General {
     fn default() -> Self {
         Self {
@@ -128,6 +136,7 @@ impl Default for General {
             allow_script_commands: false,
             allow_mcp: false,
             allow_extensions: false,
+            context_aware: true,
         }
     }
 }
@@ -366,6 +375,15 @@ impl Settings {
                     "MCP tool listing ON — Flint will spawn configured servers"
                 } else {
                     "MCP tool listing off"
+                }
+                .into()
+            }
+            "set:context" => {
+                self.general.context_aware = !self.general.context_aware;
+                if self.general.context_aware {
+                    "Context-aware search ON — focused window class ranks matching items"
+                } else {
+                    "Context-aware search off — no window class or 10s clipboard chips"
                 }
                 .into()
             }
@@ -689,11 +707,18 @@ mod tests {
         assert!(!s.general.allow_script_commands);
         assert!(!s.general.allow_mcp);
         assert!(!s.general.allow_extensions);
+        assert!(s.general.context_aware);
         assert_eq!(s.voice.engine, "in-app");
         assert!(s.files.include_in_root);
         assert!(s.files.system_wide);
         assert!(s.files.max_results >= 80);
         assert!(s.general.max_results > 12);
+    }
+
+    #[test]
+    fn missing_context_aware_defaults_on() {
+        let s: Settings = serde_json::from_str(r#"{"general":{"autostart":true}}"#).unwrap();
+        assert!(s.general.context_aware);
     }
 
     #[test]

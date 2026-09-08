@@ -280,6 +280,12 @@ pub(crate) fn target_client<'a>(
     ranked.into_iter().next()
 }
 
+/// Class and title of the window that had focus before Flint (skip the launcher).
+pub fn focused_window() -> Option<(String, String)> {
+    let clients = clients();
+    target_client(&clients, None).map(|c| (c.class.clone(), c.title.clone()))
+}
+
 pub fn resize_launcher(width: i32, height: i32) {
     let width = width.max(320);
     let height = height.max(240);

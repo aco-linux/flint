@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — search context (Wave C)
+
+- At show-time (before Flint is presented) the focused Hyprland window’s class and title are captured into `Context`. Root ranking adds +15k when a layout, quicklink, or snippet’s optional `app` field matches that class. Capture skips the launcher so Flint never records itself.
+- Learned choices look up `(query, class)` in `choice_context`, then the global `(query, "")` row in `choices`. **Clear learned choices** drops both. `schema_version` stays `"1"`.
+- Empty query, clipboard or primary selection younger than 10 seconds: Paste / Search the web / Ask AI, plus Open URL and Calc when they apply. An editor path in the window title (`foo.rs — Code`) seeds a recent-file row when that path exists.
+- Toggle **Context-aware search** in Settings (and `set:context`). Default on. Off stores no window class and hides the 10s clipboard chips. Never AT-SPI. See [PRIVACY.md](PRIVACY.md).
+
 ## Unreleased — keystroke pipeline (Wave B)
 
 - Root search no longer reads SQLite on every keystroke. Aliases, favorites, quicklinks, and custom layouts live in `Catalog` (`RefCell`) and load with `Catalog::load` / `reload_installed`. Action-panel alias, pin, quicklink, and layout mutators invalidate that cache.

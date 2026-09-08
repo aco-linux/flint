@@ -567,6 +567,7 @@ impl Shell {
     }
 
     pub fn open(&self, mode: Mode) {
+        self.capture_context();
         self.state.borrow_mut().visible = true;
         self.show_launcher();
         self.enter_mode(mode);
@@ -575,6 +576,7 @@ impl Shell {
     }
 
     fn restore(&self) {
+        self.capture_context();
         self.state.borrow_mut().visible = true;
         self.show_launcher();
         self.entry.grab_focus();
@@ -583,6 +585,23 @@ impl Shell {
         } else {
             self.refresh();
         }
+    }
+
+    fn capture_context(&self) {
+        let aware = self
+            .state
+            .borrow()
+            .catalog
+            .settings
+            .borrow()
+            .general
+            .context_aware;
+        let ctx = if aware {
+            crate::context::Context::capture()
+        } else {
+            crate::context::Context::default()
+        };
+        self.state.borrow().catalog.set_context(ctx);
     }
 
     fn show_launcher(&self) {

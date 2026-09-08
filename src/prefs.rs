@@ -357,6 +357,18 @@ fn page_general(settings: &Rc<RefCell<Settings>>) -> Box {
             }
         },
     ));
+    card.append(&switch_row(
+        "Context-aware search",
+        "Use the focused Hyprland window (class and title) when Flint opens. Empty query also offers Paste / Search / Ask on clipboard copied in the last 10 seconds. Off stores nothing about the focused app.",
+        settings.borrow().general.context_aware,
+        {
+            let s = s.clone();
+            move |on| {
+                s.borrow_mut().general.context_aware = on;
+                s.borrow().save();
+            }
+        },
+    ));
     page.append(&card);
     page
 }

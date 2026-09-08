@@ -11,6 +11,7 @@ mod clipboard;
 mod config;
 mod connectors;
 mod content;
+mod context;
 mod db;
 mod desktop;
 mod emoji;

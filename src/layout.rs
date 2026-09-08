@@ -12,6 +12,9 @@ pub struct NamedLayout {
     pub name: String,
     #[serde(default)]
     pub slots: Vec<Slot>,
+    /// Optional Hyprland class this layout is for; empty means any app.
+    #[serde(default)]
+    pub app: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,7 +252,11 @@ pub fn save_current(name: &str) -> Option<NamedLayout> {
     let clients = hypr::clients();
     let monitors = hypr::monitors();
     let slots = capture_slots(&clients, &monitors);
-    let layout = NamedLayout { name, slots };
+    let layout = NamedLayout {
+        name,
+        slots,
+        app: String::new(),
+    };
     upsert(layout.clone());
     Some(layout)
 }
@@ -726,6 +733,7 @@ mod tests {
                     h: 1.0,
                 },
             ],
+            app: String::new(),
         }];
         let steps = plan("code", None, &clients, &monitors, &layouts);
         let addrs: Vec<&str> = steps.iter().filter_map(step_address).collect();

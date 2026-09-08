@@ -139,8 +139,11 @@ pub struct Catalog {
     windows: RefCell<Vec<Item>>,
     matcher: RefCell<Matcher>,
     nucleo_buf: RefCell<Vec<char>>,
+    context: RefCell<crate::context::Context>,
+    app_tags: RefCell<HashMap<String, String>>,
     pub(crate) usage: usage::Map,
     pub(crate) choices: choices::Map,
+    pub(crate) choice_ctx: choices::ContextMap,
     pub(crate) clips: Rc<RefCell<ClipStore>>,
     pub settings: Rc<RefCell<Settings>>,
 }
@@ -216,6 +219,7 @@ impl Catalog {
                 IndexEntry::from_item(&item, aliases.get(&item.id)),
             );
         }
+        let app_tags = build_app_tags(&quicklinks);
         Self {
             apps,
             commands,
@@ -230,8 +234,11 @@ impl Catalog {
             windows: RefCell::new(windows),
             matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
             nucleo_buf: RefCell::new(Vec::new()),
+            context: RefCell::new(crate::context::Context::default()),
+            app_tags: RefCell::new(app_tags),
             usage: usage::load(),
             choices: choices::load(),
+            choice_ctx: choices::load_context(),
             clips,
             settings,
         }
@@ -308,6 +315,7 @@ impl Catalog {
             }
         }
         *self.quicklinks.borrow_mut() = links;
+        self.refresh_app_tags();
     }
 
     pub fn reload_layouts(&self) {
@@ -332,6 +340,27 @@ impl Catalog {
             }
         }
         *self.custom_layouts.borrow_mut() = next;
+        self.refresh_app_tags();
+    }
+
+    pub fn set_context(&self, ctx: crate::context::Context) {
+        *self.context.borrow_mut() = ctx;
+    }
+
+    fn context_aware(&self) -> bool {
+        self.settings.borrow().general.context_aware
+    }
+
+    fn context_class(&self) -> String {
+        if self.context_aware() {
+            self.context.borrow().class.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    fn refresh_app_tags(&self) {
+        *self.app_tags.borrow_mut() = build_app_tags(&self.quicklinks.borrow());
     }
 
     fn reindex_id(&self, id: &str) {
@@ -540,6 +569,8 @@ impl Catalog {
             .collect();
         let custom_layouts = self.custom_layouts.borrow();
         let index = self.index.borrow();
+        let app_tags = self.app_tags.borrow();
+        let ctx_class = self.context_class();
         let q_lc = query.to_lowercase();
 
         let mut pool: Vec<&Item> = Vec::new();
@@ -561,6 +592,10 @@ impl Catalog {
                     &owned
                 }
             };
+            let app_bonus = crate::context::app_bonus(
+                app_tags.get(&item.id).map(String::as_str).unwrap_or(""),
+                &ctx_class,
+            );
             let input = RankInput {
                 query,
                 q_lc: &q_lc,
@@ -572,11 +607,11 @@ impl Catalog {
                 favorite: favs.is_pinned(&item.id),
             };
             if let Some(score) = rank(&mut matcher, &pattern, &mut nucleo_buf, input) {
-                ranked.push((score, item));
+                ranked.push((score.saturating_add(app_bonus), item));
             } else if let Some(score) =
                 rank_expansions(&mut matcher, &mut nucleo_buf, &meaning.expansions, input)
             {
-                ranked.push((score, item));
+                ranked.push((score.saturating_add(app_bonus), item));
             }
         }
 
@@ -666,14 +701,22 @@ impl Catalog {
 
     pub(crate) fn learn_choice(&mut self, query: &str, id: &str) {
         choices::bump(&mut self.choices, query, id);
+        let class = self.context_class();
+        if !class.is_empty() {
+            choices::bump_class(&mut self.choice_ctx, &class, query, id);
+        }
     }
 
     pub(crate) fn clear_choices(&mut self) {
         choices::clear(&mut self.choices);
+        choices::clear_context(&mut self.choice_ctx);
     }
 
     fn apply_learned_choice(&self, query: &str, now: u64, results: &mut Vec<Scored>) {
-        let Some((id, rec)) = choices::best(&self.choices, query) else {
+        let class = self.context_class();
+        let hit = choices::best_class(&self.choice_ctx, &class, query)
+            .or_else(|| choices::best(&self.choices, query));
+        let Some((id, rec)) = hit else {
             return;
         };
         let id = id.to_string();
@@ -749,7 +792,7 @@ impl Catalog {
     }
 
     fn score_pool(&self, items: &[Item], query: &str, limit: usize) -> Vec<Scored> {
-        score_pool(
+        let mut rows = score_pool(
             items,
             query,
             &self.usage,
@@ -759,7 +802,18 @@ impl Catalog {
             &self.index.borrow(),
             &self.aliases.borrow(),
             &self.favorites.borrow(),
-        )
+        );
+        if self.context_aware() {
+            let class = self.context_class();
+            let tags = self.app_tags.borrow();
+            for row in &mut rows {
+                row.score = row.score.saturating_add(crate::context::app_bonus(
+                    tags.get(&row.item.id).map(String::as_str).unwrap_or(""),
+                    &class,
+                ));
+            }
+        }
+        rows
     }
 
     fn search_clipboard(&self, query: &str) -> Vec<Scored> {
@@ -1024,6 +1078,12 @@ impl Catalog {
                 "Allow MCP tool listing",
                 s.general.allow_mcp,
                 "mcp npx spawn tools",
+            ),
+            setting_toggle(
+                "context",
+                "Context-aware search",
+                s.general.context_aware,
+                "hyprland focused window class clipboard",
             ),
             setting_toggle(
                 "files-root",
@@ -1523,10 +1583,36 @@ impl Catalog {
 
     fn empty_state(&self) -> Vec<Scored> {
         let mut out = Vec::new();
+        let now = usage::now_secs();
         if let Some(item) = crate::focus::live_item() {
             out.push(Scored::new(item, 40_000));
         }
-        let now = usage::now_secs();
+        if self.context_aware() {
+            let ctx = self.context.borrow().clone();
+            if ctx.is_fresh(now) {
+                let mut text = None;
+                if let Some(entry) = self.clips.borrow().entries.first()
+                    && now.saturating_sub(entry.copied_at) < crate::context::FRESH_SECS
+                    && !clipboard::looks_secret(&entry.text)
+                {
+                    text = Some(entry.text.clone());
+                }
+                if text.is_none() {
+                    text = ctx.primary.clone();
+                }
+                if let Some(text) = text {
+                    for (i, item) in crate::context::fresh_clipboard_items(&text)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        out.push(Scored::new(item, 38_000u32.saturating_sub(i as u32 * 10)));
+                    }
+                }
+                for path in crate::context::editor_paths(&ctx.title) {
+                    out.push(Scored::new(files::file_item(path, None), 36_000));
+                }
+            }
+        }
         let favs = self.favorites.borrow();
         for id in favs.all() {
             if let Some(item) = self.lookup_item(id) {
@@ -2031,6 +2117,26 @@ fn finish_limited(mut results: Vec<Scored>, limit: usize, usage: &usage::Map) ->
     results.dedup_by(|a, b| a.item.id == b.item.id);
     results.truncate(limit);
     results
+}
+
+fn build_app_tags(links: &[crate::quicklinks::Link]) -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    for link in links {
+        if !link.app.is_empty() {
+            tags.insert(format!("link:{}", link.name), link.app.clone());
+        }
+    }
+    for layout in crate::layout::load() {
+        if !layout.app.is_empty() {
+            tags.insert(format!("cmd:layout-{}", layout.name), layout.app);
+        }
+    }
+    for snip in snippets::load() {
+        if !snip.app.is_empty() {
+            tags.insert(format!("snip:{}", snip.keyword), snip.app);
+        }
+    }
+    tags
 }
 
 /// Insert live rows without reordering already-visible results.
@@ -3083,8 +3189,11 @@ mod tests {
                 nucleo_matcher::Config::DEFAULT,
             )),
             nucleo_buf: std::cell::RefCell::new(Vec::new()),
+            context: std::cell::RefCell::new(crate::context::Context::default()),
+            app_tags: std::cell::RefCell::new(std::collections::HashMap::new()),
             usage: crate::usage::Map::new(),
             choices: crate::choices::Map::new(),
+            choice_ctx: crate::choices::ContextMap::new(),
             clips: std::rc::Rc::new(std::cell::RefCell::new(crate::clipboard::Store::default())),
             settings: std::rc::Rc::new(std::cell::RefCell::new(crate::config::Settings::default())),
         }
@@ -3404,6 +3513,159 @@ mod tests {
         super::insert_live_stable(&mut results, incoming, "live:weather");
         super::pin_weather_row_zero(&mut results);
         assert_eq!(results[0].item.id, "live:weather");
+    }
+
+    #[test]
+    fn empty_query_offers_fresh_clipboard_actions() {
+        let catalog = test_catalog(Vec::new());
+        catalog.settings.borrow_mut().general.context_aware = true;
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "firefox".into(),
+            title: String::new(),
+            primary: Some("hello world".into()),
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("");
+        let ids: Vec<&str> = rows.iter().map(|r| r.item.id.as_str()).collect();
+        assert!(ids.contains(&"ctx:paste"), "paste chip: {ids:?}");
+        assert!(
+            ids.iter().any(|id| id.starts_with("ctx:web:")),
+            "web chip: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.starts_with("ctx:ask:")),
+            "ask chip: {ids:?}"
+        );
+
+        catalog.settings.borrow_mut().general.context_aware = false;
+        let rows = catalog.search_root("");
+        let ids: Vec<&str> = rows.iter().map(|r| r.item.id.as_str()).collect();
+        assert!(
+            !ids.iter().any(|id| id.starts_with("ctx:")),
+            "context off hides clipboard chips: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn empty_query_prefers_fresh_clipboard_over_primary() {
+        let catalog = test_catalog(Vec::new());
+        catalog
+            .clips
+            .borrow_mut()
+            .entries
+            .push(crate::clipboard::Entry {
+                id: "c1".into(),
+                text: "from clip".into(),
+                copied_at: crate::usage::now_secs(),
+                pinned: false,
+                label: String::new(),
+            });
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "code".into(),
+            title: String::new(),
+            primary: Some("from primary".into()),
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("");
+        let paste = rows
+            .iter()
+            .find(|r| r.item.id == "ctx:paste")
+            .expect("paste");
+        assert_eq!(paste.item.subtitle, "from clip");
+    }
+
+    #[test]
+    fn empty_query_seeds_editor_path_from_title() {
+        let dir = std::env::temp_dir().join(format!(
+            "flint-ctx-cat-{}-{}",
+            std::process::id(),
+            crate::usage::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.rs");
+        std::fs::write(&file, b"fn").unwrap();
+        let catalog = test_catalog(Vec::new());
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "code".into(),
+            title: format!("{} — Visual Studio Code", file.display()),
+            primary: None,
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("");
+        let _ = std::fs::remove_dir_all(&dir);
+        let want = format!("file:{}", file.display());
+        assert!(
+            rows.iter().any(|r| r.item.id == want),
+            "editor file missing from {ids:?}",
+            ids = rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn context_class_choice_beats_global() {
+        let firefox = test_item("app:firefox", "Firefox", "browser");
+        let code = test_item("app:code", "Code", "editor");
+        let mut catalog = test_catalog(vec![firefox, code]);
+        let rec = crate::usage::Record {
+            count: 2,
+            last: crate::usage::now_secs() - 60,
+        };
+        catalog
+            .choices
+            .entry("ed".into())
+            .or_default()
+            .insert("app:firefox".into(), rec);
+        catalog
+            .choice_ctx
+            .entry("kitty".into())
+            .or_default()
+            .entry("ed".into())
+            .or_default()
+            .insert("app:code".into(), rec);
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "kitty".into(),
+            title: String::new(),
+            primary: None,
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("ed");
+        assert_eq!(
+            rows[0].item.id,
+            "app:code",
+            "(query, class) must beat global (query, \"\"): {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
+
+        catalog.settings.borrow_mut().general.context_aware = false;
+        let rows = catalog.search_root("ed");
+        assert_eq!(
+            rows[0].item.id, "app:firefox",
+            "context off falls back to global choice"
+        );
+    }
+
+    #[test]
+    fn matching_app_tag_boosts_item() {
+        let a = test_item("app:alpha", "Alpha Helper", "");
+        let b = test_item("app:beta", "Alpha Tools", "");
+        let catalog = test_catalog(vec![a, b]);
+        catalog
+            .app_tags
+            .borrow_mut()
+            .insert("app:beta".into(), "firefox".into());
+        *catalog.context.borrow_mut() = crate::context::Context {
+            class: "Firefox".into(),
+            title: String::new(),
+            primary: None,
+            captured_at: crate::usage::now_secs(),
+        };
+        let rows = catalog.search_root("alpha");
+        assert_eq!(
+            rows[0].item.id,
+            "app:beta",
+            "app tag matching focused class should win: {:?}",
+            rows.iter().map(|r| r.item.id.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

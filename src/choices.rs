@@ -11,6 +11,8 @@ pub const PREFIX_CHOICE_BONUS: u32 = 20_000;
 const PREFIX_CAP: usize = 12;
 
 pub type Map = HashMap<String, HashMap<String, Record>>;
+/// class → query → item_id → record
+pub type ContextMap = HashMap<String, Map>;
 
 pub fn normalize(query: &str) -> String {
     query
@@ -22,6 +24,10 @@ pub fn normalize(query: &str) -> String {
 
 pub fn load() -> Map {
     db::choices_load().unwrap_or_default()
+}
+
+pub fn load_context() -> ContextMap {
+    db::choice_context_load().unwrap_or_default()
 }
 
 pub fn bump(map: &mut Map, query: &str, item_id: &str) {
@@ -45,6 +51,29 @@ pub fn clear(map: &mut Map) {
     let _ = db::choices_clear();
 }
 
+pub fn bump_class(map: &mut ContextMap, class: &str, query: &str, item_id: &str) {
+    let class = class.trim();
+    if class.is_empty() || item_id.is_empty() {
+        return;
+    }
+    let q = normalize(query);
+    if q.is_empty() {
+        return;
+    }
+    let now = usage::now_secs();
+    let row = map.entry(class.to_string()).or_default();
+    remember(row, &q, item_id, now, true);
+    let prefs = prefixes(&q);
+    for prefix in &prefs {
+        remember(row, prefix, item_id, now, false);
+    }
+    let _ = db::choice_context_record(class, &q, item_id, now, &prefs);
+}
+
+pub fn clear_context(map: &mut ContextMap) {
+    map.clear();
+}
+
 pub fn best<'a>(map: &'a Map, query: &str) -> Option<(&'a str, Record)> {
     let q = normalize(query);
     let row = map.get(&q)?;
@@ -56,6 +85,14 @@ pub fn best<'a>(map: &'a Map, query: &str) -> Option<(&'a str, Record)> {
                 .then_with(|| a.0.cmp(b.0))
         })
         .map(|(id, rec)| (id.as_str(), *rec))
+}
+
+pub fn best_class<'a>(map: &'a ContextMap, class: &str, query: &str) -> Option<(&'a str, Record)> {
+    let class = class.trim();
+    if class.is_empty() {
+        return None;
+    }
+    best(map.get(class)?, query)
 }
 
 /// `count == 0` means this query was only learned as a prefix of a longer one.
@@ -129,6 +166,24 @@ mod tests {
         assert_eq!(got.first().map(String::as_str), Some("a"));
         assert_eq!(got.last().map(String::as_str), Some("abcdefghijkl"));
         assert!(!got.iter().any(|p| p == long));
+    }
+
+    #[test]
+    fn context_class_lookup_then_global() {
+        use super::{ContextMap, Map, best, best_class, remember};
+
+        let mut ctx = ContextMap::new();
+        let mut global = Map::new();
+        let now = 1_800_000_000;
+        remember(&mut global, "fox", "app:firefox", now, true);
+        let row = ctx.entry("kitty".into()).or_default();
+        remember(row, "fox", "app:code", now, true);
+        assert_eq!(
+            best_class(&ctx, "kitty", "fox").map(|(id, _)| id),
+            Some("app:code")
+        );
+        assert!(best_class(&ctx, "other", "fox").is_none());
+        assert_eq!(best(&global, "fox").map(|(id, _)| id), Some("app:firefox"));
     }
 
     #[test]

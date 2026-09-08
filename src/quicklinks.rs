@@ -16,6 +16,9 @@ pub struct Link {
     pub target: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Optional Hyprland class this link is for; empty means any app.
+    #[serde(default)]
+    pub app: String,
 }
 
 impl Link {
@@ -113,6 +116,7 @@ pub fn create(name: &str, target: &str) -> Result<Link, &'static str> {
         title: title_from_name(name),
         target: target.to_string(),
         tags: Vec::new(),
+        app: String::new(),
     })
 }
 
@@ -183,18 +187,21 @@ pub(crate) fn default_links() -> Vec<Link> {
             title: "Downloads".into(),
             target: "~/Downloads".into(),
             tags: vec!["folder".into()],
+            app: String::new(),
         },
         Link {
             name: "docs".into(),
             title: "Documents".into(),
             target: "~/Documents".into(),
             tags: vec!["folder".into()],
+            app: String::new(),
         },
         Link {
             name: "gh".into(),
             title: "GitHub".into(),
             target: "https://github.com/search?q={argument}".into(),
             tags: vec!["web".into()],
+            app: String::new(),
         },
     ]
 }
@@ -214,6 +221,7 @@ mod tests {
             title: name.into(),
             target: target.into(),
             tags: Vec::new(),
+            app: String::new(),
         }
     }
 
