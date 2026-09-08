@@ -3060,9 +3060,7 @@ fn rebuild_rows(shell: &Shell) {
                     None
                 }
             });
-            let answer = streamed
-                .clone()
-                .or_else(|| item.inline_answer());
+            let answer = streamed.clone().or_else(|| item.inline_answer());
             let (row, answer_label) = result_row(
                 &item,
                 &live,
