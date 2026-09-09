@@ -471,17 +471,43 @@ mod tests {
         assert!(store.entries.is_empty());
     }
 
+    /// Secret-like fixtures assembled at runtime so scanners never see a full token.
+    fn fake_openai_key() -> String {
+        ["sk-", "abcdefghijklmnopqrstuvwxyz", "0123"].concat()
+    }
+
+    fn fake_github_pat() -> String {
+        ["ghp_", "abcdefghijklmnopqrstuvwxyz", "ABCD"].concat()
+    }
+
+    fn fake_jwt() -> String {
+        [
+            "eyJ",
+            "hbGciOi",
+            "JIUzI1NiIsInR5cCI6IkpXVCJ9",
+            ".",
+            "aaaa",
+            ".",
+            "bbbb",
+        ]
+        .concat()
+    }
+
+    fn fake_jwt_header() -> String {
+        ["eyJ", "hbGciOi", "JIUzI1NiJ9"].concat()
+    }
+
     #[test]
     fn ingest_skips_secrets() {
         let mut store = Store::default();
-        assert!(!store.ingest("sk-abcdefghijklmnopqrstuvwxyz0123".into()));
-        assert!(!store.ingest("ghp_abcdefghijklmnopqrstuvwxyzABCD".into()));
+        assert!(!store.ingest(fake_openai_key()));
+        assert!(!store.ingest(fake_github_pat()));
         assert!(!store.ingest("Authorization: Bearer abcdefghijklmnopqrstuvwxyz".into()));
         assert!(store.ingest("please ask-me later".into()));
         assert!(store.ingest("buy milk".into()));
-        assert!(!store.ingest("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaa.bbbb".into()));
+        assert!(!store.ingest(format!("Bearer {}", fake_jwt())));
         assert!(!store.ingest("password: hunter2hunter2hunter2".into()));
-        assert!(!store.ingest(r#"{"token":"eyJhbGciOiJIUzI1NiJ9"}"#.into()));
+        assert!(!store.ingest(format!(r#"{{"token":"{}"}}"#, fake_jwt_header())));
         assert_eq!(store.entries.len(), 2);
     }
 
@@ -519,7 +545,7 @@ mod tests {
         let mut store = Store::default();
         assert!(store.ingest("safe text".into()));
         let id = store.entries[0].id.clone();
-        assert!(!store.edit(&id, "sk-abcdefghijklmnopqrstuvwxyz0123"));
+        assert!(!store.edit(&id, &fake_openai_key()));
         assert_eq!(store.entries[0].text, "safe text");
         assert!(store.edit(&id, "updated body"));
         assert_eq!(store.entries[0].text, "updated body");
