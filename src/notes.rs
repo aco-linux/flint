@@ -85,12 +85,16 @@ pub fn from_text(text: &str) -> Note {
 
 fn from_parts(title: &str, body: &str) -> Note {
     let now = now();
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let title = {
         let t = title.trim();
         if t.is_empty() { "Untitled" } else { t }
     };
     let note = Note {
-        id: format!("{now:x}"),
+        id: format!("{ns:x}"),
         title: title.to_string(),
         body: body.to_string(),
         pinned: false,
@@ -147,6 +151,17 @@ mod tests {
                 crate::notes::get(&note.id).expect("saved").body,
                 "Ship it\nMore body"
             );
+        });
+    }
+
+    #[test]
+    fn from_text_same_second_produces_distinct_ids() {
+        crate::db::with_temp(|dir| {
+            crate::db::open_path(&dir.join("flint.db")).expect("open");
+            let a = super::from_text("First note");
+            let b = super::from_text("Second note");
+            assert_ne!(a.id, b.id);
+            assert_eq!(crate::db::notes_load().expect("notes").len(), 2);
         });
     }
 }
