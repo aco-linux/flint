@@ -1313,7 +1313,7 @@ mod tests {
             reset();
             let secret = ["sk-", "abcdefghijklmnopqrstuvwxyz", "1234"].concat();
             // looks_secret is used by attach_clipboard; simulate the skip path.
-            assert!(crate::clipboard::looks_secret(secret));
+            assert!(crate::clipboard::looks_secret(&secret));
             attach(Attachment::Text {
                 label: "Clipboard".into(),
                 body: "hello from clip".into(),
